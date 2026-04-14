@@ -3,13 +3,16 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import App from './App.jsx';
 import { authStorageKey } from './context/AuthContext.jsx';
+import { API_BASE_URL } from './lib/api.js';
 
 const originalFetch = window.fetch.bind(window);
+
 window.fetch = async (input, init = {}) => {
   const url = typeof input === 'string' ? input : input?.url || '';
-  const isLocalApi = url.startsWith('http://localhost:3000/api/');
+  const managedApiPrefix = `${API_BASE_URL.replace(/\/+$/, '')}/`;
+  const isManagedApi = url.startsWith(managedApiPrefix);
 
-  if (!isLocalApi) {
+  if (!isManagedApi) {
     return originalFetch(input, init);
   }
 

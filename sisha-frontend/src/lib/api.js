@@ -1,4 +1,6 @@
-export const API_BASE_URL = 'http://localhost:3000/api';
+const rawBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+
+export const API_BASE_URL = rawBaseUrl.replace(/\/+$/, '');
 
 export function buildAuthHeaders(token, extraHeaders = {}) {
   const headers = { ...extraHeaders };
