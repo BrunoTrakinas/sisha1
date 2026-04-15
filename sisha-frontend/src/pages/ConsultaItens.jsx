@@ -501,7 +501,7 @@ export default function ConsultaItens() {
                                     <span className="text-xs uppercase tracking-[0.2em] text-slate-400 font-black">Planilha</span>
                                     <input
                                         type="file"
-                                        accept=".xlsx,.xls,.csv"
+                                        accept=".xlsx,.xls,.csv,.ods"
                                         onChange={(e) => { setArquivoLote(e.target.files?.[0] || null); setLotePreview(null); setLoteErro(''); }}
                                         className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 file:text-slate-900"
                                     />
@@ -531,7 +531,7 @@ export default function ConsultaItens() {
 
                             {lotePreview ? (
                                 <>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                                             <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Linhas base</p>
                                             <p className="text-2xl font-black text-slate-900 mt-2">{lotePreview.summary.linhas_base}</p>
@@ -548,12 +548,36 @@ export default function ConsultaItens() {
                                             <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Comprar</p>
                                             <p className="text-2xl font-black text-slate-900 mt-2">{lotePreview.summary.comprar_qtd || 0}</p>
                                         </div>
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                                            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Valor Comprar</p>
+                                            <p className="text-2xl font-black text-slate-900 mt-2">£ {(Number(lotePreview.summary.comprar_valor_gbp) || 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })}</p>
+                                        </div>
                                     </div>
 
                                     <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                                        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-black text-slate-900 uppercase text-sm">
-                                            Resumo da cobertura
+                                        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-black text-slate-900 uppercase text-sm">Contrato da planilha</div>
+                                        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                            <div>
+                                                <p className="font-black text-slate-900">Obrigatória</p>
+                                                <p className="font-bold text-slate-600 mt-1">{(lotePreview.columns?.obrigatorias || []).join(', ') || 'pn'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="font-black text-slate-900">Opcional</p>
+                                                <p className="font-bold text-slate-600 mt-1">{(lotePreview.columns?.opcionais || []).join(', ') || 'quantidade'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="font-black text-slate-900">Mais colunas</p>
+                                                <p className="font-bold text-slate-600 mt-1">{lotePreview.columns?.aceita_mais_colunas ? 'Permitidas' : 'Não permitidas'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="font-black text-slate-900">Ordem</p>
+                                                <p className="font-bold text-slate-600 mt-1">{lotePreview.columns?.ordem_importa ? 'Importa' : 'Não importa'}</p>
+                                            </div>
                                         </div>
+                                    </div>
+
+                                    <div className="rounded-2xl border border-slate-200 overflow-hidden">
+                                        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-black text-slate-900 uppercase text-sm">Resumo da cobertura</div>
                                         <div className="overflow-auto">
                                             <table className="min-w-full text-sm">
                                                 <thead className="bg-slate-100 text-slate-700 uppercase text-[11px] tracking-wider">
@@ -564,6 +588,7 @@ export default function ConsultaItens() {
                                                 </thead>
                                                 <tbody>
                                                     {[
+                                                        ['00 • Entrada', lotePreview.input?.length || 0],
                                                         ['01 • PPU', lotePreview.sections.ppu?.length || 0],
                                                         ['02 • CEIMSPA', lotePreview.sections.ceimspa?.length || 0],
                                                         ['03 • ODA', lotePreview.sections.oda?.length || 0],
@@ -580,6 +605,78 @@ export default function ConsultaItens() {
                                             </table>
                                         </div>
                                     </div>
+
+                                    {[
+                                      ['Entrada da planilha', lotePreview.input || [], 'input'],
+                                      ['01 • PPU', lotePreview.sections.ppu || [], 'coverage'],
+                                      ['02 • CEIMSPA', lotePreview.sections.ceimspa || [], 'coverage'],
+                                      ['03 • ODA', lotePreview.sections.oda || [], 'coverage'],
+                                      ['04 • PRICE LIST', lotePreview.sections.pricelist || [], 'value'],
+                                      ['05 • ODC', lotePreview.sections.odc || [], 'coverage'],
+                                      ['06 • COMPRAR', lotePreview.sections.comprar || [], 'value'],
+                                    ].map(([title, rows, type]) => (
+                                      <div key={title} className="rounded-2xl border border-slate-200 overflow-hidden">
+                                        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-black text-slate-900 uppercase text-sm">{title} • {rows.length} linha(s)</div>
+                                        <div className="overflow-auto max-h-[22rem]">
+                                          {type === 'input' ? (
+                                            <table className="min-w-full text-sm">
+                                              <thead className="bg-slate-100 text-slate-700 uppercase text-[11px] tracking-wider sticky top-0">
+                                                <tr>
+                                                  <th className="p-3 text-left">PN</th>
+                                                  <th className="p-3 text-left">NSN</th>
+                                                  <th className="p-3 text-left">Nomenclatura</th>
+                                                  <th className="p-3 text-left">Quantidade</th>
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {rows.length === 0 ? (
+                                                  <tr><td colSpan={4} className="p-6 text-center font-bold text-slate-500">Nenhuma linha nesta etapa.</td></tr>
+                                                ) : rows.map((row, idx) => (
+                                                  <tr key={`${title}-${row.pn}-${idx}`} className="border-t border-slate-100 align-top">
+                                                    <td className="p-3 font-black text-slate-900">{row.pn}</td>
+                                                    <td className="p-3 text-slate-600 font-semibold">{row.nsn || '—'}</td>
+                                                    <td className="p-3 text-slate-800 font-bold">{row.nomenclatura || '—'}</td>
+                                                    <td className="p-3 font-black text-slate-900">{row.quantidade_total}</td>
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          ) : (
+                                            <table className="min-w-full text-sm">
+                                              <thead className="bg-slate-100 text-slate-700 uppercase text-[11px] tracking-wider sticky top-0">
+                                                <tr>
+                                                  <th className="p-3 text-left">PN</th>
+                                                  <th className="p-3 text-left">Nomenclatura</th>
+                                                  <th className="p-3 text-left">Necessidade</th>
+                                                  {type === 'coverage' ? <th className="p-3 text-left">Cobertura</th> : null}
+                                                  <th className="p-3 text-left">Saldo</th>
+                                                  <th className="p-3 text-left">Referência</th>
+                                                  {type === 'value' ? <th className="p-3 text-left">GBP</th> : null}
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {rows.length === 0 ? (
+                                                  <tr><td colSpan={type === 'coverage' ? 6 : 7} className="p-6 text-center font-bold text-slate-500">Nenhuma linha nesta etapa.</td></tr>
+                                                ) : rows.map((row, idx) => (
+                                                  <tr key={`${title}-${row.pn}-${idx}`} className="border-t border-slate-100 align-top">
+                                                    <td className="p-3 font-black text-slate-900">{row.pn}</td>
+                                                    <td className="p-3">
+                                                      <div className="font-bold text-slate-900">{row.nomenclatura || '—'}</div>
+                                                      <div className="text-xs text-slate-500 font-semibold">NSN: {row.nsn || '—'}</div>
+                                                    </td>
+                                                    <td className="p-3 font-black text-slate-900">{row.necessidade_total}</td>
+                                                    {type === 'coverage' ? <td className="p-3 font-black text-emerald-700">{row.cobertura_etapa}</td> : null}
+                                                    <td className="p-3 font-black text-amber-700">{row.saldo_apos_etapa}</td>
+                                                    <td className="p-3 text-xs font-semibold text-slate-600 whitespace-pre-wrap">{row.documento_referencia || row.observacao || '—'}</td>
+                                                    {type === 'value' ? <td className="p-3 font-black text-slate-900"><div>{row.valor_unitario_gbp != null ? `£ ${Number(row.valor_unitario_gbp).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` : '—'}</div><div className="text-xs text-slate-500">{row.valor_total_gbp != null ? `£ ${Number(row.valor_total_gbp).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` : '—'}</div></td> : null}
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ))}
                                 </>
                             ) : null}
                         </div>

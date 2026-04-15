@@ -1,13 +1,18 @@
 const express = require('express');
+const multer = require('multer');
 const { requireRole } = require('../middlewares/authMiddleware');
 const controller = require('../controllers/needsController');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage() });
 const adminOnly = requireRole(['admin']);
 
 router.get('/generator/options', controller.getGeneratorOptions);
 router.post('/generator/preview', controller.previewGenerator);
 router.post('/generator/export/xlsx', controller.exportGeneratorXlsx);
+
+router.post('/batch-query/preview', upload.single('file'), controller.previewBatchQuery);
+router.post('/batch-query/export/xlsx', upload.single('file'), controller.exportBatchQueryXlsx);
 
 router.get('/cost/options', controller.getOperationalCostOptions);
 router.post('/cost/preview', controller.previewOperationalCost);

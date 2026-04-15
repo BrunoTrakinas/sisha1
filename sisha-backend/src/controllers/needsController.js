@@ -1361,6 +1361,332 @@ exports.getGeneratorOptions = async (req, res) => {
   }
 };
 
+
+const BATCH_PN_HEADERS = ['pn', 'part_number', 'partnumber', 'part number'];
+const BATCH_QTY_HEADERS = ['quantidade', 'qtd', 'qtde', 'qty', 'quantity'];
+
+function normalizeHeaderName(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parseUploadedBatchWorkbook(file) {
+  if (!file || !file.buffer) {
+    const error = new Error('Envie a planilha da pesquisa em lote.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let workbook;
+  try {
+    workbook = xlsx.read(file.buffer, { type: 'buffer', cellDates: false, dense: false });
+  } catch (_) {
+    const error = new Error('Não foi possível ler a planilha enviada. Use .xlsx, .xls, .csv ou .ods.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    const error = new Error('A planilha enviada não possui abas legíveis.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const worksheet = workbook.Sheets[firstSheetName];
+  const rows = xlsx.utils.sheet_to_json(worksheet, { defval: '', raw: false });
+  if (!rows.length) {
+    const error = new Error('A planilha enviada está vazia.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const firstRow = rows[0] || {};
+  const headerMap = new Map(Object.keys(firstRow).map((key) => [normalizeHeaderName(key), key]));
+  const pnHeader = BATCH_PN_HEADERS.map(normalizeHeaderName).find((key) => headerMap.has(key));
+  const qtyHeader = BATCH_QTY_HEADERS.map(normalizeHeaderName).find((key) => headerMap.has(key));
+
+  if (!pnHeader) {
+    const error = new Error('A planilha precisa ter a coluna obrigatória PN. Colunas extras são permitidas e a ordem não importa.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const pnKey = headerMap.get(pnHeader);
+  const qtyKey = qtyHeader ? headerMap.get(qtyHeader) : null;
+
+  const aggregated = new Map();
+  let linhasLidas = 0;
+
+  rows.forEach((row, index) => {
+    const pnRaw = row[pnKey];
+    const pn = normalizeKey(pnRaw);
+    const qtyRaw = qtyKey ? row[qtyKey] : '';
+    if (!pn && !String(qtyRaw || '').trim()) return;
+    linhasLidas += 1;
+    if (!pn) {
+      const error = new Error(`Linha ${index + 2}: PN vazio.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    let quantidade = 1;
+    if (qtyKey && String(qtyRaw || '').trim() !== '') {
+      const parsed = Number(String(qtyRaw).replace(',', '.'));
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        const error = new Error(`Linha ${index + 2}: quantidade inválida para o PN ${pn}.`);
+        error.statusCode = 400;
+        throw error;
+      }
+      quantidade = parsed;
+    }
+
+    if (!aggregated.has(pn)) {
+      aggregated.set(pn, { pn, quantidade_total: 0 });
+    }
+    aggregated.get(pn).quantidade_total += quantidade;
+  });
+
+  if (!aggregated.size) {
+    const error = new Error('Nenhuma linha válida foi encontrada na planilha.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    workbookName: file.originalname || 'pesquisa_em_lote',
+    sheetName: firstSheetName,
+    linhasLidas,
+    linhasBase: Array.from(aggregated.values()).sort((a, b) => a.pn.localeCompare(b.pn)),
+    columns: {
+      obrigatorias: ['pn'],
+      opcionais: ['quantidade'],
+      aceita_mais_colunas: true,
+      ordem_importa: false,
+      aliases: {
+        pn: BATCH_PN_HEADERS,
+        quantidade: BATCH_QTY_HEADERS,
+      },
+    },
+  };
+}
+
+function buildBatchQueryPreview(parsedFile, context) {
+  const inputRows = (parsedFile?.linhasBase || []).map((row) => {
+    const meta = context.pnMetaMap.get(row.pn) || {};
+    return {
+      pn: row.pn,
+      nsn: meta.nsn || null,
+      nomenclatura: meta.nomenclatura || 'N/A',
+      necessidade_total: Number(toNumber(row.quantidade_total).toFixed(2)),
+      receitas: [],
+      pims: [],
+      origens: [],
+      observacoes: ['Pesquisa em lote'],
+      receitas_texto: '',
+      pims_texto: '',
+      origens_texto: '',
+      observacao: 'Pesquisa em lote',
+    };
+  });
+
+  const sections = { ppu: [], ceimspa: [], oda: [], pricelist: [], odc: [], comprar: [] };
+  let totalPpu = 0;
+  let totalCeimspa = 0;
+  let totalOda = 0;
+  let totalOdc = 0;
+  let totalComprar = 0;
+  let valorComprar = 0;
+
+  inputRows.forEach((row) => {
+    const necessidade = toNumber(row.necessidade_total);
+    let saldo = necessidade;
+
+    const ppuInfo = context.ppuMap.get(row.pn);
+    const coberturaPpu = Math.min(saldo, toNumber(ppuInfo?.quantidade));
+    saldo -= coberturaPpu;
+    totalPpu += coberturaPpu;
+    sections.ppu.push({
+      ...row,
+      cobertura_etapa: Number(coberturaPpu.toFixed(2)),
+      saldo_apos_etapa: Number(saldo.toFixed(2)),
+      documento_referencia: ppuInfo?.locais ? Array.from(ppuInfo.locais).join(' | ') : '',
+      row_tone: coberturaPpu >= necessidade && necessidade > 0 ? 'full' : (coberturaPpu > 0 ? 'partial' : 'none'),
+    });
+
+    const pis = Array.from(context.pnPiMap.get(row.pn) || []);
+    const ceimspaDisponivel = pis.reduce((acc, pi) => acc + toNumber(context.ceimspaMap.get(pi)?.quantidade), 0);
+    const coberturaCeimspa = Math.min(saldo, ceimspaDisponivel);
+    if (coberturaCeimspa > 0) {
+      saldo -= coberturaCeimspa;
+      totalCeimspa += coberturaCeimspa;
+      sections.ceimspa.push({
+        ...row,
+        cobertura_etapa: Number(coberturaCeimspa.toFixed(2)),
+        saldo_apos_etapa: Number(saldo.toFixed(2)),
+        documento_referencia: pis.join(' | '),
+        row_tone: coberturaCeimspa >= Math.max(necessidade - coberturaPpu, 0) && (necessidade - coberturaPpu) > 0 ? 'full' : 'partial',
+      });
+    }
+
+    const odaInfo = context.odaMap.get(row.pn);
+    const coberturaOda = Math.min(saldo, toNumber(odaInfo?.quantidade));
+    if (coberturaOda > 0) {
+      saldo -= coberturaOda;
+      totalOda += coberturaOda;
+      sections.oda.push({
+        ...row,
+        cobertura_etapa: Number(coberturaOda.toFixed(2)),
+        saldo_apos_etapa: Number(saldo.toFixed(2)),
+        documento_referencia: odaInfo?.docs ? Array.from(odaInfo.docs).join(' | ') : '',
+        row_tone: 'partial',
+      });
+    }
+
+    const priceInfo = context.costRefMap.get(row.pn) || context.priceMap.get(row.pn);
+    if (saldo > 0 && priceInfo) {
+      const valorUnit = toNumber(priceInfo.valor_unitario);
+      sections.pricelist.push({
+        ...row,
+        cobertura_etapa: '',
+        saldo_apos_etapa: Number(saldo.toFixed(2)),
+        valor_unitario_gbp: valorUnit,
+        valor_total_gbp: Number((valorUnit * saldo).toFixed(2)),
+        observacao: `Referência de preço (${priceInfo.fonte || 'PRICE LIST'}) — não consome saldo.`,
+        row_tone: 'info',
+      });
+    }
+
+    const odcInfo = context.odcMap.get(row.pn);
+    const coberturaOdc = Math.min(saldo, toNumber(odcInfo?.quantidade));
+    if (coberturaOdc > 0) {
+      saldo -= coberturaOdc;
+      totalOdc += coberturaOdc;
+      sections.odc.push({
+        ...row,
+        cobertura_etapa: Number(coberturaOdc.toFixed(2)),
+        saldo_apos_etapa: Number(saldo.toFixed(2)),
+        documento_referencia: odcInfo?.docs ? Array.from(odcInfo.docs).join(' | ') : '',
+        row_tone: 'partial',
+      });
+    }
+
+    if (saldo > 0) {
+      const valorUnit = toNumber(priceInfo?.valor_unitario);
+      const valorTotal = valorUnit > 0 ? Number((valorUnit * saldo).toFixed(2)) : 0;
+      totalComprar += saldo;
+      valorComprar += valorTotal;
+      sections.comprar.push({
+        ...row,
+        cobertura_etapa: '',
+        saldo_apos_etapa: Number(saldo.toFixed(2)),
+        valor_unitario_gbp: valorUnit || null,
+        valor_total_gbp: valorTotal || null,
+        observacao: priceInfo ? `Comprar — valor estimado por ${priceInfo.fonte || 'PRICE LIST'}.` : 'Comprar — sem referência vigente de valor.',
+        row_tone: 'buy',
+      });
+    }
+  });
+
+  return {
+    arquivo: {
+      nome: parsedFile.workbookName,
+      aba_lida: parsedFile.sheetName,
+      linhas_lidas: parsedFile.linhasLidas,
+      linhas_base: inputRows.length,
+    },
+    columns: parsedFile.columns,
+    input: inputRows.map((row) => ({
+      pn: row.pn,
+      nsn: row.nsn || '',
+      nomenclatura: row.nomenclatura || '',
+      quantidade_total: row.necessidade_total,
+    })),
+    summary: {
+      linhas_base: inputRows.length,
+      necessidade_total: Number(inputRows.reduce((acc, row) => acc + toNumber(row.necessidade_total), 0).toFixed(2)),
+      coberto_ppu: Number(totalPpu.toFixed(2)),
+      coberto_ceimspa: Number(totalCeimspa.toFixed(2)),
+      coberto_oda: Number(totalOda.toFixed(2)),
+      coberto_odc: Number(totalOdc.toFixed(2)),
+      comprar_qtd: Number(totalComprar.toFixed(2)),
+      comprar_valor_gbp: Number(valorComprar.toFixed(2)),
+    },
+    sections,
+  };
+}
+
+function formatBatchInputRows(rows = []) {
+  return rows.map((row) => ({
+    PN: row.pn,
+    NSN: row.nsn || '',
+    Nomenclatura: row.nomenclatura || '',
+    Quantidade_Solicitada: row.quantidade_total,
+  }));
+}
+
+exports.previewBatchQuery = async (req, res) => {
+  try {
+    const context = await loadGeneratorContext();
+    const parsed = parseUploadedBatchWorkbook(req.file);
+    const preview = buildBatchQueryPreview(parsed, context);
+    return res.status(200).json({ status: 'success', data: preview });
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    return res.status(statusCode).json({ status: 'error', message: error?.message || 'Falha ao processar a pesquisa em lote.' });
+  }
+};
+
+exports.exportBatchQueryXlsx = async (req, res) => {
+  try {
+    const context = await loadGeneratorContext();
+    const parsed = parseUploadedBatchWorkbook(req.file);
+    const preview = buildBatchQueryPreview(parsed, context);
+
+    const workbook = xlsx.utils.book_new();
+    const resumoRows = [
+      { Indicador: 'Arquivo', Valor: preview.arquivo.nome },
+      { Indicador: 'Aba lida', Valor: preview.arquivo.aba_lida },
+      { Indicador: 'Linhas lidas', Valor: preview.arquivo.linhas_lidas },
+      { Indicador: 'Linhas base', Valor: preview.summary.linhas_base },
+      { Indicador: 'Necessidade total', Valor: preview.summary.necessidade_total },
+      { Indicador: 'Coberto PPU', Valor: preview.summary.coberto_ppu },
+      { Indicador: 'Coberto CeIMSPA', Valor: preview.summary.coberto_ceimspa },
+      { Indicador: 'Coberto ODA', Valor: preview.summary.coberto_oda },
+      { Indicador: 'Coberto ODC', Valor: preview.summary.coberto_odc },
+      { Indicador: 'Comprar qtd', Valor: preview.summary.comprar_qtd },
+      { Indicador: 'Comprar valor GBP', Valor: preview.summary.comprar_valor_gbp },
+    ];
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(resumoRows), '00_RESUMO');
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(formatBatchInputRows(preview.input)), '00_ENTRADA');
+
+    [
+      ['01_PPU', preview.sections.ppu],
+      ['02_CEIMSPA', preview.sections.ceimspa],
+      ['03_ODA', preview.sections.oda],
+      ['04_PRICELIST', preview.sections.pricelist],
+      ['05_ODC', preview.sections.odc],
+      ['06_COMPRAR', preview.sections.comprar],
+    ].forEach(([name, rows]) => {
+      xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(formatWorkbookRows(rows)), name);
+    });
+
+    const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="pesquisa_em_lote_${stamp}.xlsx"`);
+    return res.status(200).send(buffer);
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    return res.status(statusCode).json({ status: 'error', message: error?.message || 'Falha ao exportar o Excel da pesquisa em lote.' });
+  }
+};
+
 exports.previewGenerator = async (req, res) => {
   try {
     const context = await loadGeneratorContext();
