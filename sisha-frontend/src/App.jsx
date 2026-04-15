@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import {
   LayoutDashboard, PackageSearch, PenTool, Calculator, ShoppingCart,
-  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText
+  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu
 } from 'lucide-react';
 import Cadastro from './pages/Cadastro';
 import ConsultaItens from './pages/ConsultaItens';
@@ -47,12 +47,17 @@ const CardStatus = ({ title, value, secondaryValue, secondaryLabel, color, icon:
 
 const DashboardLayout = ({ children }) => {
   const [darkMode, setDarkMode] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
   const location = useLocation();
   const { user, logout } = useAuth();
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
 
   const allMenuItems = [
     { path: '/', icon: LayoutDashboard, label: 'Visão Geral', roles: ['admin', 'operador'] },
@@ -68,19 +73,32 @@ const DashboardLayout = ({ children }) => {
 
   return (
     <div className="flex h-screen overflow-hidden bg-gray-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-300">
-      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-xl">
+      {menuOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60 lg:hidden"
+          onClick={() => setMenuOpen(false)}
+        />
+      )}
+
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 border-r border-slate-800 flex flex-col shadow-xl transform transition-transform duration-300 ease-out lg:static lg:translate-x-0 ${
+          menuOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
         <div className="p-8 flex flex-col items-center">
           <div className="relative p-1 bg-white rounded-full shadow-lg mb-4">
             <img src="/icon.png" alt="SISHA-1" className="w-20 h-20 object-contain" />
           </div>
           <h1 className="text-white font-black text-lg tracking-tighter">SISHA-1</h1>
-          <div className="flex items-center gap-2 mt-1">
-            <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest">{user?.role === 'admin' ? 'Admin' : 'Operador'} • {user?.email || '---'}</p>
+          <div className="flex items-center gap-2 mt-1 max-w-full px-2">
+            <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse shrink-0"></span>
+            <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest truncate">
+              {user?.role === 'admin' ? 'Admin' : 'Operador'} • {user?.email || '---'}
+            </p>
           </div>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1">
+        <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
           {menuItems.map((item) => {
             const isActive = location.pathname === item.path;
             const Icon = item.icon;
@@ -88,6 +106,7 @@ const DashboardLayout = ({ children }) => {
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={() => setMenuOpen(false)}
                 className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all ${
                   isActive ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
                 }`}
@@ -100,7 +119,10 @@ const DashboardLayout = ({ children }) => {
         </nav>
 
         <div className="p-4 bg-slate-950/50">
-          <button onClick={logout} className="flex items-center gap-3 px-4 py-3 w-full text-red-400 hover:bg-red-900/20 rounded-xl font-bold transition-all">
+          <button
+            onClick={logout}
+            className="flex items-center gap-3 px-4 py-3 w-full text-red-400 hover:bg-red-900/20 rounded-xl font-bold transition-all"
+          >
             <LogOut size={18} />
             <span>Sair</span>
           </button>
@@ -108,17 +130,35 @@ const DashboardLayout = ({ children }) => {
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-20 flex items-center justify-between px-8 bg-white/80 dark:bg-slate-900/50 backdrop-blur-md border-b border-gray-200 dark:border-slate-800">
-          <div>
-            <h2 className="text-2xl font-black tracking-tight uppercase">{menuItems.find(m => m.path === location.pathname)?.label || 'Painel'}</h2>
-            <p className="text-xs text-gray-500 font-medium">Sistema de Inteligência e Histórico de Aeronaves</p>
+        <header className="h-20 flex items-center justify-between px-4 sm:px-6 lg:px-8 bg-white/80 dark:bg-slate-900/50 backdrop-blur-md border-b border-gray-200 dark:border-slate-800">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              onClick={() => setMenuOpen(true)}
+              className="lg:hidden p-2 rounded-xl bg-gray-100 dark:bg-slate-800 text-gray-700 dark:text-slate-100 shadow-inner shrink-0"
+              aria-label="Abrir menu"
+            >
+              <Menu size={20} />
+            </button>
+
+            <div className="min-w-0">
+              <h2 className="text-lg sm:text-xl lg:text-2xl font-black tracking-tight uppercase truncate">
+                {menuItems.find(m => m.path === location.pathname)?.label || 'Painel'}
+              </h2>
+              <p className="text-[10px] sm:text-xs text-gray-500 font-medium truncate">
+                Sistema de Inteligência e Histórico de Aeronaves
+              </p>
+            </div>
           </div>
-          <button onClick={() => setDarkMode(!darkMode)} className="p-3 rounded-2xl bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-yellow-400 hover:scale-110 transition-all shadow-inner">
+
+          <button
+            onClick={() => setDarkMode(!darkMode)}
+            className="p-3 rounded-2xl bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-yellow-400 hover:scale-110 transition-all shadow-inner shrink-0"
+          >
             {darkMode ? <Sun size={20} fill="currentColor" /> : <Moon size={20} fill="currentColor" />}
           </button>
         </header>
 
-        <div className="flex-1 overflow-auto p-8 bg-gray-50/50 dark:bg-transparent">
+        <div className="flex-1 overflow-auto p-4 sm:p-6 lg:p-8 bg-gray-50/50 dark:bg-transparent">
           {children}
         </div>
       </main>
