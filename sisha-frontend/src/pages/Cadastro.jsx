@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
 import RfqImporter from '../components/RfqImporter';
 import NeedsFoundationPanel from '../components/NeedsFoundationPanel';
 import { useAuth } from '../context/AuthContext';
@@ -16,7 +17,10 @@ const formatarGBP = (valor) => {
 };
 
 export default function Cadastro() {
-    const { token } = useAuth();
+    const { token, user } = useAuth();
+    const isDono = Boolean(user?.isDono) || user?.role === 'dono' || Boolean(user?.isGod) || String(user?.email || '').trim().toLowerCase() === 'bruno.martins@marinha.mil.br';
+    const isAdmin = user?.role === 'admin';
+    const podeGerenciarUsuarios = isDono || isAdmin;
     const [file, setFile] = useState(null);
     const [tipoArquivo, setTipoArquivo] = useState('order_book');
     const [uploadCarregando, setUploadCarregando] = useState(false);
@@ -36,9 +40,16 @@ export default function Cadastro() {
 
     const [email, setEmail] = useState('');
     const [senha, setSenha] = useState('');
-    const [isAdmin, setIsAdmin] = useState('nao');
+    const [roleCadastro, setRoleCadastro] = useState('operador');
+    const [mostrarSenhaCadastro, setMostrarSenhaCadastro] = useState(false);
     const [membroCarregando, setMembroCarregando] = useState(false);
     const [membroMsg, setMembroMsg] = useState(null);
+
+    const [usuariosAutorizados, setUsuariosAutorizados] = useState([]);
+    const [usuariosCarregando, setUsuariosCarregando] = useState(false);
+    const [editandoUsuarioId, setEditandoUsuarioId] = useState(null);
+    const [usuarioEdit, setUsuarioEdit] = useState({ email: '', role: 'operador', active: true, senha: '' });
+    const [mostrarSenhaEdicao, setMostrarSenhaEdicao] = useState(false);
 
     const [modalAdmin, setModalAdmin] = useState(false);
     const [alvoAdmin, setAlvoAdmin] = useState('ppu');
@@ -47,6 +58,7 @@ export default function Cadastro() {
     const [resultadosPpuAdmin, setResultadosPpuAdmin] = useState([]);
     const [adminMsg, setAdminMsg] = useState(null);
     const [adminCarregando, setAdminCarregando] = useState(false);
+    const [resultadosAdminGenericos, setResultadosAdminGenericos] = useState([]);
 
     const handleFileChange = (e) => {
         if (e.target.files[0]) {
@@ -209,7 +221,7 @@ export default function Cadastro() {
 
     const handleCadastroMembro = async (e) => {
         e.preventDefault();
-        if (!senha || !email) return;
+        if (!isDono || !senha || !email) return;
 
         setMembroCarregando(true);
         setMembroMsg(null);
@@ -223,7 +235,7 @@ export default function Cadastro() {
                     body: JSON.stringify({
                         email,
                         senha,
-                        role: isAdmin === 'sim' ? 'admin' : 'operador'
+                        role: roleCadastro
                     })
                 },
                 token
@@ -235,12 +247,115 @@ export default function Cadastro() {
                 setMembroMsg({ tipo: 'success', texto: result.message });
                 setEmail('');
                 setSenha('');
-                setIsAdmin('nao');
+                setRoleCadastro('operador');
+                setMostrarSenhaCadastro(false);
             } else {
                 setMembroMsg({ tipo: 'error', texto: result.message || 'Falha ao cadastrar militar.' });
             }
         } catch {
             setMembroMsg({ tipo: 'error', texto: 'Erro de ligação com o servidor.' });
+        } finally {
+            setMembroCarregando(false);
+        }
+    };
+
+
+    const carregarUsuariosAutorizados = async () => {
+        if (!podeGerenciarUsuarios) return;
+        setUsuariosCarregando(true);
+        try {
+            const response = await apiFetch('/auth/users', {}, token);
+            const result = await response.json();
+            if (result.status === 'success') {
+                setUsuariosAutorizados(result.data || []);
+            } else {
+                setMembroMsg({ tipo: 'error', texto: result.message || 'Falha ao listar usuários.' });
+            }
+        } catch {
+            setMembroMsg({ tipo: 'error', texto: 'Erro de ligação ao listar usuários.' });
+        } finally {
+            setUsuariosCarregando(false);
+        }
+    };
+
+    useEffect(() => {
+        if (podeGerenciarUsuarios && token) carregarUsuariosAutorizados();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [podeGerenciarUsuarios, token]);
+
+    const iniciarEdicaoUsuario = (usuario) => {
+        setEditandoUsuarioId(usuario.id);
+        setUsuarioEdit({
+            email: usuario.email || '',
+            role: usuario.role || 'operador',
+            active: usuario.active !== false,
+            senha: '',
+        });
+    };
+
+    const cancelarEdicaoUsuario = () => {
+        setEditandoUsuarioId(null);
+        setUsuarioEdit({ email: '', role: 'operador', active: true, senha: '' });
+        setMostrarSenhaEdicao(false);
+    };
+
+    const handleAtualizarUsuario = async (usuarioId) => {
+        if (!podeGerenciarUsuarios) return;
+        setMembroCarregando(true);
+        setMembroMsg(null);
+        try {
+            const payload = {
+                email: usuarioEdit.email,
+                active: usuarioEdit.active,
+            };
+            if (isDono) payload.role = usuarioEdit.role;
+            if (usuarioEdit.senha) payload.senha = usuarioEdit.senha;
+
+            const response = await apiFetch(
+                `/auth/users/${usuarioId}`,
+                {
+                    method: 'PUT',
+                    headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+                    body: JSON.stringify(payload),
+                },
+                token
+            );
+            const result = await response.json();
+            if (result.status === 'success') {
+                setMembroMsg({ tipo: 'success', texto: result.message });
+                cancelarEdicaoUsuario();
+                carregarUsuariosAutorizados();
+            } else {
+                setMembroMsg({ tipo: 'error', texto: result.message || 'Falha ao atualizar usuário.' });
+            }
+        } catch {
+            setMembroMsg({ tipo: 'error', texto: 'Erro de ligação ao atualizar usuário.' });
+        } finally {
+            setMembroCarregando(false);
+        }
+    };
+
+    const handleExcluirUsuario = async (usuario) => {
+        if (!isDono) return;
+        const emailAlvo = usuario?.email || 'este usuário';
+        if (!window.confirm(`Confirmar exclusão do acesso de ${emailAlvo}?`)) return;
+        setMembroCarregando(true);
+        setMembroMsg(null);
+        try {
+            const response = await apiFetch(
+                `/auth/users/${usuario.id}`,
+                { method: 'DELETE' },
+                token
+            );
+            const result = await response.json();
+            if (result.status === 'success') {
+                setMembroMsg({ tipo: 'success', texto: result.message });
+                carregarUsuariosAutorizados();
+            } else {
+                setMembroMsg({ tipo: 'error', texto: result.message || 'Falha ao excluir usuário.' });
+            }
+        } catch {
+            setMembroMsg({ tipo: 'error', texto: 'Erro de ligação ao excluir usuário.' });
         } finally {
             setMembroCarregando(false);
         }
@@ -262,13 +377,36 @@ export default function Cadastro() {
         setAdminMsg(null);
         setDadosEdicao(null);
         setResultadosPpuAdmin([]);
+        setResultadosAdminGenericos([]);
 
         try {
             const termo = idBuscaAdmin.trim();
+            const fontesEmPreparacao = ['compras_info', 'recibo', 'order_book', 'ceimspa', 'lisde', 'price_list', 'sb', 'pim', 'os', 'recex'];
+            if (fontesEmPreparacao.includes(alvoAdmin)) {
+                setAdminMsg({
+                    tipo: 'info',
+                    texto: 'Fonte mapeada para fluxo próprio. Para OC/PD/WO use a página Ordens de Compras; para as demais fontes, a edição específica será ativada após validarmos campos travados, auditoria e modelo documental.'
+                });
+                return;
+            }
+
             const endpoint =
                 alvoAdmin === 'ppu'
                     ? `/items/ppu/buscar/${encodeURIComponent(termo)}`
-                    : `/manual/buscar/${encodeURIComponent(termo)}`;
+                    : alvoAdmin === 'acao_tatica'
+                        ? `/manual/buscar/${encodeURIComponent(termo)}`
+                        : alvoAdmin === 'oc'
+                            ? `/purchases/ordens?q=${encodeURIComponent(termo)}`
+                            : alvoAdmin === 'wo'
+                                ? `/purchases/work-orders?q=${encodeURIComponent(termo)}`
+                                : alvoAdmin === 'apelidos'
+                                    ? `/items/apelidos?q=${encodeURIComponent(termo)}`
+                                    : null;
+
+            if (!endpoint) {
+                setAdminMsg({ tipo: 'error', texto: 'Fonte ainda não conectada.' });
+                return;
+            }
 
             const response = await apiFetch(endpoint, {}, token);
             const json = await response.json();
@@ -300,6 +438,15 @@ export default function Cadastro() {
                         msg_referencia: json.data.msg_referencia || '',
                         sn: json.data.sn || ''
                     });
+                } else if (['oc', 'wo', 'apelidos'].includes(alvoAdmin)) {
+                    const registros = Array.isArray(json.data) ? json.data : [];
+                    setResultadosAdminGenericos(registros);
+                    setAdminMsg({
+                        tipo: registros.length ? 'success' : 'error',
+                        texto: registros.length
+                            ? `${registros.length} registro(s) localizado(s). Para edição completa de OC/WO, use a página Ordens de Compras.`
+                            : 'Nenhum registro localizado para o termo informado.'
+                    });
                 } else {
                     setAdminMsg({ tipo: 'error', texto: 'Alvo não localizado no sistema.' });
                 }
@@ -318,19 +465,16 @@ export default function Cadastro() {
         setAdminMsg(null);
 
         try {
+            if (alvoAdmin !== 'ppu') {
+                setAdminMsg({ tipo: 'info', texto: 'Esta fonte já está pesquisável aqui, mas a edição completa deve ser feita no módulo específico para preservar regras e auditoria.' });
+                return;
+            }
+
             const endpoint =
-                alvoAdmin === 'ppu'
-                    ? `/items/ppu/id/${encodeURIComponent(dadosEdicao.id)}`
-                    : `/manual/${encodeURIComponent(dadosEdicao.id_referencia)}`;
+                `/items/ppu/id/${encodeURIComponent(dadosEdicao.id)}`;
 
             const payload =
-                alvoAdmin === 'ppu'
-                    ? { quantidade: dadosEdicao.quantidade, localizacao: dadosEdicao.localizacao }
-                    : {
-                          valor_monetario: dadosEdicao.valor_monetario,
-                          msg_referencia: dadosEdicao.msg_referencia,
-                          sn: dadosEdicao.sn
-                      };
+                { quantidade: dadosEdicao.quantidade, localizacao: dadosEdicao.localizacao };
 
             const response = await apiFetch(
                 endpoint,
@@ -366,10 +510,13 @@ export default function Cadastro() {
         setAdminMsg(null);
 
         try {
+            if (alvoAdmin !== 'ppu') {
+                setAdminMsg({ tipo: 'info', texto: 'Esta fonte já está pesquisável aqui, mas a edição completa deve ser feita no módulo específico para preservar regras e auditoria.' });
+                return;
+            }
+
             const endpoint =
-                alvoAdmin === 'ppu'
-                    ? `/items/ppu/id/${encodeURIComponent(dadosEdicao.id)}`
-                    : `/manual/${encodeURIComponent(dadosEdicao.id_referencia)}`;
+                `/items/ppu/id/${encodeURIComponent(dadosEdicao.id)}`;
 
             const response = await apiFetch(endpoint, { method: 'DELETE' }, token);
             const result = await response.json();
@@ -442,127 +589,259 @@ export default function Cadastro() {
             </section>
 
             <section className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
-                <h2 className="text-xl font-black text-slate-800 mb-4 uppercase">Ação Tática Local</h2>
-                <form onSubmit={handleAcaoTatica} className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <select
-                            value={tipoAcao}
-                            onChange={(e) => setTipoAcao(e.target.value)}
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
-                        >
-                            <option value="OC_SUPLEMENTO">OC_SUPLEMENTO</option>
-                            <option value="SN_VINCULO">SN_VINCULO</option>
-                            <option value="MSG_REFERENCIA">MSG_REFERENCIA</option>
-                        </select>
-
-                        <input
-                            type="text"
-                            value={identificador}
-                            onChange={(e) => setIdentificador(e.target.value)}
-                            placeholder="Identificador"
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
-                        />
-
-                        <input
-                            type="text"
-                            value={valorManual}
-                            onChange={(e) => setValorManual(e.target.value)}
-                            placeholder="Valor"
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
-                        />
-
-                        <input
-                            type="text"
-                            value={msgRef}
-                            onChange={(e) => setMsgRef(e.target.value)}
-                            placeholder="Mensagem de Referência"
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
-                        />
-
-                        <input
-                            type="text"
-                            value={snManual}
-                            onChange={(e) => setSnManual(e.target.value)}
-                            placeholder="SN"
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
-                        />
-                    </div>
-
-                    <div className="flex justify-end">
+                <h2 className="text-xl font-black text-slate-800 mb-4 uppercase">Registro Operacional Complementar</h2>
+                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5 space-y-3">
+                    <p className="text-sm font-bold text-slate-800">
+                        Fluxo reorganizado: OC, PD, WO, suplementações, vínculo de SN, resultado técnico e observações operacionais agora ficam no módulo
+                        <span className="font-black"> Ordens de Compras / WO</span>.
+                    </p>
+                    <p className="text-sm text-slate-700">
+                        Esta separação evita duplicidade de lançamento, reduz risco de divergência e mantém cada dado no módulo correto. Use a Central de Inserção para leitura/importação de documentos e a Manutenção Administrativa para correções pontuais de bases que ainda não possuem página própria.
+                    </p>
+                    <div className="flex flex-wrap gap-3 pt-2">
+                        <a href="/compras" className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-black text-white hover:bg-blue-700">
+                            IR PARA ORDENS DE COMPRAS / WO
+                        </a>
                         <button
-                            type="submit"
-                            disabled={manualCarregando || !identificador}
-                            className="bg-emerald-600 text-white px-8 py-3 rounded-xl font-black hover:bg-emerald-700 disabled:opacity-50"
+                            type="button"
+                            onClick={() => setModalAdmin(true)}
+                            className="inline-flex items-center justify-center rounded-xl bg-slate-900 px-5 py-3 text-sm font-black text-white hover:bg-slate-800"
                         >
-                            {manualCarregando ? 'REGISTRANDO...' : 'REGISTRAR AÇÃO'}
+                            ABRIR MANUTENÇÃO ADMINISTRATIVA
                         </button>
                     </div>
-
-                    {manualMsg && (
-                        <p className={`font-bold ${manualMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-                            {manualMsg.texto}
-                        </p>
-                    )}
-                </form>
+                </div>
             </section>
 
-            <section className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
-                <h2 className="text-xl font-black text-slate-800 mb-1 flex items-center gap-2 uppercase">
-                    Gestão de Tripulação
-                </h2>
-                <p className="text-sm text-slate-700 mb-6">Cadastre email, senha e privilégio do militar autorizado.</p>
-
-                <form onSubmit={handleCadastroMembro} className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <input
-                            type="email"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            placeholder="Email Militar"
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
-                        />
-
-                        <input
-                            type="password"
-                            value={senha}
-                            onChange={(e) => setSenha(e.target.value)}
-                            placeholder="Senha"
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
-                        />
-
-                        <select
-                            value={isAdmin}
-                            onChange={(e) => setIsAdmin(e.target.value)}
-                            className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
-                        >
-                            <option value="nao">Operador</option>
-                            <option value="sim">Admin</option>
-                        </select>
+            {podeGerenciarUsuarios ? (
+                <section className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
+                    <div className="flex items-start justify-between gap-4 mb-6">
+                        <div>
+                            <h2 className="text-xl font-black text-slate-800 mb-1 flex items-center gap-2 uppercase">
+                                Gestão de Usuários
+                            </h2>
+                            <p className="text-sm text-slate-700">
+                                Dono visualiza e edita todos os usuários. Admin visualiza apenas a própria conta e usuários Operador, podendo alterar e-mail, senha e status, sem criar usuário nem promover permissões.
+                            </p>
+                        </div>
+                        <span className="rounded-full bg-purple-100 px-4 py-2 text-xs font-black text-purple-700 uppercase">{isDono ? 'DONO' : 'ADMIN'}</span>
                     </div>
 
-                    <div className="flex justify-end">
-                        <button
-                            type="submit"
-                            disabled={membroCarregando || !senha || !email}
-                            className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-black hover:bg-indigo-700 disabled:opacity-50"
-                        >
-                            CADASTRAR MILITAR
-                        </button>
-                    </div>
+                    {isDono ? (
+                    <form onSubmit={handleCadastroMembro} className="space-y-4 mb-8">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                placeholder="Email Militar"
+                                className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
+                            />
+
+                            <div className="relative">
+                                <input
+                                    type={mostrarSenhaCadastro ? 'text' : 'password'}
+                                    value={senha}
+                                    onChange={(e) => setSenha(e.target.value)}
+                                    placeholder="Senha"
+                                    className="w-full p-3 pr-12 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setMostrarSenhaCadastro(prev => !prev)}
+                                    className="absolute inset-y-0 right-0 px-3 text-slate-500 hover:text-slate-800"
+                                    aria-label={mostrarSenhaCadastro ? 'Ocultar senha' : 'Mostrar senha'}
+                                >
+                                    {mostrarSenhaCadastro ? <EyeOff size={18} /> : <Eye size={18} />}
+                                </button>
+                            </div>
+
+                            <select
+                                value={roleCadastro}
+                                onChange={(e) => setRoleCadastro(e.target.value)}
+                                className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
+                            >
+                                <option value="operador">Operador</option>
+                                <option value="admin">Admin</option>
+                                <option value="dono">Dono</option>
+                            </select>
+                        </div>
+
+                        <div className="flex flex-wrap justify-end gap-3">
+                            <button
+                                type="button"
+                                onClick={carregarUsuariosAutorizados}
+                                disabled={usuariosCarregando}
+                                className="bg-slate-900 text-white px-6 py-3 rounded-xl font-black hover:bg-slate-800 disabled:opacity-50"
+                            >
+                                ATUALIZAR LISTA
+                            </button>
+                            <button
+                                type="submit"
+                                disabled={membroCarregando || !senha || !email}
+                                className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-black hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                                CADASTRAR MILITAR
+                            </button>
+                        </div>
+                    </form>
+                    ) : (
+                        <div className="mb-8 rounded-2xl border border-blue-100 bg-blue-50 p-5 text-sm font-bold text-blue-900">
+                            Como Admin, você pode editar sua própria conta e os usuários Operador listados abaixo. Criação de usuários e promoção/rebaixamento de permissões ficam restritas ao Dono.
+                        </div>
+                    )}
 
                     {membroMsg && (
-                        <p className={`font-bold ${membroMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                        <p className={`font-bold mb-4 ${membroMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>
                             {membroMsg.texto}
                         </p>
                     )}
-                </form>
-            </section>
+
+                    <div className="overflow-auto border border-slate-200 rounded-2xl">
+                        <table className="min-w-full text-sm">
+                            <thead className="bg-slate-100 text-slate-700 uppercase text-xs">
+                                <tr>
+                                    <th className="p-3 text-left">Email</th>
+                                    <th className="p-3 text-left">Perfil</th>
+                                    <th className="p-3 text-left">Ativo</th>
+                                    <th className="p-3 text-left">Nova senha</th>
+                                    <th className="p-3 text-right">Ações</th>
+                                </tr>
+                            </thead>
+                            <tbody className="text-slate-900">
+                                {usuariosAutorizados.map((usuario) => {
+                                    const isEditing = editandoUsuarioId === usuario.id;
+                                    const isDonoLinha = String(usuario.role || '').trim().toLowerCase() === 'dono';
+                                    return (
+                                        <tr key={usuario.id} className="border-t border-slate-200">
+                                            <td className="p-3 font-bold">
+                                                {isEditing ? (
+                                                    <input
+                                                        value={usuarioEdit.email}
+                                                        onChange={(e) => setUsuarioEdit(prev => ({ ...prev, email: e.target.value }))}
+                                                        className="w-full p-2 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
+                                                    />
+                                                ) : usuario.email}
+                                            </td>
+                                            <td className="p-3">
+                                                {isEditing && isDono ? (
+                                                    <select
+                                                        value={usuarioEdit.role}
+                                                        onChange={(e) => setUsuarioEdit(prev => ({ ...prev, role: e.target.value }))}
+                                                        className="w-full p-2 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
+                                                    >
+                                                        <option value="operador">Operador</option>
+                                                        <option value="admin">Admin</option>
+                                                        <option value="dono">Dono</option>
+                                                    </select>
+                                                ) : (
+                                                    <span className="font-black uppercase">{usuario.role}</span>
+                                                )}
+                                            </td>
+                                            <td className="p-3">
+                                                {isEditing ? (
+                                                    <select
+                                                        value={usuarioEdit.active ? 'sim' : 'nao'}
+                                                        onChange={(e) => setUsuarioEdit(prev => ({ ...prev, active: e.target.value === 'sim' }))}
+                                                        className="w-full p-2 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
+                                                    >
+                                                        <option value="sim">Sim</option>
+                                                        <option value="nao">Não</option>
+                                                    </select>
+                                                ) : (
+                                                    <span className={`font-black ${usuario.active === false ? 'text-red-600' : 'text-green-600'}`}>
+                                                        {usuario.active === false ? 'NÃO' : 'SIM'}
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="p-3">
+                                                {isEditing ? (
+                                                    <div className="relative">
+                                                        <input
+                                                            type={mostrarSenhaEdicao ? 'text' : 'password'}
+                                                            value={usuarioEdit.senha}
+                                                            onChange={(e) => setUsuarioEdit(prev => ({ ...prev, senha: e.target.value }))}
+                                                            placeholder="Deixe vazio para manter"
+                                                            className="w-full p-2 pr-11 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setMostrarSenhaEdicao(prev => !prev)}
+                                                            className="absolute inset-y-0 right-0 px-3 text-slate-500 hover:text-slate-800"
+                                                            aria-label={mostrarSenhaEdicao ? 'Ocultar senha' : 'Mostrar senha'}
+                                                        >
+                                                            {mostrarSenhaEdicao ? <EyeOff size={18} /> : <Eye size={18} />}
+                                                        </button>
+                                                    </div>
+                                                ) : '—'}
+                                            </td>
+                                            <td className="p-3">
+                                                <div className="flex justify-end gap-2">
+                                                    {isEditing ? (
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleAtualizarUsuario(usuario.id)}
+                                                                className="px-4 py-2 rounded-xl bg-blue-600 text-white font-black hover:bg-blue-700"
+                                                            >
+                                                                SALVAR
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={cancelarEdicaoUsuario}
+                                                                className="px-4 py-2 rounded-xl bg-slate-200 text-slate-900 font-black hover:bg-slate-300"
+                                                            >
+                                                                CANCELAR
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => iniciarEdicaoUsuario(usuario)}
+                                                                className="px-4 py-2 rounded-xl bg-amber-500 text-white font-black hover:bg-amber-600"
+                                                            >
+                                                                EDITAR
+                                                            </button>
+                                                            {isDono && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleExcluirUsuario(usuario)}
+                                                                    className={`px-4 py-2 rounded-xl text-white font-black ${isDonoLinha ? 'bg-red-700 hover:bg-red-800' : 'bg-red-600 hover:bg-red-700'}`}
+                                                                >
+                                                                    EXCLUIR
+                                                                </button>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                                {usuariosAutorizados.length === 0 && (
+                                    <tr>
+                                        <td colSpan="5" className="p-4 text-center font-bold text-slate-500">Nenhum usuário listado.</td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            ) : (
+                <section className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
+                    <h2 className="text-xl font-black text-slate-800 mb-2 uppercase">Gestão de Usuários</h2>
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm font-bold text-amber-900">
+                        A gestão de usuários é restrita aos perfis Admin e Dono. Operador deve solicitar alteração de senha a um Admin ou ao Dono.
+                    </div>
+                </section>
+            )}
 
             <section className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
                 <div className="flex items-center justify-between mb-4">
                     <div>
-                        <h2 className="text-xl font-black text-slate-800 uppercase">Painel de Manutenção</h2>
-                        <p className="text-sm text-slate-700">Busca, edição e exclusão administrativa.</p>
+                        <h2 className="text-xl font-black text-slate-800 uppercase">Manutenção Administrativa de Dados</h2>
+                        <p className="text-sm text-slate-700">Correção segura por ADMIN: pesquise a base, revise o registro e altere/exclua somente pelo fluxo auditável.</p>
                     </div>
 
                     <button
@@ -687,8 +966,8 @@ export default function Cadastro() {
                     <div className="bg-white rounded-3xl p-8 w-full max-w-4xl shadow-2xl space-y-6 max-h-[90vh] overflow-auto">
                         <div className="flex items-center justify-between">
                             <div>
-                                <h3 className="text-xl font-black text-slate-900 uppercase">Painel de Manutenção</h3>
-                                <p className="text-slate-900">Edição administrativa dos registros.</p>
+                                <h3 className="text-xl font-black text-slate-900 uppercase">Manutenção Administrativa de Dados</h3>
+                                <p className="text-slate-900">Selecione a base, pesquise por identificador e revise os dados antes de editar ou excluir.</p>
                             </div>
 
                             <button
@@ -702,11 +981,35 @@ export default function Cadastro() {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <select
                                 value={alvoAdmin}
-                                onChange={(e) => setAlvoAdmin(e.target.value)}
+                                onChange={(e) => {
+                                    setAlvoAdmin(e.target.value);
+                                    setDadosEdicao(null);
+                                    setResultadosPpuAdmin([]);
+                                    setResultadosAdminGenericos([]);
+                                    setAdminMsg(null);
+                                }}
                                 className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900"
                             >
-                                <option value="ppu">PPU</option>
-                                <option value="acao_tatica">Ação Tática</option>
+                                <optgroup label="Fontes editáveis agora">
+                                    <option value="ppu">PPU / Inventário</option>
+                                </optgroup>
+                                <optgroup label="Fontes consultáveis nesta versão">
+                                    <option value="apelidos">Apelidos Operacionais</option>
+                                </optgroup>
+                                <optgroup label="Fontes com módulo próprio">
+                                    <option value="compras_info">OC / PD / WO — editar na página Ordens de Compras</option>
+                                </optgroup>
+                                <optgroup label="Fontes mapeadas para próxima evolução">
+                                    <option value="recibo">Recibos</option>
+                                    <option value="order_book">Order Book</option>
+                                    <option value="ceimspa">CeIMSPA</option>
+                                    <option value="lisde">LISDE</option>
+                                    <option value="price_list">Price List / RFQ</option>
+                                    <option value="pim">PIM</option>
+                                    <option value="os">OS</option>
+                                    <option value="recex">RECEX</option>
+                                    <option value="sb">Service Bulletin</option>
+                                </optgroup>
                             </select>
 
                             <input
@@ -716,7 +1019,13 @@ export default function Cadastro() {
                                 placeholder={
                                     alvoAdmin === 'ppu'
                                         ? 'Digite PN ou SN completo'
-                                        : 'Digite o identificador completo'
+                                        : alvoAdmin === 'oc'
+                                            ? 'OC, PD/SEPD, PN, status ou mensagem'
+                                            : alvoAdmin === 'wo'
+                                                ? 'WO, PN, SN, empresa, status ou documento'
+                                                : alvoAdmin === 'apelidos'
+                                                    ? 'Apelido, PN ou descrição'
+                                                    : 'Digite o identificador completo'
                                 }
                                 className="w-full p-3 bg-white border-2 border-slate-200 rounded-xl font-bold text-slate-900 placeholder:text-slate-500"
                             />
@@ -734,6 +1043,50 @@ export default function Cadastro() {
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-700">
                                 Busca EXATA: use o PN completo ou o SN completo. O painel não faz mais busca parcial por segurança.
                             </p>
+                        )}
+
+                        {['oc', 'wo', 'apelidos'].includes(alvoAdmin) && (
+                            <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 text-sm text-blue-900 font-bold">
+                                Esta fonte já está integrada à consulta administrativa. A edição operacional completa de OC/WO permanece no módulo Ordens de Compras para manter regras de CAN, suplementação, PD e WO no lugar correto.
+                            </div>
+                        )}
+
+                        {resultadosAdminGenericos.length > 0 && (
+                            <div className="space-y-4 border border-slate-200 rounded-2xl p-6">
+                                <h4 className="text-lg font-black text-slate-900 uppercase">Resultado Administrativo</h4>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {resultadosAdminGenericos.map((registro, index) => (
+                                        <div key={registro.id || `${alvoAdmin}-${index}`} className="border border-slate-200 rounded-2xl p-4 bg-slate-50">
+                                            {alvoAdmin === 'oc' && (
+                                                <>
+                                                    <p className="text-xs font-black text-slate-500 uppercase">OC / Ordem de Compra</p>
+                                                    <h5 className="text-lg font-black text-slate-900">{registro.numero_oc || 'N/A'}</h5>
+                                                    <p className="text-sm text-slate-800"><b>Status:</b> {registro.status || 'N/A'} • <b>Fonte:</b> {registro.fonte || registro.source || 'SISHA'}</p>
+                                                    <p className="text-sm text-slate-800"><b>PDs:</b> {(registro.compras_pds || []).length}</p>
+                                                    <p className="text-xs text-slate-700 mt-2">Edição/cancelamento/suplementação: página Ordens de Compras.</p>
+                                                </>
+                                            )}
+                                            {alvoAdmin === 'wo' && (
+                                                <>
+                                                    <p className="text-xs font-black text-slate-500 uppercase">WO / Reparo</p>
+                                                    <h5 className="text-lg font-black text-slate-900">{registro.numero_wo || registro.documento_referencia || 'N/A'}</h5>
+                                                    <p className="text-sm text-slate-800"><b>PN:</b> {registro.pn || 'N/A'} • <b>SN:</b> {registro.sn || 'N/A'}</p>
+                                                    <p className="text-sm text-slate-800"><b>Status:</b> {registro.status || 'N/A'} • <b>Fonte:</b> {registro.fonte || registro.source || 'SISHA'}</p>
+                                                    <p className="text-xs text-slate-700 mt-2">Edição/suplementação: página Ordens de Compras.</p>
+                                                </>
+                                            )}
+                                            {alvoAdmin === 'apelidos' && (
+                                                <>
+                                                    <p className="text-xs font-black text-slate-500 uppercase">Apelido Operacional</p>
+                                                    <h5 className="text-lg font-black text-slate-900">{registro.apelido || 'N/A'}</h5>
+                                                    <p className="text-sm text-slate-800"><b>PN:</b> {registro.pn || 'N/A'}</p>
+                                                    <p className="text-sm text-slate-800"><b>Descrição:</b> {registro.descricao_oficial || 'N/A'}</p>
+                                                </>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
                         )}
 
                         {alvoAdmin === 'ppu' && resultadosPpuAdmin.length > 1 && (
@@ -885,7 +1238,7 @@ export default function Cadastro() {
                         )}
 
                         {adminMsg && (
-                            <p className={`font-bold ${adminMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                            <p className={`font-bold ${adminMsg.tipo === 'success' ? 'text-green-600' : adminMsg.tipo === 'info' ? 'text-blue-600' : 'text-red-600'}`}>
                                 {adminMsg.texto}
                             </p>
                         )}

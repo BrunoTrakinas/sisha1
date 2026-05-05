@@ -1,4 +1,5 @@
 const { verifyToken } = require('../config/authToken');
+const { isGodUser } = require('../utils/auditLogger');
 
 function extractToken(req) {
   const header = req.headers.authorization || '';
@@ -26,6 +27,12 @@ function requireRole(rolesPermitidas = []) {
       return res.status(401).json({ status: 'error', message: 'Acesso não autorizado.' });
     }
 
+    // DONO é superusuário funcional: pode acessar rotas de Admin sem precisar duplicar
+    // todas as listas de roles no projeto. Operador continua limitado normalmente.
+    if (req.user.role === 'dono') {
+      return next();
+    }
+
     if (!rolesPermitidas.includes(req.user.role)) {
       return res.status(403).json({ status: 'error', message: 'Perfil sem permissão para esta operação.' });
     }
@@ -34,7 +41,24 @@ function requireRole(rolesPermitidas = []) {
   };
 }
 
+function requireDono(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ status: 'error', message: 'Acesso não autorizado.' });
+  }
+
+  if (!isGodUser(req.user)) {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Permissão DONO necessária. Esta ação é restrita ao proprietário do SISHA.',
+    });
+  }
+
+  return next();
+}
+
 module.exports = {
   requireAuth,
   requireRole,
+  requireDono,
+  requireGod: requireDono,
 };

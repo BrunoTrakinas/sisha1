@@ -274,8 +274,10 @@ export default function ConsultaItens() {
                             <div className="bg-teal-50/50 rounded-xl p-4 border border-teal-100 flex flex-col shadow-sm">
                                 <span className="text-sm font-black text-teal-600 uppercase mb-2">3. PD (ODC)</span>
                                 {item.odc && item.odc.length > 0 ? item.odc.map((o, i) => (
-                                    <div key={i} className="mb-2 text-sm">
-                                        <span className="font-black text-lg text-teal-900">{o.qtd_pendente} un</span> | <span className="text-sm font-mono font-bold text-teal-800 break-all">{o.pd_referencia}</span>
+                                    <div key={i} className="mb-2 text-sm border-b border-teal-200/40 pb-2 last:border-0">
+                                        <span className="font-black text-lg text-teal-900">{o.qtd_pendente} un</span> | <span className="text-sm font-mono font-bold text-teal-800 break-all">{o.pd_referencia || o.numero_pd || o.documento_referencia}</span>
+                                        {(o.status_pd || o.status) && <p className="text-[11px] font-black text-teal-700 uppercase mt-1">Status: {o.status_pd || o.status}</p>}
+                                        {o.numero_oc && <p className="text-[11px] font-bold text-teal-700 break-all">OC: {o.numero_oc}</p>}
                                     </div>
                                 )) : <span className="text-sm font-bold text-teal-400 mt-auto text-center border border-teal-100/50 py-1.5 rounded-lg">Item não encontrado</span>}
                             </div>
@@ -325,7 +327,13 @@ export default function ConsultaItens() {
                                     <div className="space-y-2 overflow-y-auto max-h-32 custom-scrollbar">
                                         {item.repairs.map((r, i) => (
                                             <div key={i} className="text-sm text-amber-900 border-b border-amber-200/40 pb-1.5 break-all">
-                                                SN: <span className="font-mono font-black">{r.sn}</span> <span className="text-sm bg-amber-200 px-1 rounded font-bold uppercase">{r.tipo}</span>
+                                                <div>SN: <span className="font-mono font-black">{r.sn || 'PENDENTE'}</span> <span className="text-sm bg-amber-200 px-1 rounded font-bold uppercase">{r.tipo}</span></div>
+                                                {(r.documento_referencia || r.numero_wo) && <p className="text-[11px] font-black text-amber-800 uppercase">Doc/WO: {r.documento_referencia || r.numero_wo}</p>}
+                                                {r.nomenclatura && <p className="text-[11px] font-bold text-amber-800">Nome: {r.nomenclatura}</p>}
+                                                {r.status && <p className="text-[11px] font-bold text-amber-700">Status: {r.status}</p>}
+                                                {r.tipo_wo && <p className="text-[11px] font-bold text-amber-700">Tipo WO: {r.tipo_wo}</p>}
+                                                {r.resultado_tecnico && <p className="text-[11px] font-bold text-amber-700">Resultado: {r.resultado_tecnico}</p>}
+                                                {r.observacao && <p className="text-[11px] font-bold text-amber-700">Obs: {r.observacao}</p>}
                                             </div>
                                         ))}
                                     </div>

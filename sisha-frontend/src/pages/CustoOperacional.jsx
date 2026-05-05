@@ -110,7 +110,7 @@ export default function CustoOperacional() {
           <div>
             <h1 className="text-2xl font-black text-slate-900 uppercase">Custo Operacional</h1>
             <p className="text-sm text-slate-600 font-bold mt-2 max-w-3xl">
-              O custo operacional usa a mesma base do Gerador de Necessidades: receitas, PIMs por aeronave/oficina e SBs. A estimativa em GBP usa recibo, RFQ válida e, por último, Price List.
+              O custo operacional separa o custo de 1 execução da inspeção da projeção logística do período. A projeção usa a política de estoque; o custo unitário usa apenas a quantidade da receita.
             </p>
           </div>
           <button type="button" onClick={handlePreview} disabled={loading || previewing} className="px-6 py-3 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2">
@@ -190,7 +190,7 @@ export default function CustoOperacional() {
 
       {preview ? (
         <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 grid grid-cols-1 md:grid-cols-5 gap-4">
             <div>
               <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Receitas + SBs</p>
               <p className="text-2xl font-black text-slate-900 mt-1">{preview.summary.receitas_selecionadas} / {preview.summary.sbs_selecionadas}</p>
@@ -200,8 +200,12 @@ export default function CustoOperacional() {
               <p className="text-2xl font-black text-slate-900 mt-1">{preview.summary.origens_selecionadas}</p>
             </div>
             <div>
-              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Valor estimado</p>
-              <p className="text-2xl font-black text-slate-900 mt-1">{moneyGbp(preview.summary.valor_total_gbp || 0)}</p>
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Custo 1 execução</p>
+              <p className="text-2xl font-black text-slate-900 mt-1">{moneyGbp(preview.summary.custo_execucao_gbp ?? preview.summary.valor_total_gbp ?? 0)}</p>
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Projeção 2 anos</p>
+              <p className="text-2xl font-black text-slate-900 mt-1">{moneyGbp(preview.summary.custo_projetado_gbp || 0)}</p>
             </div>
             <div>
               <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">PNs sem preço</p>
@@ -216,37 +220,44 @@ export default function CustoOperacional() {
                   <th className="p-3 text-left">PN</th>
                   <th className="p-3 text-left">Nomenclatura</th>
                   <th className="p-3 text-left">Origem</th>
-                  <th className="p-3 text-left">Qtd</th>
+                  <th className="p-3 text-left">Qtd 1 execução</th>
+                  <th className="p-3 text-left">Qtd projetada</th>
                   <th className="p-3 text-left">Fonte do valor</th>
                   <th className="p-3 text-left">Valor unitário</th>
-                  <th className="p-3 text-left">Valor total</th>
+                  <th className="p-3 text-left">Custo 1 execução</th>
+                  <th className="p-3 text-left">Projeção 2 anos</th>
                 </tr>
               </thead>
               <tbody>
                 {preview.linhas.length === 0 ? (
-                  <tr><td colSpan={7} className="p-6 text-center font-bold text-slate-500">Nenhum PN consolidado para os filtros selecionados.</td></tr>
+                  <tr><td colSpan={9} className="p-6 text-center font-bold text-slate-500">Nenhum PN consolidado para os filtros selecionados.</td></tr>
                 ) : preview.linhas.map((row) => (
-                  <tr key={`${row.pn}-${row.origens_texto}-${row.receitas_texto}-${row.pims_texto}`} className="border-t border-slate-100 align-top">
+                  <tr key={`${row.pn}-${row.origens_texto}-${row.receitas_texto}-${row.pims_texto}-${row.sbs_texto || ''}`} className="border-t border-slate-100 align-top">
                     <td className="p-3 font-black text-slate-900">{row.pn}</td>
                     <td className="p-3">
                       <div className="font-bold text-slate-900">{row.nomenclatura || '—'}</div>
                       <div className="text-xs text-slate-500 font-semibold">NSN: {row.nsn || '—'}</div>
                     </td>
                     <td className="p-3 font-bold text-slate-700">
-                      <div>{row.receitas_texto || row.origens_texto || '—'}</div>
+                      <div>{row.receitas_texto || row.origens_texto || row.sbs_texto || '—'}</div>
                       <div className="text-xs text-slate-500 mt-1">{row.pims_texto || row.observacao || '—'}</div>
                     </td>
-                    <td className="p-3 font-black text-slate-900">{row.qtd_planejada}</td>
+                    <td className="p-3 font-black text-slate-900">{row.qtd_unitaria ?? row.qtd_planejada}</td>
+                    <td className="p-3 font-black text-slate-900">
+                      <div>{row.qtd_planejada}</div>
+                      {row.fator_planejado_texto ? <div className="text-[10px] uppercase tracking-[0.15em] text-slate-400 mt-1">fator {row.fator_planejado_texto}</div> : null}
+                    </td>
                     <td className="p-3 font-bold text-slate-700">{row.fonte_valor || 'Sem referência'}</td>
                     <td className="p-3 font-black text-slate-900">{row.valor_unitario_gbp != null ? moneyGbp(row.valor_unitario_gbp) : '—'}</td>
-                    <td className="p-3 font-black text-slate-900">{row.valor_total_gbp != null ? moneyGbp(row.valor_total_gbp) : '—'}</td>
+                    <td className="p-3 font-black text-slate-900">{row.valor_execucao_gbp != null ? moneyGbp(row.valor_execucao_gbp) : (row.valor_total_gbp != null ? moneyGbp(row.valor_total_gbp) : '—')}</td>
+                    <td className="p-3 font-black text-slate-900">{row.valor_planejado_gbp != null ? moneyGbp(row.valor_planejado_gbp) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 text-xs font-bold text-slate-500 flex items-center gap-2">
-            <Dot active /> O custo operacional segue exatamente a mesma base do Gerador. Sem referência de valor, o PN entra no relatório mas não soma no total estimado.
+            <Dot active /> Custo 1 execução = quantidade da receita x valor unitário. Projeção 2 anos = custo unitário x política de estoque. Sem referência de valor, o PN aparece mas não soma.
           </div>
         </section>
       ) : null}

@@ -1,5 +1,6 @@
 // src/controllers/statsController.js
 const supabase = require('../config/supabaseClient');
+const { isGodUser } = require('../utils/auditLogger');
 
 const PAGE_SIZE = 1000;
 const LOW_STOCK_CANDIDATES = ['estoque_minimo', 'qtd_minima', 'quantidade_minima', 'minimo', 'estoque_seguranca'];
@@ -20,6 +21,66 @@ function formatGBP(value) {
 
 function firstExistingKey(obj = {}, candidates = []) {
     return candidates.find((key) => Object.prototype.hasOwnProperty.call(obj, key));
+}
+
+function normalizeStatus(value = '') {
+    return normalizeKey(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function classifyPdStatus(row = {}) {
+    const status = normalizeStatus(row.status || row.status_grupo || row.status_item);
+    if (['CAN', 'CANCELADO', 'EXCLUIDO'].includes(status) || row.ativo === false) return 'cancelados';
+    if (status === 'ELB') return 'elaboracao';
+    if (['TRI', 'ANS'].includes(status)) return 'triagemAnalise';
+    if (['COT', 'PRO'].includes(status)) return 'cotacao';
+    if (['LPC', 'LIB', 'LIBERADA', 'LIBERADO', 'LIBERADA_PARA_COTACAO', 'LIBERADO_PARA_COTACAO'].includes(status)) return 'liberadaCotacao';
+    if (status === 'ODC') return 'odc';
+    if (['ODA', 'EMB'].includes(status)) return 'odaEmAndamento';
+    if (['REC', 'FAT'].includes(status)) return 'recebidosFaturados';
+    return 'outros';
+}
+
+async function computePdPipelineStats() {
+    const empty = {
+        elaboracao: 0,
+        triagemAnalise: 0,
+        cotacao: 0,
+        liberadaCotacao: 0,
+        odc: 0,
+        aguardandoRecursos: 0,
+        odaEmAndamento: 0,
+        recebidosFaturados: 0,
+        cancelados: 0,
+        outros: 0,
+        totalAtivos: 0,
+    };
+
+    try {
+        const rows = await fetchAllRows('compras_pds', 'numero_pd,status,status_grupo,status_item,ativo,quantidade,qtd_comprada,qtd_pedida');
+        const seen = new Set();
+        const resumo = { ...empty };
+
+        rows.forEach((row) => {
+            const numeroPd = normalizeKey(row.numero_pd);
+            if (numeroPd && seen.has(numeroPd)) return;
+            if (numeroPd) seen.add(numeroPd);
+
+            const bucket = classifyPdStatus(row);
+            resumo[bucket] = (resumo[bucket] || 0) + 1;
+
+            // PD AGU REC = pedidos aguardando recursos/processamento antes de ODA/embarque/recebimento.
+            // Não mistura ODA/EMB com o card ODA Leonardo, evitando dupla contagem no dashboard.
+            if (['elaboracao', 'triagemAnalise', 'cotacao', 'liberadaCotacao', 'odc'].includes(bucket)) {
+                resumo.aguardandoRecursos += 1;
+                resumo.totalAtivos += 1;
+            }
+        });
+
+        return resumo;
+    } catch (error) {
+        console.warn('[SISHA-1][stats] compras_pds indisponível para esteira de PDs:', error.message);
+        return empty;
+    }
 }
 
 async function fetchAllRows(table, columns = '*', pageSize = PAGE_SIZE) {
@@ -249,11 +310,17 @@ exports.getDashboardStats = async (req, res) => {
         let stats;
 
         try {
-            stats = await getDashboardStatsViaRpc();
-        } catch (rpcError) {
-            console.warn('[SISHA-1][stats] RPC rpc_dashboard_stats indisponível. Usando fallback.', rpcError.message);
+            // Fonte primária do dashboard: tabelas operacionais atuais.
+            // Evita discrepância com RPC antiga ou tabela legada depois da criação de compras_pds/work_orders.
             stats = await getDashboardStatsViaFallback();
+        } catch (fallbackError) {
+            console.warn('[SISHA-1][stats] Fallback por tabelas indisponível. Tentando RPC rpc_dashboard_stats.', fallbackError.message);
+            stats = await getDashboardStatsViaRpc();
         }
+
+        const odcPipeline = await computePdPipelineStats();
+        stats.totalODC = odcPipeline.aguardandoRecursos;
+        stats.totalODC_PDs = odcPipeline.odc;
 
         return res.status(200).json({
             status: 'success',
@@ -264,6 +331,7 @@ exports.getDashboardStats = async (req, res) => {
                 totalODA_PDs: stats.totalODA_PDs,
                 totalODC: stats.totalODC,
                 totalODC_PDs: stats.totalODC_PDs,
+                odcPipeline,
                 orcamento: stats.valorEstoqueFormatado,
                 valorEstoqueGBP: stats.valorEstoqueGBP,
                 pnsPrecificados: stats.pnsPrecificados,
@@ -300,15 +368,60 @@ exports.getRadarCriticidade = async (req, res) => {
 
 exports.getRecentOperations = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const isGod = isGodUser(req.user);
+
+        const { data: imports, error: importError } = await supabase
             .from('import_logs')
             .select('tipo_arquivo, nome_arquivo, status, mensagem, uploaded_by_email, uploaded_by_role, created_at, finished_at')
             .order('created_at', { ascending: false })
-            .limit(8);
+            .limit(12);
 
-        if (error) throw error;
+        if (importError) throw importError;
 
-        return res.status(200).json({ status: 'success', data: data || [] });
+        const importItems = (imports || []).map((op) => ({
+            ...op,
+            origem_log: 'IMPORTACAO',
+            tipo_arquivo: op.tipo_arquivo || 'IMPORTAÇÃO',
+            nome_arquivo: op.nome_arquivo || 'Documento',
+            uploaded_by_email: op.uploaded_by_email || 'Sistema',
+        }));
+
+        let auditItems = [];
+        try {
+            let query = supabase
+                .from('system_audit_logs')
+                .select('action, entity, entity_id, summary, actor_email, actor_role, level, visibility, created_at')
+                .order('created_at', { ascending: false })
+                .limit(isGod ? 30 : 12);
+
+            if (!isGod) {
+                query = query.eq('visibility', 'PUBLIC');
+            }
+
+            const { data: auditData, error: auditError } = await query;
+            if (auditError) throw auditError;
+
+            auditItems = (auditData || []).map((op) => ({
+                origem_log: 'AUDITORIA',
+                tipo_arquivo: op.action || 'AUDITORIA',
+                nome_arquivo: op.entity_id ? `${op.entity || 'SISTEMA'} • ${op.entity_id}` : (op.entity || 'SISTEMA'),
+                status: op.level || 'INFO',
+                mensagem: op.summary,
+                uploaded_by_email: op.actor_email || 'Sistema',
+                uploaded_by_role: op.actor_role || null,
+                created_at: op.created_at,
+                finished_at: op.created_at,
+            }));
+        } catch (auditError) {
+            // Banco antigo ainda sem system_audit_logs: mantém import_logs funcionando.
+            console.warn('[SISHA-1][stats] system_audit_logs indisponível:', auditError.message);
+        }
+
+        const data = [...auditItems, ...importItems]
+            .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+            .slice(0, isGod ? 20 : 8);
+
+        return res.status(200).json({ status: 'success', data });
     } catch (error) {
         console.error('Erro ao consultar operações recentes:', error);
         return res.status(500).json({ status: 'error', message: 'Erro ao consultar operações recentes.' });

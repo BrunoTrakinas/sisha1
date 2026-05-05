@@ -976,72 +976,184 @@ function buildGeneratorPreview(selection, context) {
 }
 
 function buildOperationalCostPreview(selection, context) {
-  const generatorPreview = buildGeneratorPreview(selection, context);
+  const { mode = 'prioritized', receitas = [], origens = [], incluirPims = true, sbMode = 'none', sbs = [] } = selection || {};
+  const selectedReceitas = resolveSelectedReceitas(mode, context.receitaOptions, receitas);
+  const selectedSbs = resolveSelectedSbs(sbMode, context.sbOptions, sbs);
+  const selectedOrigemSet = new Set((origens || []).map((item) => String(item || '').trim()).filter(Boolean));
+
+  const receitaPolicyMap = new Map();
+  (context.politicaRows || []).forEach((row) => {
+    if (normalizeUpper(row.tipo) !== 'RECEITA') return;
+    const tarefa = normalizeUpper(row.tarefas);
+    if (!tarefa) return;
+    receitaPolicyMap.set(tarefa, {
+      prioridade: toNumber(row.prioridade),
+      fator: toNumber(row.qtde_2_anos) > 0 ? toNumber(row.qtde_2_anos) : 1,
+    });
+  });
+
   const aggregate = new Map();
 
-  (generatorPreview.base || []).forEach((row) => {
-    const pn = normalizeKey(row.pn);
-    if (!pn) return;
-    if (!aggregate.has(pn)) {
-      aggregate.set(pn, {
-        pn,
-        nsn: row.nsn || context.pnMetaMap.get(pn)?.nsn || null,
-        nomenclatura: row.nomenclatura || context.pnMetaMap.get(pn)?.nomenclatura || 'N/A',
+  const ensureRow = (pn, base = {}) => {
+    const key = normalizeKey(pn);
+    if (!key) return null;
+    if (!aggregate.has(key)) {
+      const meta = context.pnMetaMap.get(key) || {};
+      aggregate.set(key, {
+        pn: key,
+        nsn: safeString(base.nsn) || meta.nsn || null,
+        nomenclatura: safeString(base.nomenclatura) || meta.nomenclatura || 'N/A',
+        qtd_unitaria: 0,
         qtd_planejada: 0,
         receitas: new Set(),
         pims: new Set(),
         origens: new Set(),
+        sbs: new Set(),
+        fatores: new Set(),
         observacoes: new Set(),
       });
     }
-    const ref = aggregate.get(pn);
-    ref.qtd_planejada += toNumber(row.necessidade_total);
-    (row.receitas || []).forEach((item) => item && ref.receitas.add(item));
-    (row.pims || []).forEach((item) => item && ref.pims.add(item));
-    (row.origens || []).forEach((item) => item && ref.origens.add(item));
-    (row.observacoes || []).forEach((item) => item && ref.observacoes.add(item));
+    const ref = aggregate.get(key);
+    if (!ref.nsn && base.nsn) ref.nsn = safeString(base.nsn);
+    if ((!ref.nomenclatura || ref.nomenclatura === 'N/A') && base.nomenclatura) {
+      ref.nomenclatura = safeString(base.nomenclatura);
+    }
+    return ref;
+  };
+
+  const addCostLine = ({ pn, nsn, nomenclatura, qtdUnitaria, qtdPlanejada, receita, pim, origem, sb, fator, observacao }) => {
+    const ref = ensureRow(pn, { nsn, nomenclatura });
+    if (!ref) return;
+    ref.qtd_unitaria += toNumber(qtdUnitaria);
+    ref.qtd_planejada += toNumber(qtdPlanejada);
+    if (receita) ref.receitas.add(receita);
+    if (pim) ref.pims.add(pim);
+    if (origem) ref.origens.add(origem);
+    if (sb) ref.sbs.add(sb);
+    if (fator && toNumber(fator) > 0) ref.fatores.add(Number(toNumber(fator).toFixed(2)));
+    if (observacao) ref.observacoes.add(observacao);
+  };
+
+  selectedReceitas.forEach((inspecao) => {
+    const itens = (context.receitaRows || []).filter((row) => String(row.inspecao || '').trim() === inspecao);
+    const policy = receitaPolicyMap.get(normalizeUpper(inspecao));
+    const fatorPlanejado = policy?.fator || 1;
+
+    itens.forEach((item) => {
+      const qtdPorExecucao = toNumber(item.qtd_por_ciclo);
+      if (qtdPorExecucao <= 0) return;
+      addCostLine({
+        pn: item.pn,
+        nsn: item.nsn,
+        nomenclatura: item.nomenclatura,
+        qtdUnitaria: qtdPorExecucao,
+        qtdPlanejada: qtdPorExecucao * fatorPlanejado,
+        receita: inspecao,
+        fator: fatorPlanejado,
+        observacao: `Receita: ${inspecao} • 1 execução x${qtdPorExecucao} • projeção x${fatorPlanejado}`,
+      });
+    });
+  });
+
+  if (incluirPims) {
+    (context.pimRows || []).forEach((row) => {
+      const origemNormalizada = resolvePimOrigem(row);
+      const origemKey = buildOrigemKey(origemNormalizada);
+      if (selectedOrigemSet.size > 0 && !selectedOrigemSet.has(origemKey)) return;
+      const quantidade = toNumber(row.quantidade);
+      if (quantidade <= 0) return;
+      addCostLine({
+        pn: row.pn,
+        nsn: row.nsn,
+        nomenclatura: row.nomenclatura,
+        qtdUnitaria: quantidade,
+        qtdPlanejada: quantidade,
+        pim: row.pim,
+        origem: buildOrigemLabel(origemNormalizada),
+        fator: 1,
+        observacao: `PIM avulsa x${quantidade} • OS ${row.os_vinculada}`,
+      });
+    });
+  }
+
+  selectedSbs.forEach((sbNumero) => {
+    const itens = context.sbItemsByNumero.get(sbNumero) || [];
+    itens.forEach((item) => {
+      const qtyRaw = toNumber(item.qtd);
+      const quantidade = qtyRaw > 0 ? qtyRaw : 1;
+      addCostLine({
+        pn: item.pn,
+        nsn: item.nsn,
+        nomenclatura: item.nomenclatura,
+        qtdUnitaria: quantidade,
+        qtdPlanejada: quantidade,
+        sb: sbNumero,
+        fator: 1,
+        observacao: `SB ${sbNumero} x${quantidade}`,
+      });
+    });
   });
 
   const linhas = Array.from(aggregate.values())
     .map((row) => {
       const priceInfo = context.costRefMap.get(row.pn) || context.priceMap.get(row.pn) || null;
       const valorUnit = priceInfo ? toNumber(priceInfo.valor_unitario) : null;
-      const valorTotal = valorUnit != null && row.qtd_planejada > 0
+      const valorExecucao = valorUnit != null && row.qtd_unitaria > 0
+        ? Number((valorUnit * row.qtd_unitaria).toFixed(2))
+        : null;
+      const valorPlanejado = valorUnit != null && row.qtd_planejada > 0
         ? Number((valorUnit * row.qtd_planejada).toFixed(2))
         : null;
       return {
         pn: row.pn,
         nsn: row.nsn,
         nomenclatura: row.nomenclatura,
+        qtd_unitaria: Number(row.qtd_unitaria.toFixed(2)),
         qtd_planejada: Number(row.qtd_planejada.toFixed(2)),
+        fator_planejado_texto: Array.from(row.fatores).sort((a, b) => a - b).join(' | '),
         receitas_texto: Array.from(row.receitas).sort().join(' | '),
         pims_texto: Array.from(row.pims).sort().join(' | '),
         origens_texto: Array.from(row.origens).sort().join(' | '),
+        sbs_texto: Array.from(row.sbs).sort().join(' | '),
         observacao: Array.from(row.observacoes).sort().join(' | '),
         valor_unitario_gbp: valorUnit,
-        valor_total_gbp: valorTotal,
+        valor_execucao_gbp: valorExecucao,
+        valor_planejado_gbp: valorPlanejado,
+        // Compatibilidade com a tela antiga: agora o valor_total_gbp representa 1 execução, não a projeção.
+        valor_total_gbp: valorExecucao,
         fonte_valor: priceInfo?.fonte || null,
       };
     })
     .sort((a, b) => a.pn.localeCompare(b.pn));
 
   const summary = {
-    receitas_selecionadas: generatorPreview.summary.receitas_selecionadas,
-    sbs_selecionadas: generatorPreview.summary.sbs_selecionadas,
-    origens_selecionadas: generatorPreview.summary.origens_selecionadas,
+    receitas_selecionadas: selectedReceitas.length,
+    sbs_selecionadas: selectedSbs.length,
+    origens_selecionadas: selectedOrigemSet.size,
     linhas: linhas.length,
     pns_com_valor: linhas.filter((row) => row.valor_unitario_gbp != null).length,
     pns_sem_valor: linhas.filter((row) => row.valor_unitario_gbp == null).length,
-    valor_total_gbp: Number(linhas.reduce((acc, row) => acc + toNumber(row.valor_total_gbp), 0).toFixed(2)),
+    qtd_unitaria_total: Number(linhas.reduce((acc, row) => acc + toNumber(row.qtd_unitaria), 0).toFixed(2)),
+    qtd_planejada_total: Number(linhas.reduce((acc, row) => acc + toNumber(row.qtd_planejada), 0).toFixed(2)),
+    custo_execucao_gbp: Number(linhas.reduce((acc, row) => acc + toNumber(row.valor_execucao_gbp), 0).toFixed(2)),
+    custo_projetado_gbp: Number(linhas.reduce((acc, row) => acc + toNumber(row.valor_planejado_gbp), 0).toFixed(2)),
+    // Compatibilidade com a tela antiga.
+    valor_total_gbp: Number(linhas.reduce((acc, row) => acc + toNumber(row.valor_execucao_gbp), 0).toFixed(2)),
   };
 
   return {
-    filtros: generatorPreview.filtros,
+    filtros: {
+      modo: mode,
+      receitas: selectedReceitas,
+      sbMode,
+      sbs: selectedSbs,
+      origens: Array.from(selectedOrigemSet),
+      incluirPims: !!incluirPims,
+    },
     summary,
     linhas,
   };
 }
-
 
 function buildSbDetail(header, context) {
   const items = (context.sbItemsByNumero.get(header.sb_numero) || []).map((item) => buildSbCoverageItem(item, context));
@@ -1362,8 +1474,49 @@ exports.getGeneratorOptions = async (req, res) => {
 };
 
 
-const BATCH_PN_HEADERS = ['pn', 'part_number', 'partnumber', 'part number'];
-const BATCH_QTY_HEADERS = ['quantidade', 'qtd', 'qtde', 'qty', 'quantity'];
+const BATCH_PN_HEADERS = [
+  'pn',
+  'p/n',
+  'p_n',
+  'part_number',
+  'partnumber',
+  'part number',
+  'part no',
+  'part_no',
+  'part n',
+  'part_n',
+  'numero_peca',
+  'número peça',
+  'numero da peca',
+  'número da peça',
+  'codigo',
+  'código',
+  'cod_item',
+];
+const BATCH_QTY_HEADERS = [
+  'quantidade',
+  'qtd',
+  'qtde',
+  'qtd.',
+  'qtde.',
+  'qty',
+  'quantity',
+  'necessidade',
+  'necessidade_total',
+  'demanda',
+];
+const BATCH_NSN_HEADERS = ['nsn', 'nato_stock_number', 'nato stock number', 'niin'];
+const BATCH_NOMENCLATURE_HEADERS = [
+  'nomenclatura',
+  'nome',
+  'nome_item',
+  'nome do item',
+  'descricao',
+  'descrição',
+  'description',
+  'item',
+  'material',
+];
 
 function normalizeHeaderName(value) {
   return String(value || '')
@@ -1373,6 +1526,36 @@ function normalizeHeaderName(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+function resolveHeaderKey(headerMap, candidates = []) {
+  const normalized = candidates.map(normalizeHeaderName);
+  const found = normalized.find((key) => headerMap.has(key));
+  return found ? headerMap.get(found) : null;
+}
+
+function parseBatchQuantity(value, fallback = 1) {
+  if (value === null || value === undefined || String(value).trim() === '') return fallback;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : Number.NaN;
+
+  let text = String(value).trim();
+  text = text.replace(/\s/g, '');
+
+  // Aceita padrões BR e EN: 1.234,50 / 1,234.50 / 1234,50 / 1234.50
+  if (text.includes(',') && text.includes('.')) {
+    const lastComma = text.lastIndexOf(',');
+    const lastDot = text.lastIndexOf('.');
+    if (lastComma > lastDot) {
+      text = text.replace(/\./g, '').replace(',', '.');
+    } else {
+      text = text.replace(/,/g, '');
+    }
+  } else if (text.includes(',')) {
+    text = text.replace(',', '.');
+  }
+
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
 function parseUploadedBatchWorkbook(file) {
@@ -1408,17 +1591,16 @@ function parseUploadedBatchWorkbook(file) {
 
   const firstRow = rows[0] || {};
   const headerMap = new Map(Object.keys(firstRow).map((key) => [normalizeHeaderName(key), key]));
-  const pnHeader = BATCH_PN_HEADERS.map(normalizeHeaderName).find((key) => headerMap.has(key));
-  const qtyHeader = BATCH_QTY_HEADERS.map(normalizeHeaderName).find((key) => headerMap.has(key));
+  const pnKey = resolveHeaderKey(headerMap, BATCH_PN_HEADERS);
+  const qtyKey = resolveHeaderKey(headerMap, BATCH_QTY_HEADERS);
+  const nsnKey = resolveHeaderKey(headerMap, BATCH_NSN_HEADERS);
+  const nomenclaturaKey = resolveHeaderKey(headerMap, BATCH_NOMENCLATURE_HEADERS);
 
-  if (!pnHeader) {
-    const error = new Error('A planilha precisa ter a coluna obrigatória PN. Colunas extras são permitidas e a ordem não importa.');
+  if (!pnKey) {
+    const error = new Error('A planilha precisa ter a coluna obrigatória PN. Aceito também P/N, Part Number ou Part No. Colunas extras são permitidas e a ordem não importa.');
     error.statusCode = 400;
     throw error;
   }
-
-  const pnKey = headerMap.get(pnHeader);
-  const qtyKey = qtyHeader ? headerMap.get(qtyHeader) : null;
 
   const aggregated = new Map();
   let linhasLidas = 0;
@@ -1427,29 +1609,33 @@ function parseUploadedBatchWorkbook(file) {
     const pnRaw = row[pnKey];
     const pn = normalizeKey(pnRaw);
     const qtyRaw = qtyKey ? row[qtyKey] : '';
-    if (!pn && !String(qtyRaw || '').trim()) return;
+    const nsn = nsnKey ? normalizeUpper(row[nsnKey]) : '';
+    const nomenclatura = nomenclaturaKey ? String(row[nomenclaturaKey] || '').trim() : '';
+
+    if (!pn && !String(qtyRaw || '').trim() && !nsn && !nomenclatura) return;
     linhasLidas += 1;
+
     if (!pn) {
       const error = new Error(`Linha ${index + 2}: PN vazio.`);
       error.statusCode = 400;
       throw error;
     }
 
-    let quantidade = 1;
-    if (qtyKey && String(qtyRaw || '').trim() !== '') {
-      const parsed = Number(String(qtyRaw).replace(',', '.'));
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        const error = new Error(`Linha ${index + 2}: quantidade inválida para o PN ${pn}.`);
-        error.statusCode = 400;
-        throw error;
-      }
-      quantidade = parsed;
+    const quantidade = parseBatchQuantity(qtyRaw, 1);
+    if (!Number.isFinite(quantidade) || quantidade <= 0) {
+      const error = new Error(`Linha ${index + 2}: quantidade inválida para o PN ${pn}.`);
+      error.statusCode = 400;
+      throw error;
     }
 
     if (!aggregated.has(pn)) {
-      aggregated.set(pn, { pn, quantidade_total: 0 });
+      aggregated.set(pn, { pn, nsn: nsn || null, nomenclatura: nomenclatura || null, quantidade_total: 0 });
     }
-    aggregated.get(pn).quantidade_total += quantidade;
+
+    const current = aggregated.get(pn);
+    current.quantidade_total += quantidade;
+    if (!current.nsn && nsn) current.nsn = nsn;
+    if (!current.nomenclatura && nomenclatura) current.nomenclatura = nomenclatura;
   });
 
   if (!aggregated.size) {
@@ -1465,12 +1651,14 @@ function parseUploadedBatchWorkbook(file) {
     linhasBase: Array.from(aggregated.values()).sort((a, b) => a.pn.localeCompare(b.pn)),
     columns: {
       obrigatorias: ['pn'],
-      opcionais: ['quantidade'],
+      opcionais: ['quantidade', 'nsn', 'nomenclatura'],
       aceita_mais_colunas: true,
       ordem_importa: false,
       aliases: {
         pn: BATCH_PN_HEADERS,
         quantidade: BATCH_QTY_HEADERS,
+        nsn: BATCH_NSN_HEADERS,
+        nomenclatura: BATCH_NOMENCLATURE_HEADERS,
       },
     },
   };
@@ -1481,8 +1669,8 @@ function buildBatchQueryPreview(parsedFile, context) {
     const meta = context.pnMetaMap.get(row.pn) || {};
     return {
       pn: row.pn,
-      nsn: meta.nsn || null,
-      nomenclatura: meta.nomenclatura || 'N/A',
+      nsn: row.nsn || meta.nsn || null,
+      nomenclatura: row.nomenclatura || meta.nomenclatura || 'N/A',
       necessidade_total: Number(toNumber(row.quantidade_total).toFixed(2)),
       receitas: [],
       pims: [],

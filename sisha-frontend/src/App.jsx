@@ -2,13 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import {
   LayoutDashboard, PackageSearch, PenTool, Calculator, ShoppingCart,
-  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu
+  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu, Bot
 } from 'lucide-react';
 import Cadastro from './pages/Cadastro';
 import ConsultaItens from './pages/ConsultaItens';
 import GeradorNecessidades from './pages/GeradorNecessidades';
 import CustoOperacional from './pages/CustoOperacional';
 import ServiceBulletins from './pages/ServiceBulletins';
+import OrdensCompras from './pages/OrdensCompras';
+import ChatLince from './pages/ChatLince';
 import Login from './pages/Login';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -45,6 +47,50 @@ const CardStatus = ({ title, value, secondaryValue, secondaryLabel, color, icon:
   </div>
 );
 
+const OdcPipelineCard = ({ loading, pipeline = {} }) => {
+  const aguardandoRecursos = Number(pipeline.aguardandoRecursos || 0);
+  const chips = [
+    ['ELB', pipeline.elaboracao || 0, 'Elaboração'],
+    ['TRI/ANS', pipeline.triagemAnalise || 0, 'Triagem/Análise'],
+    ['COT/PRO', pipeline.cotacao || 0, 'Cotação'],
+    ['LIB/LPC', pipeline.liberadaCotacao || 0, 'Liberado cotação'],
+    ['ODC', pipeline.odc || 0, 'OC gerada'],
+  ];
+
+  return (
+    <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border-b-8 border-amber-500 shadow-lg border-gray-200 dark:border-slate-700 transition-all hover:translate-y-[-4px]">
+      <div className="flex justify-between items-start gap-4">
+        <div className="flex-1 min-w-0">
+          <h4 className="text-[11px] uppercase tracking-[0.2em] font-black text-gray-400 dark:text-gray-500 mb-1">PD AGU REC</h4>
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <p className="text-[clamp(1rem,1.2vw,1.8rem)] font-black text-slate-800 dark:text-white whitespace-nowrap leading-none">
+              {loading ? '...' : aguardandoRecursos.toLocaleString('pt-BR')}
+            </p>
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-tighter">PDs aguardando recursos</span>
+          </div>
+          <p className="mt-2 text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
+            Não inclui ODA, EMB, REC, FAT ou CAN
+          </p>
+          <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-700/50 grid grid-cols-2 gap-2">
+            {chips.map(([sigla, valor, label]) => (
+              <div key={sigla} className="rounded-xl bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-700 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-black text-slate-400 uppercase">{sigla}</span>
+                  <span className="text-sm font-black text-blue-600 dark:text-blue-400">{loading ? '...' : Number(valor || 0).toLocaleString('pt-BR')}</span>
+                </div>
+                <p className="text-[9px] font-bold text-slate-400 uppercase truncate">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 text-slate-400 shrink-0">
+          <AlertTriangle size={28} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const DashboardLayout = ({ children }) => {
   const [darkMode, setDarkMode] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -60,13 +106,14 @@ const DashboardLayout = ({ children }) => {
   }, [location.pathname]);
 
   const allMenuItems = [
-    { path: '/', icon: LayoutDashboard, label: 'Visão Geral', roles: ['admin', 'operador'] },
-    { path: '/consulta', icon: PackageSearch, label: 'Consulta de Itens', roles: ['admin', 'operador'] },
-    { path: '/cadastro', icon: Database, label: 'Central de Inserção', roles: ['admin'] },
-    { path: '/sb', icon: FileText, label: 'Service Bulletin', roles: ['admin'] },
-    { path: '/gerador', icon: PenTool, label: 'Gerador de Necessidades', roles: ['admin', 'operador'] },
-    { path: '/custo', icon: Calculator, label: 'Custo Operacional', roles: ['admin', 'operador'] },
-    { path: '/compras', icon: ShoppingCart, label: 'Ordens de Compras', roles: ['admin', 'operador'] },
+    { path: '/', icon: LayoutDashboard, label: 'Visão Geral', roles: ['dono', 'admin', 'operador'] },
+    { path: '/consulta', icon: PackageSearch, label: 'Consulta de Itens', roles: ['dono', 'admin', 'operador'] },
+    { path: '/cadastro', icon: Database, label: 'Central de Inserção', roles: ['dono', 'admin'] },
+    { path: '/sb', icon: FileText, label: 'Service Bulletin', roles: ['dono', 'admin'] },
+    { path: '/gerador', icon: PenTool, label: 'Gerador de Necessidades', roles: ['dono', 'admin', 'operador'] },
+    { path: '/custo', icon: Calculator, label: 'Custo Operacional', roles: ['dono', 'admin', 'operador'] },
+    { path: '/compras', icon: ShoppingCart, label: 'Ordens de Compras', roles: ['dono', 'admin', 'operador'] },
+    { path: '/chat-lince', icon: Bot, label: 'Chat Lince', roles: ['dono', 'admin', 'operador'] },
   ];
 
   const menuItems = allMenuItems.filter(item => item.roles.includes(user?.role || 'operador'));
@@ -93,7 +140,7 @@ const DashboardLayout = ({ children }) => {
           <div className="flex items-center gap-2 mt-1 max-w-full px-2">
             <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse shrink-0"></span>
             <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest truncate">
-              {user?.role === 'admin' ? 'Admin' : 'Operador'} • {user?.email || '---'}
+              {user?.role === 'dono' ? 'Dono' : user?.role === 'admin' ? 'Admin' : 'Operador'} • {user?.email || '---'}
             </p>
           </div>
         </div>
@@ -175,6 +222,7 @@ const VisaoGeral = () => {
     totalODA_PDs: 0,
     totalODC: 0,
     totalODC_PDs: 0,
+    odcPipeline: {},
     orcamento: '£0.00',
     pnsPrecificados: 0,
     moeda: 'GBP',
@@ -232,14 +280,9 @@ const VisaoGeral = () => {
           color="border-indigo-600"
           icon={FileUp}
         />
-        <CardStatus
-          title="ODC Pendentes"
-          value={loading ? '...' : Number(stats.totalODC || 0).toLocaleString('pt-BR')}
-          secondaryValue={stats.totalODC_PDs}
-          secondaryLabel="PDs Pendentes"
-          color="border-amber-500"
-          icon={AlertTriangle}
-          unitLabel="Itens"
+        <OdcPipelineCard
+          loading={loading}
+          pipeline={stats.odcPipeline || {}}
         />
         <CardStatus
           title="Estoque Valorizado"
@@ -252,7 +295,7 @@ const VisaoGeral = () => {
         />
       </div>
 
-      <div className={`grid grid-cols-1 ${user?.role === 'admin' ? 'lg:grid-cols-3' : 'lg:grid-cols-1'} gap-8`}>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="bg-white dark:bg-slate-800 rounded-3xl border border-gray-200 dark:border-slate-700 shadow-sm overflow-hidden flex flex-col transition-all hover:shadow-md">
           <div className="p-6 border-b border-gray-200 dark:border-slate-700 bg-red-50/50 dark:bg-red-900/10">
             <h3 className="font-black text-xs uppercase tracking-[0.2em] text-red-600 dark:text-red-400 flex items-center gap-2">
@@ -280,8 +323,7 @@ const VisaoGeral = () => {
           </div>
         </div>
 
-        {user?.role === 'admin' && (
-          <div className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-3xl border border-gray-200 dark:border-slate-700 shadow-sm overflow-hidden">
+        <div className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-3xl border border-gray-200 dark:border-slate-700 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-gray-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/30">
               <h3 className="font-black text-xs uppercase tracking-[0.2em] text-slate-500">Log de Operações Recentes</h3>
             </div>
@@ -293,7 +335,7 @@ const VisaoGeral = () => {
                     <p className="text-xs text-slate-400 truncate">{op.uploaded_by_email || 'Sistema'} • {formatDateTime(op.created_at)}</p>
                     {op.mensagem ? <p className="text-[11px] text-slate-500 truncate">{op.mensagem}</p> : null}
                   </div>
-                  <span className={`text-xs font-black uppercase shrink-0 ${String(op.status || '').toUpperCase() === 'SUCESSO' ? 'text-green-600' : 'text-red-600'}`}>
+                  <span className={`text-xs font-black uppercase shrink-0 ${['SUCESSO', 'INFO', 'AUDIT'].includes(String(op.status || '').toUpperCase()) ? 'text-green-600' : String(op.status || '').toUpperCase() === 'WARN' ? 'text-amber-500' : 'text-red-600'}`}>
                     {op.status || 'N/A'}
                   </span>
                 </div>
@@ -304,7 +346,6 @@ const VisaoGeral = () => {
               )}
             </div>
           </div>
-        )}
       </div>
     </div>
   );
@@ -324,11 +365,12 @@ function AppRoutes() {
                 <Routes>
                   <Route path="/" element={<VisaoGeral />} />
                   <Route path="/consulta" element={<ConsultaItens />} />
-                  <Route path="/cadastro" element={<ProtectedRoute roles={["admin"]}><Cadastro /></ProtectedRoute>} />
-                  <Route path="/sb" element={<ProtectedRoute roles={["admin"]}><ServiceBulletins /></ProtectedRoute>} />
+                  <Route path="/cadastro" element={<ProtectedRoute roles={["dono","admin"]}><Cadastro /></ProtectedRoute>} />
+                  <Route path="/sb" element={<ProtectedRoute roles={["dono","admin"]}><ServiceBulletins /></ProtectedRoute>} />
                   <Route path="/gerador" element={<GeradorNecessidades />} />
                   <Route path="/custo" element={<CustoOperacional />} />
-                  <Route path="/compras" element={<div>Compras</div>} />
+                  <Route path="/compras" element={<OrdensCompras />} />
+                  <Route path="/chat-lince" element={<ChatLince />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </DashboardLayout>

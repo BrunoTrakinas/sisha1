@@ -1,0 +1,10 @@
+# Arquivos de ambiente - nunca versionar
+.env
+.env.*
+sisha-backend/.env
+sisha-frontend/.env
+
+# Exemplos podem ir para o GitHub
+!.env.example
+!sisha-backend/.env.example
+!sisha-frontend/.env.example

@@ -126,3 +126,75 @@ exports.excluirPpuPorId = async (req, res) => {
         });
     }
 };
+// Cadastro de apelidos operacionais: HMU, MGB, Servo, etc.
+exports.listarApelidos = async (req, res) => {
+    try {
+        const termo = normalizarIdentificador(req.query.q || '');
+        let query = supabase
+            .from('item_apelidos')
+            .select('*')
+            .eq('ativo', true)
+            .order('apelido', { ascending: true })
+            .limit(200);
+
+        const { data, error } = await query;
+        if (error) throw error;
+
+        const filtrados = termo
+            ? (data || []).filter((row) =>
+                normalizarIdentificador(row.pn).includes(termo) ||
+                normalizarIdentificador(row.apelido).includes(termo) ||
+                normalizarIdentificador(row.descricao_oficial).includes(termo)
+              )
+            : (data || []);
+
+        return res.status(200).json({ status: 'success', data: filtrados });
+    } catch (error) {
+        console.error('ERRO AO LISTAR APELIDOS:', error);
+        return res.status(500).json({ status: 'error', message: 'Falha ao consultar apelidos operacionais.' });
+    }
+};
+
+exports.criarApelido = async (req, res) => {
+    try {
+        const pn = normalizarIdentificador(req.body.pn);
+        const apelido = normalizarIdentificador(req.body.apelido);
+        if (!pn || !apelido) {
+            return res.status(400).json({ status: 'error', message: 'PN e apelido são obrigatórios.' });
+        }
+
+        const { data, error } = await supabase
+            .from('item_apelidos')
+            .insert({
+                pn,
+                apelido,
+                descricao_oficial: req.body.descricao_oficial || null,
+                observacao: req.body.observacao || null,
+                ativo: true,
+            })
+            .select('*')
+            .single();
+
+        if (error) throw error;
+        return res.status(201).json({ status: 'success', message: 'Apelido operacional cadastrado.', data });
+    } catch (error) {
+        console.error('ERRO AO CRIAR APELIDO:', error);
+        return res.status(500).json({ status: 'error', message: 'Falha ao cadastrar apelido operacional.' });
+    }
+};
+
+exports.excluirApelido = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('item_apelidos')
+            .update({ ativo: false })
+            .eq('id', id);
+
+        if (error) throw error;
+        return res.status(200).json({ status: 'success', message: 'Apelido operacional desativado.' });
+    } catch (error) {
+        console.error('ERRO AO EXCLUIR APELIDO:', error);
+        return res.status(500).json({ status: 'error', message: 'Falha ao desativar apelido operacional.' });
+    }
+};

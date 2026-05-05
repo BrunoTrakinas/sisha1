@@ -5,7 +5,7 @@ const controller = require('../controllers/needsController');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
-const adminOnly = requireRole(['admin']);
+const adminOnly = requireRole(['admin', 'dono']);
 
 router.get('/generator/options', controller.getGeneratorOptions);
 router.post('/generator/preview', controller.previewGenerator);

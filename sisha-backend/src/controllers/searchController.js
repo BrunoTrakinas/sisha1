@@ -50,6 +50,48 @@ function normalizeUpper(value) {
     return String(value || '').trim().toUpperCase();
 }
 
+function getSubItemPriority(value) {
+    const text = normalizeUpper(value);
+    if (!text) return 999;
+
+    const letterMatch = text.match(/([A-Z])\s*$/);
+    if (letterMatch) {
+        return letterMatch[1].charCodeAt(0) - 64; // A=1, B=2, C=3...
+    }
+
+    const numericMatch = text.match(/(\d+)\s*$/);
+    if (numericMatch) {
+        return Number(numericMatch[1]);
+    }
+
+    return 999;
+}
+
+function compareManualAlternativeRows(a = {}, b = {}) {
+    const priorityDiff = getSubItemPriority(a.sub_item) - getSubItemPriority(b.sub_item);
+    if (priorityDiff !== 0) return priorityDiff;
+
+    const subDiff = normalizeUpper(a.sub_item).localeCompare(normalizeUpper(b.sub_item));
+    if (subDiff !== 0) return subDiff;
+
+    return normalizeUpper(a.pn).localeCompare(normalizeUpper(b.pn));
+}
+
+function compareAlternativeCards(a = {}, b = {}) {
+    const aManual = String(a.origem || '').includes('manual');
+    const bManual = String(b.origem || '').includes('manual');
+
+    if (aManual || bManual) {
+        const priorityDiff = (a.prioridade_manual ?? 999) - (b.prioridade_manual ?? 999);
+        if (priorityDiff !== 0) return priorityDiff;
+    }
+
+    const sourceDiff = String(a.origem || '').localeCompare(String(b.origem || ''));
+    if (sourceDiff !== 0) return sourceDiff;
+
+    return normalizeUpper(a.pn).localeCompare(normalizeUpper(b.pn));
+}
+
 function isNsnReal(nsn) {
     return nsn && String(nsn) !== 'N/A' && !String(nsn).includes('PND');
 }
@@ -164,7 +206,7 @@ exports.searchItems = async (req, res) => {
         // ---------------------------------------------------------
         const p1 = supabase.from('items').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p2 = supabase.from('dicionario_mestre').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p3 = supabase.from('estoque_ppu').select('pn, nomenclatura, nsn_pi').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
+        const p3 = supabase.from('estoque_ppu').select('pn, nomenclatura, nsn_pi, sn').or(`pn.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p4 = supabase.from('lisde').select('pn, nomenclatura').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p5 = supabase.from('price_list').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(20);
         const p6 = supabase.from('estoque_ceimspa').select('pi, nomenclatura').or(`pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
@@ -172,8 +214,9 @@ exports.searchItems = async (req, res) => {
         const p8 = supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').or(`pn.ilike.%${query}%,pi.ilike.%${query}%,pn_alt.ilike.%${query}%`).limit(100);
         const p9 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura').or(`pn.ilike.%${query}%`).limit(80);
         const p10 = supabase.from('service_bulletins').select('sb_numero, titulo').or(`sb_numero.ilike.%${query}%,titulo.ilike.%${query}%`).limit(30);
+        const p11 = supabase.from('item_apelidos').select('pn, apelido, descricao_oficial').eq('ativo', true).or(`pn.ilike.%${query}%,apelido.ilike.%${query}%,descricao_oficial.ilike.%${query}%`).limit(50);
 
-        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]);
+        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11]);
         const getRes = (index) => results[index].status === 'fulfilled' ? results[index].value.data : null;
 
         const itemsMatch = getRes(0) || [];
@@ -186,6 +229,15 @@ exports.searchItems = async (req, res) => {
         const altDocMatch = getRes(7) || [];
         const sbPnMatch = getRes(8) || [];
         const sbHeaderMatch = getRes(9) || [];
+        const apelidosMatch = getRes(10) || [];
+
+        apelidosMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'APELIDO_OPERACIONAL');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.descricao_oficial, 'ITEMS');
+        });
 
         itemsMatch.forEach((i) => {
             const pn = normalizeUpper(i.pn);
@@ -215,6 +267,9 @@ exports.searchItems = async (req, res) => {
             registerSource(fontesEncontradas, pn, 'ESTOQUE_PPU');
             setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclatura, 'ESTOQUE_PPU');
             setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, i.nsn_pi, 'ESTOQUE_PPU');
+            if (normalizeUpper(i.sn) === query) {
+                registerSource(fontesEncontradas, pn, 'SN_ESTOQUE_PPU');
+            }
         });
 
         lisdeMatch.forEach((i) => {
@@ -332,8 +387,10 @@ exports.searchItems = async (req, res) => {
         const q8 = supabase.from('price_list').select('*').in('pn', arrayPns);
         const q9 = supabase.from('rfq_cotacoes').select('*').in('pn', arrayPns);
         const q10 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura, qtd, capitulo, item_num, aplicabilidade').in('pn', arrayPns);
+        const q11 = supabase.from('compras_pds').select('*').in('pn', arrayPns).eq('ativo', true);
+        const q12 = supabase.from('work_orders').select('*').in('pn', arrayPns).eq('ativo', true);
 
-        const batchResults = await Promise.allSettled([q1, q2, q3, q4, q5, q6, q7, q8, q9, q10]);
+        const batchResults = await Promise.allSettled([q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12]);
         const getBatchRes = (index) => batchResults[index].status === 'fulfilled' ? batchResults[index].value.data : null;
 
         const ppuData = getBatchRes(0) || [];
@@ -354,6 +411,8 @@ exports.searchItems = async (req, res) => {
         const plData = getBatchRes(7) || [];
         const rfqDataFull = getBatchRes(8) || [];
         const sbItemData = getBatchRes(9) || [];
+        const comprasPdData = getBatchRes(10) || [];
+        const workOrdersData = getBatchRes(11) || [];
 
         let altDocRows = [];
         try {
@@ -514,9 +573,40 @@ exports.searchItems = async (req, res) => {
             };
 
             item.oda = odaData.filter((p) => normalizeUpper(p.pn) === pnUpper);
-            item.odc = odcData.filter((p) => normalizeUpper(p.pn) === pnUpper);
+            const legacyOdc = odcData.filter((p) => normalizeUpper(p.pn) === pnUpper);
+            const comprasPdOdc = comprasPdData
+                .filter((p) => {
+                    const st = normalizeUpper(p.status_grupo || p.status);
+                    return normalizeUpper(p.pn) === pnUpper && p.ativo !== false && !['CAN', 'EXCLUIDO', 'REC', 'FAT'].includes(st);
+                })
+                .map((p) => ({
+                    ...p,
+                    origem: p.origem_importacao || 'COMPRAS_PDS',
+                    pd_referencia: p.numero_pd,
+                    qtd_pendente: Number(p.qtd_comprada || p.quantidade || p.qtd_pedida || 0),
+                    status_pd: p.status_grupo || p.status,
+                    numero_oc: p.numero_oc,
+                }));
+            item.odc = [...legacyOdc, ...comprasPdOdc];
             item.foc = focData.filter((p) => normalizeUpper(p.pn) === pnUpper);
-            item.repairs = repData.filter((p) => normalizeUpper(p.pn) === pnUpper);
+            const repairsOrderBook = repData.filter((p) => normalizeUpper(p.pn) === pnUpper);
+            const repairsWo = workOrdersData
+                .filter((p) => normalizeUpper(p.pn) === pnUpper && p.ativo !== false)
+                .map((wo) => ({
+                    ...wo,
+                    origem: 'WORK_ORDER',
+                    tipo: `WO/${wo.status || 'PENDENTE'}`,
+                    documento_referencia: wo.numero_wo,
+                    sn: wo.sn || 'PENDENTE',
+                    nomenclatura: wo.nomenclatura || null,
+                    fonte_nomenclatura: wo.fonte_nomenclatura || null,
+                    status: wo.status,
+                    resultado_tecnico: wo.resultado_tecnico || 'PENDENTE',
+                    tipo_wo: wo.tipo_wo || null,
+                    observacao: wo.observacao || null,
+                    data_previsao: wo.data_previsao_entrega || wo.data_previsao,
+                }));
+            item.repairs = [...repairsOrderBook, ...repairsWo];
             item.lisde = lisdeData.filter((l) => normalizeUpper(l.pn) === pnUpper);
 
             let cotacoesValidasParaOPriceList = [];
@@ -554,10 +644,16 @@ exports.searchItems = async (req, res) => {
 
             let altsUnicosMap = new Map();
             item.dicionario.forEach((entry) => {
-                const irmaos = allAlternativosRaw.filter((a) => a.dmc === entry.dmc && a.item_num === entry.item_num && normalizeUpper(a.pn) !== pnUpper);
+                // DMC + Item identificam a família técnica.
+                // Subitem não bloqueia equivalência; ele ordena preferência de uso (00A original, 00B primeira alternativa...).
+                const irmaos = allAlternativosRaw
+                    .filter((a) => a.dmc === entry.dmc && a.item_num === entry.item_num && normalizeUpper(a.pn) !== pnUpper)
+                    .sort(compareManualAlternativeRows);
+
                 irmaos.forEach((irmao) => {
                     const altPn = normalizeUpper(irmao.pn);
                     const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+                    const prioridadeManual = getSubItemPriority(irmao.sub_item);
                     const existente = altsUnicosMap.get(altPn) || {};
                     altsUnicosMap.set(altPn, {
                         pn: altPn,
@@ -565,6 +661,8 @@ exports.searchItems = async (req, res) => {
                         ppu_qtd: altQty,
                         fonte: mergeSourceLabels(existente.fonte, ['MANUAL TÉCNICO']),
                         origem: 'manual',
+                        sub_item: irmao.sub_item || existente.sub_item || null,
+                        prioridade_manual: Math.min(existente.prioridade_manual ?? 999, prioridadeManual),
                     });
                 });
             });
@@ -592,10 +690,12 @@ exports.searchItems = async (req, res) => {
                     ppu_qtd: altQty,
                     fonte: mergeSourceLabels(existente.fonte, fontesDocumento),
                     origem: existente.origem === 'manual' ? 'manual_documento' : 'documento',
+                    sub_item: existente.sub_item || null,
+                    prioridade_manual: existente.prioridade_manual ?? 999,
                 });
             });
 
-            item.alternativos = Array.from(altsUnicosMap.values()).sort((a, b) => a.pn.localeCompare(b.pn));
+            item.alternativos = Array.from(altsUnicosMap.values()).sort(compareAlternativeCards);
             item.tem_mapa_manual = item.dicionario.length > 0;
             item.fontes_alternativos = mergeSourceLabels(item.alternativos.map((alt) => alt.fonte));
 
