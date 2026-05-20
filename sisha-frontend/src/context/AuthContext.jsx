@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { API_BASE_URL } from '../lib/api';
 
 const AuthContext = createContext(null);
 const STORAGE_KEY = 'sisha_session';
@@ -30,13 +31,44 @@ export function AuthProvider({ children }) {
     setToken(session.token);
   };
 
-  const logout = () => {
-    sessionStorage.removeItem(STORAGE_KEY);
-    setUser(null);
-    setToken(null);
-  };
+  const logout = useCallback(async () => {
+    const currentToken = token;
+    try {
+      if (currentToken) {
+        await fetch(`${API_BASE_URL}/auth/logout`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${currentToken}` },
+        });
+      }
+    } catch {
+      // Logout local deve funcionar mesmo se o backend estiver indisponível.
+    } finally {
+      sessionStorage.removeItem(STORAGE_KEY);
+      setUser(null);
+      setToken(null);
+    }
+  }, [token]);
 
-  const value = useMemo(() => ({ user, token, loading, login, logout }), [user, token, loading]);
+  useEffect(() => {
+    if (!token || !user) return undefined;
+
+    const ping = () => {
+      fetch(`${API_BASE_URL}/auth/presence/ping`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ path: window.location?.pathname || '/' }),
+      }).catch(() => {});
+    };
+
+    ping();
+    const interval = window.setInterval(ping, 60000);
+    return () => window.clearInterval(interval);
+  }, [token, user]);
+
+  const value = useMemo(() => ({ user, token, loading, login, logout }), [user, token, loading, logout]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

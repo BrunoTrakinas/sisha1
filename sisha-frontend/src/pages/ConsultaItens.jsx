@@ -12,6 +12,8 @@ const SOURCE_LABELS = {
     RFQ_COTACOES: 'RFQ',
     PN_ALTERNATIVOS_DOCUMENTO: 'Doc. alternativos',
     CEIMSPA_VIA_DICIONARIO: 'CeIMSPA via manual',
+    CEIMSPA_SEM_PN_CONFIRMADO: 'CeIMSPA sem PN confirmado',
+    ESTOQUE_CEIMSPA: 'Estoque CeIMSPA',
     SERVICE_BULLETIN: 'Service Bulletin',
 };
 
@@ -220,6 +222,12 @@ export default function ConsultaItens() {
                                                 {formatSource(fonte)}
                                             </span>
                                         ))}
+                                    </div>
+                                ) : null}
+
+                                {item.aviso_operacional ? (
+                                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm font-bold text-amber-800">
+                                        {item.aviso_operacional}
                                     </div>
                                 ) : null}
                             </div>

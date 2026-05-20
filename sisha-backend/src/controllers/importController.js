@@ -4,6 +4,7 @@ const supabase = require('../config/supabaseClient');
 const pdfParse = require('pdf-parse'); // <-- Motor de PDF adicionado no topo
 const { findHeaderRow, buildIndexMap, normalizePn } = require('../utils/importAliases');
 const { setAuditSummary, recordAuditIssue } = require('../utils/importAudit');
+const { registrarAuditoria } = require('../utils/auditLogger');
 
 const cleanCurrency = (val) => val ? parseFloat(String(val).replace(/[^0-9.,]/g, '').replace(',', '.')) || 0 : 0;
 const safeString = (val) => val ? String(val).trim() : null;
@@ -985,7 +986,7 @@ exports.importData = async (req, res) => {
 
                 if (ceimspaData.length > 0) {
                     if (deveSobrescrever) {
-                        await supabase.from('estoque_ceimspa').delete().neq('pi', 'LIMPEZA');
+                        await supabase.from('estoque_ceimspa').delete().not('id', 'is', null);
                     }
                     
                     const chunkSize = 1000;
@@ -996,6 +997,22 @@ exports.importData = async (req, res) => {
                     const msgFinal = deveSobrescrever 
                         ? `Base CEIMSPA Reiniciada! ${ceimspaData.length} itens gravados com sucesso.` 
                         : `Suplemento CEIMSPA: ${ceimspaData.length} novos itens adicionados ao cofre.`;
+
+                    await registrarAuditoria({
+                        req,
+                        action: deveSobrescrever ? 'CEIMSPA_SOBRESCRITO' : 'CEIMSPA_SUPLEMENTADO',
+                        entity: 'ESTOQUE_CEIMSPA',
+                        entityId: req.file?.originalname || 'ceimspa',
+                        summary: `${req.user?.email || 'Usuário'} ${deveSobrescrever ? 'substituiu' : 'suplementou'} a base CeIMSPA com ${ceimspaData.length} itens.`,
+                        details: {
+                            overwrite: deveSobrescrever,
+                            linhas_lidas: Math.max(linhasNormalizadas.length - (hIdx + 1), 0),
+                            linhas_importadas: ceimspaData.length,
+                            arquivo: req.file?.originalname || null,
+                        },
+                        level: deveSobrescrever ? 'WARN' : 'INFO',
+                        visibility: 'GOD',
+                    });
 
                     return respondSuccess(msgFinal, {}, { tabelaAlvo: 'estoque_ceimspa', linhasLidas: Math.max(linhasNormalizadas.length - (hIdx + 1), 0), linhasImportadas: ceimspaData.length, detalhes: { overwrite: deveSobrescrever } });
                 } else {

@@ -439,7 +439,7 @@ function tryParseJson(text = '') {
   }
 }
 
-async function callOpenRouter(messages, { temperature = 0.2, responseFormat = null } = {}) {
+async function callOpenRouter(messages, { temperature = 0.2, responseFormat = null, model = DEFAULT_MODEL } = {}) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) return { ok: false, reason: 'OPENROUTER_API_KEY não configurada.' };
   if (typeof fetch !== 'function') return { ok: false, reason: 'fetch global indisponível nesta versão do Node.js.' };
@@ -454,7 +454,7 @@ async function callOpenRouter(messages, { temperature = 0.2, responseFormat = nu
         'X-Title': CHAT_LINCE_NAME,
       },
       body: JSON.stringify({
-        model: DEFAULT_MODEL,
+        model,
         messages,
         temperature,
         ...(responseFormat ? { response_format: responseFormat } : {}),
@@ -470,10 +470,57 @@ async function callOpenRouter(messages, { temperature = 0.2, responseFormat = nu
     }
 
     const content = payload?.choices?.[0]?.message?.content || '';
-    return { ok: true, content, model: payload?.model || DEFAULT_MODEL };
+    return { ok: true, content, model: payload?.model || model };
   } catch (error) {
     return { ok: false, reason: error.message || 'Falha ao consultar OpenRouter.' };
   }
+}
+
+async function extractTextFromImagesWithAi({ images = [], fileName = 'documento.pdf', tipoDocumento = '' } = {}) {
+  const usableImages = (images || [])
+    .filter((image) => image?.base64 && image?.mime)
+    .slice(0, 8);
+
+  if (usableImages.length === 0) {
+    return { ok: false, reason: 'Nenhuma imagem extraída do PDF para leitura visual.' };
+  }
+
+  const content = [
+    {
+      type: 'text',
+      text: [
+        `Arquivo: ${fileName}`,
+        `Tipo informado: ${tipoDocumento || 'não informado'}`,
+        '',
+        'Leia visualmente as páginas/imagens anexadas e transcreva o texto logístico de forma fiel.',
+        'Preserve PN, NSN/PI, descrição, lead time, quantidade, preço, valor, número de cotação, datas, validade e observações.',
+        'Quando houver tabela, use linhas com separador " | " para facilitar a extração posterior.',
+        'Não invente campos ausentes. Se algo estiver ilegível, escreva ILEGÍVEL.',
+      ].join('\n'),
+    },
+    ...usableImages.map((image) => ({
+      type: 'image_url',
+      image_url: { url: `data:${image.mime};base64,${image.base64}` },
+    })),
+  ];
+
+  const ai = await callOpenRouter([
+    {
+      role: 'system',
+      content: `Você é o ${CHAT_LINCE_NAME}, leitor visual de documentos logísticos aeronáuticos. Sua função é OCR/extração visual fiel, sem interpretação livre.`,
+    },
+    { role: 'user', content },
+  ], {
+    temperature: 0,
+    model: process.env.OPENROUTER_VISION_MODEL || process.env.CHAT_LINCE_VISION_MODEL || DEFAULT_MODEL,
+  });
+
+  if (!ai.ok) return ai;
+  const text = compactText(ai.content || '', 50000);
+  if (!text || text.length < 20) {
+    return { ok: false, reason: 'A IA visual não retornou texto suficiente.' };
+  }
+  return { ok: true, text, model: ai.model };
 }
 
 async function analyzeDocumentWithAi({ tipoDocumento, text, fileName }) {
@@ -1233,7 +1280,7 @@ async function answerConsultQuestion(question = '', user = null) {
   const ai = await callOpenRouter([
     {
       role: 'system',
-      content: `Você é o ${CHAT_LINCE_NAME}, IA consultora documental e logística do SISHA-1. Responda em português-BR, de forma humana, cordial e objetiva, como um assistente do PPU. Evite parecer relatório robótico: nada de JSON bruto, nada de listar campos internos vazios, nada de tabela desnecessária. Use somente o contexto fornecido. Nunca invente dados. Se o usuário disser processo, aquisição, compra, PD, OC, ODC, ODA, WO ou reparo, entenda como intenção logística de saber se existe caminho de suprimento/recuperação para resolver a indisponibilidade e colocar o item na linha de voo. Se houver dados de WO/Repair do Order Book, considere isso como evidência de WO/repair mesmo que a tabela seja leonardo_repairs. Se o contexto trouxer correlacoes_sugeridas, explique que encontrou uma possível equivalência de nomenclatura, apresente os dados encontrados com ressalva e peça confirmação para cadastrar o termo como apelido operacional. Exemplo: “Encontrei PUMP, FUEL BOOSTER. Você confirma que é o mesmo que booster pump?”. Se o contexto trouxer aplicação no manual/dicionário técnico, explique onde o item aparece, DMC, item/subitem, nomenclatura e ressalva. Se não houver evidência, diga que não encontrou e oriente Help Desk. Regras fixas: CeIMSPA é possibilidade e deve ser confirmado; LISDE não é estoque e reduz LT efetivo; prontidão só é SIM com 100% no PPU; OC/ODC/ODA devem aparecer junto dos PDs; PN sem Price List/RFQ/recebimento precisa cotar; busca PN deve ser exata ou por prefixo, não por contém; CAN cancela logicamente compra ativa, saldo, radar e necessidade útil, preservando histórico. Integre Política de Estoque, Custo Operacional e Gerador de Necessidades quando a pergunta tocar nesses temas. Para pergunta “onde está o SN”, responda pela melhor trilha: equipamento serializado, eventos, WO/Repair/RECEX, PPU e staging de OS; ressalve quando faltar relatório oficial de OS de instalação/remoção.`,
+      content: `Você é o ${CHAT_LINCE_NAME}, IA consultora documental e logística do SISHA-1. Responda em português-BR com padrão direto 10/10: primeiro a conclusão, depois evidências, fontes consultadas e próxima ação. Seja objetivo, sem JSON bruto, sem campos vazios e sem tabela desnecessária. Use somente o contexto fornecido e nunca invente dados. Se o usuário disser processo, aquisição, compra, PD, OC, ODC, ODA, WO ou reparo, entenda como intenção logística de saber se existe caminho de suprimento/recuperação para resolver a indisponibilidade e colocar o item na linha de voo. Se houver dados de WO/Repair do Order Book, considere isso como evidência de WO/repair mesmo que a tabela seja leonardo_repairs. Se o contexto trouxer correlacoes_sugeridas, explique que encontrou possível equivalência de nomenclatura, apresente a ressalva e peça confirmação para cadastrar apelido operacional. Se houver aplicação no manual/dicionário técnico, informe DMC, item/subitem, nomenclatura e ressalva. Se não houver evidência, diga que não encontrou e oriente Help Desk. Regras fixas: CeIMSPA é possibilidade e deve ser confirmado; LISDE não é estoque e reduz LT efetivo; prontidão só é SIM com 100% no PPU; OC/ODC/ODA devem aparecer junto dos PDs; PN sem Price List/RFQ/recebimento precisa cotar; busca PN deve ser exata ou por prefixo, não por contém; CAN cancela logicamente compra ativa, saldo, radar e necessidade útil, preservando histórico. Integre Política de Estoque, Custo Operacional e Gerador de Necessidades quando a pergunta tocar nesses temas. Para pergunta “onde está o SN”, responda pela melhor trilha: equipamento serializado, eventos, WO/Repair/RECEX, PPU e staging de OS; ressalve quando faltar relatório oficial de OS de instalação/remoção.`,
     },
     {
       role: 'user',
@@ -1504,5 +1551,6 @@ module.exports = {
   listHelpdeskTickets,
   answerHelpdeskTicket,
   confirmarApelidoSugerido,
+  extractTextFromImagesWithAi,
   compactText,
 };

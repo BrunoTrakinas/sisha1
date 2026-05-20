@@ -26,6 +26,7 @@ export default function Cadastro() {
     const [uploadCarregando, setUploadCarregando] = useState(false);
     const [uploadMsg, setUploadMsg] = useState(null);
     const [modalCeimspaConfirm, setModalCeimspaConfirm] = useState(false);
+    const [ceimspaOverwrite, setCeimspaOverwrite] = useState(false);
     const [modalTriagem, setModalTriagem] = useState(false);
     const [dadosTriagem, setDadosTriagem] = useState([]);
     const [infoRecibo, setInfoRecibo] = useState({ ref: '', data: '', isFoc: false });
@@ -64,6 +65,7 @@ export default function Cadastro() {
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
             if (e.target.files[0].name.toLowerCase().includes('ceimspa')) {
+                setTipoArquivo('ceimspa');
                 setModalCeimspaConfirm(true);
             }
         }
@@ -78,6 +80,9 @@ export default function Cadastro() {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('tipoArquivo', tipoArquivo);
+        if (tipoArquivo === 'ceimspa') {
+            formData.append('overwrite', ceimspaOverwrite ? 'true' : 'false');
+        }
 
         try {
             const response = await apiFetch(
@@ -585,6 +590,19 @@ export default function Cadastro() {
                             {uploadMsg.texto}
                         </p>
                     )}
+
+                    {tipoArquivo === 'ceimspa' && (
+                        <div className="rounded-2xl border border-purple-200 bg-purple-50 p-4 text-sm font-bold text-purple-900">
+                            Modo CeIMSPA: {ceimspaOverwrite ? 'substituição total da base atual' : 'adição/suplemento sem limpar a base atual'}.
+                            <button
+                                type="button"
+                                onClick={() => setModalCeimspaConfirm(true)}
+                                className="ml-2 underline font-black"
+                            >
+                                Alterar modo
+                            </button>
+                        </div>
+                    )}
                 </form>
             </section>
 
@@ -862,22 +880,41 @@ export default function Cadastro() {
                     <div className="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl space-y-4">
                         <h3 className="text-xl font-black text-slate-900 uppercase">Confirmação CeIMSPA</h3>
                         <p className="text-slate-900">
-                            Foi detectado um arquivo possivelmente do CeIMSPA. Confirma a continuidade?
+                            Escolha como o SISHA deve tratar a importação do estoque CeIMSPA.
+                        </p>
+                        <p className="text-sm font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-2xl p-3">
+                            Use “Substituir base” quando o arquivo for a base completa atualizada. Use “Adicionar suplemento” apenas para carregar novos itens sem apagar a base existente.
                         </p>
 
-                        <div className="flex justify-end gap-3">
+                        <div className="flex flex-col sm:flex-row justify-end gap-3">
                             <button
-                                onClick={() => setModalCeimspaConfirm(false)}
+                                onClick={() => {
+                                    setFile(null);
+                                    setModalCeimspaConfirm(false);
+                                }}
                                 className="px-6 py-3 rounded-xl bg-slate-200 text-slate-900 font-black"
                             >
                                 Cancelar
                             </button>
 
                             <button
-                                onClick={() => setModalCeimspaConfirm(false)}
+                                onClick={() => {
+                                    setCeimspaOverwrite(false);
+                                    setModalCeimspaConfirm(false);
+                                }}
                                 className="px-6 py-3 rounded-xl bg-blue-600 text-white font-black"
                             >
-                                Confirmar
+                                Adicionar suplemento
+                            </button>
+
+                            <button
+                                onClick={() => {
+                                    setCeimspaOverwrite(true);
+                                    setModalCeimspaConfirm(false);
+                                }}
+                                className="px-6 py-3 rounded-xl bg-purple-700 text-white font-black"
+                            >
+                                Substituir base
                             </button>
                         </div>
                     </div>

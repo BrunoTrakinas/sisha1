@@ -229,7 +229,9 @@ const VisaoGeral = () => {
   });
   const [radar, setRadar] = useState([]);
   const [operations, setOperations] = useState([]);
+  const [onlineUsers, setOnlineUsers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const isDono = Boolean(user?.isDono) || Boolean(user?.isGod) || user?.role === 'dono';
 
   useEffect(() => {
     const fetchDashboard = async () => {
@@ -249,6 +251,14 @@ const VisaoGeral = () => {
         if (statsJson.status === 'success') setStats(statsJson.data);
         if (radarJson.status === 'success') setRadar(radarJson.data || []);
         if (operationsJson.status === 'success') setOperations(operationsJson.data || []);
+
+        if (isDono) {
+          const onlineRes = await apiFetch('/auth/online', {}, token);
+          const onlineJson = await onlineRes.json();
+          if (onlineJson.status === 'success') setOnlineUsers(onlineJson.data || []);
+        } else {
+          setOnlineUsers([]);
+        }
       } catch (error) {
         console.error('Erro ao carregar visão geral:', error);
       } finally {
@@ -259,7 +269,7 @@ const VisaoGeral = () => {
     fetchDashboard();
     const interval = setInterval(fetchDashboard, 30000);
     return () => clearInterval(interval);
-  }, [token]);
+  }, [token, isDono]);
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -328,6 +338,28 @@ const VisaoGeral = () => {
               <h3 className="font-black text-xs uppercase tracking-[0.2em] text-slate-500">Log de Operações Recentes</h3>
             </div>
             <div className="p-6 space-y-4">
+              {isDono ? (
+                <div className="rounded-2xl border border-green-200 dark:border-green-900/50 bg-green-50 dark:bg-green-900/10 p-4">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <p className="text-xs font-black uppercase tracking-[0.2em] text-green-700 dark:text-green-400">Usuários online agora</p>
+                    <span className="text-xs font-black text-green-700 dark:text-green-400">{onlineUsers.length}</span>
+                  </div>
+                  {onlineUsers.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {onlineUsers.map((u) => (
+                        <div key={u.email} className="rounded-xl bg-white dark:bg-slate-900/60 border border-green-100 dark:border-green-900/40 px-3 py-2">
+                          <p className="text-sm font-black text-slate-700 dark:text-slate-200 truncate">{u.email}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase truncate">{u.role || 'usuário'} • visto {formatDateTime(u.last_seen_at)}</p>
+                          {u.last_path ? <p className="text-[10px] text-slate-400 truncate">{u.last_path}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm font-bold text-green-700 dark:text-green-300">Nenhum outro usuário online nos últimos minutos.</p>
+                  )}
+                </div>
+              ) : null}
+
               {operations.length > 0 ? operations.map((op, i) => (
                 <div key={`${op.tipo_arquivo}-${op.created_at}-${i}`} className="flex items-center justify-between gap-4 p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-700">
                   <div className="min-w-0">

@@ -187,6 +187,56 @@ function buildSbRelatedMap(sbItemRows = []) {
     return bySb;
 }
 
+function buildCeimspaUnconfirmedResults(ceimspaRows = [], query = '') {
+    const grouped = new Map();
+
+    (ceimspaRows || []).forEach((row) => {
+        const pi = normalizeUpper(row.pi);
+        if (!pi) return;
+        if (!grouped.has(pi)) {
+            grouped.set(pi, {
+                pi,
+                nomenclatura: row.nomenclatura || 'Item localizado no CeIMSPA sem PN confirmado',
+                quantidade: 0,
+                detalhes: [],
+            });
+        }
+
+        const current = grouped.get(pi);
+        current.quantidade += Number(row.quantidade || 0);
+        current.detalhes.push(row);
+        if (isMeaningfulName(row.nomenclatura) && !isMeaningfulName(current.nomenclatura)) {
+            current.nomenclatura = row.nomenclatura;
+        }
+    });
+
+    return Array.from(grouped.values()).map((entry) => ({
+        pn: 'PN NÃO CONFIRMADO',
+        nomenclatura: entry.nomenclatura || 'Item localizado no CeIMSPA sem PN confirmado',
+        nsn: entry.pi || query || 'PI localizado no CeIMSPA',
+        origem_identificacao: ['CEIMSPA_SEM_PN_CONFIRMADO'],
+        origem_nomenclatura: 'ESTOQUE_CEIMSPA',
+        origem_nsn: 'ESTOQUE_CEIMSPA',
+        aviso_operacional: 'PI localizado no CeIMSPA, porém sem PN confirmado no Manual/Dicionário. Confirmar com o CeIMSPA antes de assumir disponibilidade.',
+        oda: [],
+        odc: [],
+        foc: [],
+        repairs: [],
+        lisde: [],
+        price_list: [],
+        ppu_qtd: 0,
+        ppu_locais: 'N/A',
+        data_garantia: null,
+        dicionario: [],
+        alternativos: [],
+        tem_mapa_manual: false,
+        fontes_alternativos: [],
+        ceimspa_detalhes: entry.detalhes,
+        ceimspa_qtd: entry.quantidade,
+        sb_referencias: [],
+    }));
+}
+
 exports.searchItems = async (req, res) => {
     try {
         const { q } = req.query;
@@ -205,11 +255,11 @@ exports.searchItems = async (req, res) => {
         // FASE 1: VARREDURA PARALELA (À PROVA DE FALHAS E HIPER-RÁPIDA)
         // ---------------------------------------------------------
         const p1 = supabase.from('items').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p2 = supabase.from('dicionario_mestre').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p3 = supabase.from('estoque_ppu').select('pn, nomenclatura, nsn_pi, sn').or(`pn.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
+        const p2 = supabase.from('dicionario_mestre').select('pn, nomenclatura, nsn, pi').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
+        const p3 = supabase.from('estoque_ppu').select('pn, nomenclatura, nsn_pi, sn').or(`pn.ilike.%${query}%,nsn_pi.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p4 = supabase.from('lisde').select('pn, nomenclatura').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p5 = supabase.from('price_list').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(20);
-        const p6 = supabase.from('estoque_ceimspa').select('pi, nomenclatura').or(`pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
+        const p6 = supabase.from('estoque_ceimspa').select('pi, nomenclatura, quantidade, sj, uf').or(`pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p7 = supabase.from('rfq_cotacoes').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(20);
         const p8 = supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').or(`pn.ilike.%${query}%,pi.ilike.%${query}%,pn_alt.ilike.%${query}%`).limit(100);
         const p9 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura').or(`pn.ilike.%${query}%`).limit(80);
@@ -372,7 +422,15 @@ exports.searchItems = async (req, res) => {
         }
 
         const arrayPns = Array.from(pnsEncontrados);
-        if (arrayPns.length === 0) return res.status(200).json({ status: 'success', data: [] });
+        if (arrayPns.length === 0) {
+            if (ceimspaMatch.length > 0) {
+                return res.status(200).json({
+                    status: 'success',
+                    data: buildCeimspaUnconfirmedResults(ceimspaMatch, query),
+                });
+            }
+            return res.status(200).json({ status: 'success', data: [] });
+        }
 
         // ---------------------------------------------------------
         // FASE 2: RECOLHA DE DADOS EM LOTE (PARALELA)

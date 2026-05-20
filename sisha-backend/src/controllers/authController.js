@@ -1,6 +1,7 @@
 const supabase = require('../config/supabaseClient');
 const { createToken } = require('../config/authToken');
 const { isGodEmail, isGodUser, isOwnerRole, registrarAuditoria } = require('../utils/auditLogger');
+const { markPresenceOnline, markPresenceOffline, listOnlineUsers } = require('../utils/presenceTracker');
 
 const VALID_ROLES = ['admin', 'operador', 'dono'];
 
@@ -52,27 +53,56 @@ exports.login = async (req, res) => {
       .from('authorized_users')
       .select('id, email, senha, role, active')
       .eq('email', email)
-      .eq('senha', senha)
       .maybeSingle();
 
     if (error) throw error;
 
-    if (!data || data.active === false) {
+    if (!data) {
       await registrarAuditoria({
         req,
-        action: 'LOGIN_NEGADO',
+        action: 'LOGIN_EMAIL_NAO_ENCONTRADO',
         entity: 'AUTH',
         entityId: email,
-        summary: `Tentativa de acesso negada para ${email}.`,
-        details: { email },
+        summary: `Tentativa de login com email não encontrado: ${email}.`,
+        details: { email, motivo: 'EMAIL_NAO_ENCONTRADO' },
         level: 'WARN',
         visibility: 'GOD',
       });
-      return res.status(401).json({ status: 'error', message: 'Acesso não autorizado para este militar.' });
+      return res.status(404).json({ status: 'error', code: 'EMAIL_NAO_ENCONTRADO', message: 'Email não encontrado na lista de usuários autorizados.' });
+    }
+
+    if (data.active === false) {
+      await registrarAuditoria({
+        req,
+        action: 'LOGIN_USUARIO_INATIVO',
+        entity: 'AUTH',
+        entityId: email,
+        summary: `Tentativa de login em usuário desativado: ${email}.`,
+        details: { email, motivo: 'USUARIO_INATIVO' },
+        level: 'WARN',
+        visibility: 'GOD',
+      });
+      return res.status(403).json({ status: 'error', code: 'USUARIO_INATIVO', message: 'Usuário encontrado, mas o cadastro está desativado. Procure o Admin ou o Dono.' });
+    }
+
+    if (normalizeSenha(data.senha) !== senha) {
+      await registrarAuditoria({
+        req,
+        action: 'LOGIN_SENHA_INCORRETA',
+        entity: 'AUTH',
+        entityId: email,
+        summary: `Tentativa de login com senha incorreta para ${email}.`,
+        details: { email, motivo: 'SENHA_INCORRETA' },
+        level: 'WARN',
+        visibility: 'GOD',
+      });
+      return res.status(401).json({ status: 'error', code: 'SENHA_INCORRETA', message: 'Senha incorreta para este email.' });
     }
 
     const token = createToken(data);
     const isGod = isGodUser(data);
+
+    await markPresenceOnline({ req: { ...req, user: { email: data.email, role: data.role, sub: data.id } }, user: data, lastPath: '/login' });
 
     await registrarAuditoria({
       req: { ...req, user: { email: data.email, role: data.role, sub: data.id } },
@@ -99,6 +129,53 @@ exports.login = async (req, res) => {
   } catch (error) {
     console.error('ERRO LOGIN SISHA:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao autenticar o militar.' });
+  }
+};
+
+exports.logout = async (req, res) => {
+  try {
+    await markPresenceOffline({ req, user: req.user });
+    await registrarAuditoria({
+      req,
+      action: 'LOGOUT',
+      entity: 'AUTH',
+      entityId: req.user?.email,
+      summary: `${req.user?.email || 'Usuário'} saiu do SISHA.`,
+      details: { email: req.user?.email, role: req.user?.role },
+      level: 'INFO',
+      visibility: 'GOD',
+    });
+
+    return res.status(200).json({ status: 'success', message: 'Sessão encerrada.' });
+  } catch (error) {
+    console.error('ERRO LOGOUT SISHA:', error);
+    return res.status(200).json({ status: 'success', message: 'Sessão encerrada.' });
+  }
+};
+
+exports.presencePing = async (req, res) => {
+  try {
+    const lastPath = String(req.body?.path || req.headers?.referer || '').slice(0, 500);
+    const data = await markPresenceOnline({ req, user: req.user, lastPath });
+    return res.status(200).json({ status: 'success', data });
+  } catch (error) {
+    // Presença não pode derrubar a sessão do usuário.
+    console.warn('[SISHA][presence] Falha no ping:', error.message);
+    return res.status(200).json({ status: 'success', data: null });
+  }
+};
+
+exports.onlineUsers = async (req, res) => {
+  try {
+    if (!isGodUser(req.user)) {
+      return res.status(403).json({ status: 'error', message: 'Somente o perfil DONO pode visualizar usuários online.' });
+    }
+
+    const data = await listOnlineUsers({ minutes: Number(req.query?.minutes || 3) });
+    return res.status(200).json({ status: 'success', data });
+  } catch (error) {
+    console.error('ERRO ONLINE USERS SISHA:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao listar usuários online.' });
   }
 };
 
