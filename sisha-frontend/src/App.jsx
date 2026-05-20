@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import {
   LayoutDashboard, PackageSearch, PenTool, Calculator, ShoppingCart,
-  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu, Bot
+  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu, Bot, History
 } from 'lucide-react';
 import Cadastro from './pages/Cadastro';
 import ConsultaItens from './pages/ConsultaItens';
@@ -11,6 +11,7 @@ import CustoOperacional from './pages/CustoOperacional';
 import ServiceBulletins from './pages/ServiceBulletins';
 import OrdensCompras from './pages/OrdensCompras';
 import ChatLince from './pages/ChatLince';
+import HistoricoMovimentacao from './pages/HistoricoMovimentacao';
 import Login from './pages/Login';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -113,6 +114,7 @@ const DashboardLayout = ({ children }) => {
     { path: '/gerador', icon: PenTool, label: 'Gerador de Necessidades', roles: ['dono', 'admin', 'operador'] },
     { path: '/custo', icon: Calculator, label: 'Custo Operacional', roles: ['dono', 'admin', 'operador'] },
     { path: '/compras', icon: ShoppingCart, label: 'Ordens de Compras', roles: ['dono', 'admin', 'operador'] },
+    { path: '/historico-movimentacao', icon: History, label: 'Histórico de Movimentação', roles: ['dono', 'admin', 'operador'] },
     { path: '/chat-lince', icon: Bot, label: 'Chat Lince', roles: ['dono', 'admin', 'operador'] },
   ];
 
@@ -402,6 +404,7 @@ function AppRoutes() {
                   <Route path="/gerador" element={<GeradorNecessidades />} />
                   <Route path="/custo" element={<CustoOperacional />} />
                   <Route path="/compras" element={<OrdensCompras />} />
+                  <Route path="/historico-movimentacao" element={<HistoricoMovimentacao />} />
                   <Route path="/chat-lince" element={<ChatLince />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

@@ -556,6 +556,7 @@ export default function Cadastro() {
                             <option value="price_list">Price List</option>
                             <option value="inventario_ppu">Inventário PPU</option>
                             <option value="ceimspa">Estoque CeIMSPA</option>
+                            <option value="historico_movimentacao">Histórico de Movimentação</option>
                             <option value="lisde">LISDE</option>
                             <option value="manual_legado">Manual</option>
                             <option value="pn_alternativos">PN Alternativos</option>
@@ -601,6 +602,12 @@ export default function Cadastro() {
                             >
                                 Alterar modo
                             </button>
+                        </div>
+                    )}
+
+                    {tipoArquivo === 'historico_movimentacao' && (
+                        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm font-bold text-blue-900">
+                            Histórico de Movimentação: a planilha precisa conter as colunas obrigatórias PN, Data, QTD e OS. Reenvios do mesmo arquivo não duplicam linhas iguais.
                         </div>
                     )}
                 </form>

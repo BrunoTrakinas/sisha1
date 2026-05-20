@@ -18,6 +18,41 @@ const formatExcelDate = (val) => {
 };
 
 
+const formatDbDate = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+        return value.toISOString().slice(0, 10);
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const dataExcel = new Date(Math.round((value - 25569) * 86400 * 1000));
+        return dataExcel.toISOString().slice(0, 10);
+    }
+
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+
+    const iso = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (iso) {
+        const [, y, m, d] = iso;
+        return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+
+    const br = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})$/);
+    if (br) {
+        let [, d, m, y] = br;
+        if (y.length === 2) y = Number(y) > 50 ? `19${y}` : `20${y}`;
+        return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+
+    return null;
+};
+
+
 const uniqueBy = (rows = [], keyFn) => {
     const map = new Map();
     rows.forEach((row) => {
@@ -1022,6 +1057,126 @@ exports.importData = async (req, res) => {
             return respondError(400, 'Cabeçalhos do CEIMSPA (PI ou NSN) não identificados no arquivo.', { tabelaAlvo: 'estoque_ceimspa' });
         }
         
+
+
+        // ---------------------------------------------------
+        // ROTA 8: HISTÓRICO DE MOVIMENTAÇÃO (PN, DATA, QTD, OS)
+        // ---------------------------------------------------
+        else if (tipoArquivo === 'historico_movimentacao') {
+            const sheetName = workbook.SheetNames[0];
+            const sheet = workbook.Sheets[sheetName];
+            const rawRows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+            const hIdx = findHeaderRow(rawRows, ['pn', 'data', 'qtd', 'os']);
+            if (hIdx === -1) {
+                return respondError(400, 'Cabeçalhos obrigatórios não encontrados. O Histórico de Movimentação precisa das colunas: PN, Data, QTD e OS.', {
+                    tabelaAlvo: 'historico_movimentacao',
+                    detalhes: { colunas_obrigatorias: ['PN', 'Data', 'QTD', 'OS'] },
+                });
+            }
+
+            const headers = rawRows[hIdx];
+            const idx = buildIndexMap(headers, {
+                pn: 'pn',
+                data: 'data',
+                qtd: 'qtd',
+                os: 'os',
+            });
+
+            const registros = [];
+            let linhasIgnoradas = 0;
+            const arquivoFonte = req.file?.originalname || 'historico_movimentacao';
+
+            rawRows.slice(hIdx + 1).forEach((row, rawIndex) => {
+                const linhaNumero = hIdx + 2 + rawIndex;
+                const linhaTemConteudo = row.some((cell) => String(cell || '').trim() !== '');
+                if (!linhaTemConteudo) return;
+
+                const pn = normalizePn(safeString(row[idx.pn]));
+                const dataMovimentacao = formatDbDate(row[idx.data]);
+                const quantidade = cleanCurrency(row[idx.qtd]);
+                const os = safeString(row[idx.os]);
+
+                if (!pn || !dataMovimentacao || !os) {
+                    linhasIgnoradas += 1;
+                    recordAuditIssue(req, {
+                        linha_numero: linhaNumero,
+                        campo: 'PN/Data/OS',
+                        valor_original: JSON.stringify({ pn: row[idx.pn], data: row[idx.data], os: row[idx.os] }),
+                        motivo: 'Linha ignorada no histórico por ausência de PN, Data válida ou OS.',
+                    });
+                    return;
+                }
+
+                registros.push({
+                    pn,
+                    data_movimentacao: dataMovimentacao,
+                    quantidade,
+                    os,
+                    fonte_arquivo: arquivoFonte,
+                    created_by_email: req.user?.email || null,
+                    created_by_role: req.user?.role || null,
+                    payload: {
+                        linha_origem: linhaNumero,
+                    },
+                });
+            });
+
+            if (!registros.length) {
+                return respondError(400, 'Nenhuma linha válida encontrada no Histórico de Movimentação.', {
+                    tabelaAlvo: 'historico_movimentacao',
+                    linhasLidas: Math.max(rawRows.length - (hIdx + 1), 0),
+                    linhasIgnoradas,
+                });
+            }
+
+            let importadas = 0;
+            const chunkSize = 1000;
+            for (let i = 0; i < registros.length; i += chunkSize) {
+                const lote = registros.slice(i, i + chunkSize);
+                const { data, error } = await supabase
+                    .from('historico_movimentacao')
+                    .upsert(lote, {
+                        onConflict: 'pn,data_movimentacao,quantidade,os',
+                        ignoreDuplicates: true,
+                    })
+                    .select('id');
+
+                if (error) throw error;
+                importadas += Array.isArray(data) ? data.length : lote.length;
+            }
+
+            await registrarAuditoria({
+                req,
+                action: 'HISTORICO_MOVIMENTACAO_IMPORTADO',
+                entity: 'HISTORICO_MOVIMENTACAO',
+                entityId: arquivoFonte,
+                summary: `${req.user?.email || 'Usuário'} importou Histórico de Movimentação com ${importadas} registros novos/atualizados.`,
+                details: {
+                    arquivo: arquivoFonte,
+                    linhas_lidas: Math.max(rawRows.length - (hIdx + 1), 0),
+                    linhas_validas: registros.length,
+                    linhas_importadas: importadas,
+                    linhas_ignoradas: linhasIgnoradas,
+                    duplicadas_ignoradas: Math.max(registros.length - importadas, 0),
+                    colunas_obrigatorias: ['PN', 'Data', 'QTD', 'OS'],
+                },
+                level: 'INFO',
+                visibility: 'GOD',
+            });
+
+            return respondSuccess(`Histórico de Movimentação importado: ${importadas} registro(s) novo(s). ${Math.max(registros.length - importadas, 0)} duplicado(s) ignorado(s).`, {}, {
+                tabelaAlvo: 'historico_movimentacao',
+                linhasLidas: Math.max(rawRows.length - (hIdx + 1), 0),
+                linhasImportadas: importadas,
+                linhasIgnoradas,
+                detalhes: {
+                    linhas_validas: registros.length,
+                    duplicadas_ignoradas: Math.max(registros.length - importadas, 0),
+                    modo: 'upsert_sem_duplicar',
+                },
+            });
+        }
 
         // ---------------------------------------------------
         // ROTA 8: QNNA (Quadro de Necessidades)

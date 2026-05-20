@@ -33,7 +33,8 @@ const FIELD_ALIASES = {
   numero_doc: ['number', 'numero', 'número'],
   assunto: ['subject', 'assunto'],
   status: ['status'],
-  data: ['date', 'data'],
+  os: ['os', 'ordem de servico', 'ordem de serviço', 'ordem_servico', 'ordem serviço'],
+  data: ['date', 'data', 'data movimento', 'data movimentacao', 'data movimentação', 'data saida', 'data saída'],
   pn_alt: ['pn_alt', 'pn alt', 'pn alternativo', 'alternate pn', 'alternate part number'],
   fonte: ['fonte', 'source', 'documento', 'reference document'],
 };

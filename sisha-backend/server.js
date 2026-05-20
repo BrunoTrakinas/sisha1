@@ -18,6 +18,7 @@ const itemRoutes = require('./src/routes/itemRoutes');
 const needsRoutes = require('./src/routes/needsRoutes');
 const purchaseRoutes = require('./src/routes/purchaseRoutes');
 const chatLinceRoutes = require('./src/routes/chatLinceRoutes');
+const historyRoutes = require('./src/routes/historyRoutes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/import', requireAuth, requireRole(['admin']), importRoutes);
@@ -28,6 +29,7 @@ app.use('/api/items', requireAuth, requireRole(['admin']), itemRoutes);
 app.use('/api/needs', requireAuth, needsRoutes);
 app.use('/api/purchases', requireAuth, purchaseRoutes);
 app.use('/api/chat-lince', requireAuth, chatLinceRoutes);
+app.use('/api/history', requireAuth, historyRoutes);
 
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'success', message: 'Servidor SISHA-1 Operacional!' });
