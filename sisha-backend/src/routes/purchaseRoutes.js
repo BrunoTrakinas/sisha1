@@ -6,6 +6,7 @@ const purchaseController = require('../controllers/purchaseController');
 const upload = multer({ storage: multer.memoryStorage() });
 
 router.get('/ordens', purchaseController.listarOrdens);
+router.get('/ordens/:id/export', purchaseController.exportarOrdem);
 router.post('/ordens', purchaseController.criarOrdem);
 router.put('/ordens/:id', purchaseController.atualizarOrdem);
 router.delete('/ordens/:id', purchaseController.excluirOrdem);
@@ -15,6 +16,7 @@ router.post('/ordens/:id/pds/import', upload.single('file'), purchaseController.
 router.post('/pds-pipeline/import', upload.single('file'), purchaseController.importarPipelinePds);
 
 router.get('/work-orders', purchaseController.listarWorkOrders);
+router.get('/work-orders/:id/export', purchaseController.exportarWorkOrder);
 router.post('/work-orders', purchaseController.criarWorkOrder);
 router.put('/work-orders/:id', purchaseController.atualizarWorkOrder);
 router.delete('/work-orders/:id', purchaseController.excluirWorkOrder);

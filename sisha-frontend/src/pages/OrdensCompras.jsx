@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PlusCircle, Search, Trash2, RefreshCcw, Ban, Wrench, ShoppingCart, Upload, FileSpreadsheet, Link2, Pencil } from 'lucide-react';
+import { PlusCircle, Search, Trash2, RefreshCcw, Ban, Wrench, ShoppingCart, Upload, FileSpreadsheet, Link2, Pencil, Download } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE_URL, apiFetch, buildAuthHeaders } from '../lib/api';
 
@@ -244,6 +244,75 @@ export default function OrdensCompras() {
     }
   };
 
+
+  const baixarExportacao = async (endpoint, fallbackFileName) => {
+    try {
+      setMsg(null);
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        method: 'GET',
+        headers: buildAuthHeaders(token),
+      });
+      if (!response.ok) {
+        let message = 'Falha ao exportar arquivo.';
+        try {
+          const json = await response.json();
+          message = json.message || message;
+        } catch (_) {}
+        setMsg({ tipo: 'error', texto: message });
+        return;
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      const fileName = match?.[1] || fallbackFileName;
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setMsg({ tipo: 'success', texto: 'Exportação gerada com sucesso.' });
+    } catch {
+      setMsg({ tipo: 'error', texto: 'Falha ao exportar arquivo.' });
+    }
+  };
+
+  const formatDateLabel = (value) => {
+    if (!value) return 'Data não informada';
+    return String(value).slice(0, 10).split('-').reverse().join('/');
+  };
+
+  const renderSuplementacoes = (suplementacoes = [], moedaFallback = 'USD') => {
+    const rows = (suplementacoes || []).filter((sup) => sup && sup.ativo !== false);
+    if (rows.length === 0) return null;
+    return (
+      <div className="space-y-3">
+        <h4 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Suplementações registradas</h4>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {rows.map((sup) => (
+            <div key={sup.id || `${sup.msg_referencia}-${sup.valor}-${sup.data_msg}`} className="p-4 rounded-2xl bg-blue-50/60 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/40 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-blue-500 dark:text-blue-300">MSG / Documento</p>
+                  <p className="text-sm font-black text-slate-900 dark:text-white break-all">{sup.msg_referencia || 'Referência não informada'}</p>
+                </div>
+                <p className="text-sm font-black text-blue-700 dark:text-blue-300 whitespace-nowrap">{formatMoney(sup.valor, sup.moeda || moedaFallback)}</p>
+              </div>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                <span>Data MSG: {formatDateLabel(sup.data_msg)}</span>
+                <span>Moeda: {sup.moeda || moedaFallback}</span>
+                {sup.created_at && <span>Cadastrado: {formatDateLabel(sup.created_at)}</span>}
+              </div>
+              {sup.observacao && <p className="mt-3 text-xs font-bold text-slate-700 dark:text-slate-200 bg-white/70 dark:bg-slate-900/50 border border-blue-100 dark:border-blue-900/40 rounded-xl px-3 py-2">Obs: {sup.observacao}</p>}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const cancelarOc = async (ordem) => {
     const motivo = window.prompt(`Motivo do cancelamento da OC ${ordem.numero_oc}:`);
     if (!motivo) return;
@@ -298,14 +367,13 @@ export default function OrdensCompras() {
             </div>
             {isOrderBook && <p className="text-xs font-black text-emerald-600 dark:text-emerald-300 mt-2 uppercase tracking-wider">Leitura importada do Order Book. Edição/correção deve ser feita pela importação/manutenção do documento de origem.</p>}
           </div>
-          {isAdmin && !isOrderBook && (
-            <div className="flex gap-2 flex-wrap">
-              {ordem.status !== 'CAN' && <button onClick={() => setSupTarget({ tipo: 'oc', id: ordem.id, titulo: ordem.numero_oc })} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-black text-xs hover:bg-blue-700">SUPLEMENTAR</button>}
-              {ordem.status !== 'CAN' && <button onClick={() => { setPdsUploadTarget(ordem); setTimeout(() => pdsDaOcUploadRef.current?.click(), 0); }} className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black text-xs hover:bg-slate-800 flex items-center gap-2"><Link2 size={14} /> ANEXAR PDs</button>}
-              {ordem.status !== 'CAN' && <button onClick={() => cancelarOc(ordem)} className="px-4 py-2 rounded-xl bg-amber-500 text-white font-black text-xs hover:bg-amber-600 flex items-center gap-2"><Ban size={14} /> CAN</button>}
-              <button onClick={() => excluir('oc', ordem.id)} className="px-4 py-2 rounded-xl bg-red-600 text-white font-black text-xs hover:bg-red-700 flex items-center gap-2"><Trash2 size={14} /> EXCLUIR</button>
-            </div>
-          )}
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => baixarExportacao(`/purchases/ordens/${encodeURIComponent(ordem.id)}/export`, `OC_${ordem.numero_oc || ordem.id}.xlsx`)} className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-black text-xs hover:bg-emerald-700 flex items-center gap-2"><Download size={14} /> EXPORTAR OC</button>
+            {isAdmin && !isOrderBook && ordem.status !== 'CAN' && <button onClick={() => setSupTarget({ tipo: 'oc', id: ordem.id, titulo: ordem.numero_oc })} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-black text-xs hover:bg-blue-700">SUPLEMENTAR</button>}
+            {isAdmin && !isOrderBook && ordem.status !== 'CAN' && <button onClick={() => { setPdsUploadTarget(ordem); setTimeout(() => pdsDaOcUploadRef.current?.click(), 0); }} className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black text-xs hover:bg-slate-800 flex items-center gap-2"><Link2 size={14} /> ANEXAR PDs</button>}
+            {isAdmin && !isOrderBook && ordem.status !== 'CAN' && <button onClick={() => cancelarOc(ordem)} className="px-4 py-2 rounded-xl bg-amber-500 text-white font-black text-xs hover:bg-amber-600 flex items-center gap-2"><Ban size={14} /> CAN</button>}
+            {isAdmin && !isOrderBook && <button onClick={() => excluir('oc', ordem.id)} className="px-4 py-2 rounded-xl bg-red-600 text-white font-black text-xs hover:bg-red-700 flex items-center gap-2"><Trash2 size={14} /> EXCLUIR</button>}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -324,6 +392,8 @@ export default function OrdensCompras() {
             <ProgressBar percent={resumo.percentual_pds_anexados} />
           </div>
         </div>
+
+        {renderSuplementacoes(ordem.compras_suplementacoes, moeda)}
 
         <div className="space-y-3">
           <h4 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">PD/SEPD vinculados</h4>
@@ -377,13 +447,12 @@ export default function OrdensCompras() {
             </div>
             {wo.observacao && <p className="mt-2 text-xs font-bold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2">Obs: {wo.observacao}</p>}
           </div>
-          {isAdmin && !isOrderBook && (
-            <div className="flex gap-2 flex-wrap">
-              <button onClick={() => abrirEdicaoWo(wo)} className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black text-xs hover:bg-slate-800 flex items-center gap-2"><Pencil size={14} /> DADOS WO</button>
-              <button onClick={() => setSupTarget({ tipo: 'wo', id: wo.id, titulo: wo.numero_wo })} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-black text-xs hover:bg-blue-700">SUPLEMENTAR</button>
-              <button onClick={() => excluir('wo', wo.id)} className="px-4 py-2 rounded-xl bg-red-600 text-white font-black text-xs hover:bg-red-700 flex items-center gap-2"><Trash2 size={14} /> EXCLUIR</button>
-            </div>
-          )}
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => baixarExportacao(`/purchases/work-orders/${encodeURIComponent(wo.id)}/export`, `WO_${wo.numero_wo || wo.id}.xlsx`)} className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-black text-xs hover:bg-emerald-700 flex items-center gap-2"><Download size={14} /> EXPORTAR WO</button>
+            {isAdmin && !isOrderBook && <button onClick={() => abrirEdicaoWo(wo)} className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black text-xs hover:bg-slate-800 flex items-center gap-2"><Pencil size={14} /> DADOS WO</button>}
+            {isAdmin && !isOrderBook && <button onClick={() => setSupTarget({ tipo: 'wo', id: wo.id, titulo: wo.numero_wo })} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-black text-xs hover:bg-blue-700">SUPLEMENTAR</button>}
+            {isAdmin && !isOrderBook && <button onClick={() => excluir('wo', wo.id)} className="px-4 py-2 rounded-xl bg-red-600 text-white font-black text-xs hover:bg-red-700 flex items-center gap-2"><Trash2 size={14} /> EXCLUIR</button>}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -396,6 +465,8 @@ export default function OrdensCompras() {
           <div className="flex justify-between text-xs font-black uppercase text-slate-500 dark:text-slate-400"><span>Progresso de suplementação</span><span>{resumo.percentual_suplementado || 0}%</span></div>
           <ProgressBar percent={resumo.percentual_suplementado} />
         </div>
+
+        {renderSuplementacoes(wo.work_order_suplementacoes, moeda)}
       </div>
     );
   };

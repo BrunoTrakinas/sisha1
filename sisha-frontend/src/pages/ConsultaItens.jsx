@@ -339,8 +339,14 @@ export default function ConsultaItens() {
                                                 {(r.documento_referencia || r.numero_wo) && <p className="text-[11px] font-black text-amber-800 uppercase">Doc/WO: {r.documento_referencia || r.numero_wo}</p>}
                                                 {r.nomenclatura && <p className="text-[11px] font-bold text-amber-800">Nome: {r.nomenclatura}</p>}
                                                 {r.status && <p className="text-[11px] font-bold text-amber-700">Status: {r.status}</p>}
+                                                {r.aeronave && <p className="text-[11px] font-bold text-amber-700">ANV: {r.aeronave}</p>}
+                                                {r.notification && <p className="text-[11px] font-bold text-amber-700">Notification: {r.notification}</p>}
+                                                {r.po_number && <p className="text-[11px] font-bold text-amber-700">PO: {r.po_number}</p>}
+                                                {r.delivery_number && <p className="text-[11px] font-bold text-amber-700">Delivery: {r.delivery_number}</p>}
+                                                {r.lh_updates && <p className="text-[11px] font-bold text-amber-700">LH Updates: {r.lh_updates}</p>}
                                                 {r.tipo_wo && <p className="text-[11px] font-bold text-amber-700">Tipo WO: {r.tipo_wo}</p>}
                                                 {r.resultado_tecnico && <p className="text-[11px] font-bold text-amber-700">Resultado: {r.resultado_tecnico}</p>}
+                                                {r.bn_comments && <p className="text-[11px] font-bold text-amber-700">BN: {r.bn_comments}</p>}
                                                 {r.observacao && <p className="text-[11px] font-bold text-amber-700">Obs: {r.observacao}</p>}
                                             </div>
                                         ))}

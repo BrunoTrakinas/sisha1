@@ -15,6 +15,64 @@ const CHAT_LINCE_STOP_TERMS = new Set([
   'SISHA', 'CHAT', 'LINCE', 'BANCO', 'DADOS', 'SISTEMA'
 ]);
 
+const CHAT_LINCE_INTENTS = {
+  CONSULTA_PN: {
+    label: 'Consulta por PN',
+    objetivo: 'Consolidar estoque, preço, PD/OC, WO, alternativos, manual e histórico para um PN.',
+    tabelas: ['dicionario_mestre', 'estoque_ppu', 'estoque_ceimspa', 'price_list', 'rfq_cotacoes', 'compras_pds', 'work_orders', 'pn_alternativos_documento'],
+  },
+  CONSULTA_PI: {
+    label: 'Consulta por PI/NSN',
+    objetivo: 'Cruzar PI/NSN com manual, PPU e CeIMSPA, aceitando resultado mesmo sem PN confirmado.',
+    tabelas: ['dicionario_mestre', 'dicionario_manual', 'estoque_ceimspa', 'estoque_ppu', 'price_list'],
+  },
+  CONSULTA_SN: {
+    label: 'Consulta por SN',
+    objetivo: 'Encontrar localização, trilha, WO, OS e último estado conhecido do serial number.',
+    tabelas: ['equipamentos_serializados', 'equipamento_eventos', 'work_orders', 'estoque_ppu', 'chat_lince_os_eventos_staging'],
+  },
+  CONSULTA_DOCUMENTO: {
+    label: 'Consulta por documento',
+    objetivo: 'Localizar OC, ODC, ODA, PD, SEPD, WO, OS, PIM, SB ou RFQ.',
+    tabelas: ['compras_ordens', 'compras_pds', 'work_orders', 'pim_demandas', 'service_bulletins', 'chat_lince_documentos'],
+  },
+  CONSULTA_PROCESSO_LOGISTICO: {
+    label: 'Processo logístico',
+    objetivo: 'Responder se existe compra, PD/OC, WO, repair, recebimento ou caminho para colocar item na linha de voo.',
+    tabelas: ['compras_pds', 'compras_ordens', 'work_orders', 'leonardo_repairs', 'leonardo_spares', 'recebimentos'],
+  },
+  CONSULTA_HISTORICO_MOVIMENTACAO: {
+    label: 'Histórico de movimentação',
+    objetivo: 'Consultar saídas por PN, datas, OS e quantidades para apoiar consumo, MTBF e MTTR.',
+    tabelas: ['historico_movimentacao', 'equipamento_eventos'],
+  },
+  CONSULTA_MANUAL_APLICACAO: {
+    label: 'Manual e aplicação',
+    objetivo: 'Explicar onde o item aparece no manual, por DMC, item, subitem, nomenclatura e aplicação.',
+    tabelas: ['dicionario_mestre', 'dicionario_manual', 'service_bulletin_items'],
+  },
+  CONSULTA_SB: {
+    label: 'Service Bulletin',
+    objetivo: 'Consultar SB, aplicabilidade, tipo, status e itens afetados.',
+    tabelas: ['service_bulletins', 'service_bulletin_items'],
+  },
+  CONSULTA_RFQ: {
+    label: 'RFQ/Cotação',
+    objetivo: 'Consultar cotações, validade, preço, lead time, estoque pronto e PN cotado.',
+    tabelas: ['rfq_cotacoes', 'price_list', 'chat_lince_documentos'],
+  },
+  ANALISE_DOCUMENTAL: {
+    label: 'Análise documental',
+    objetivo: 'Classificar documento, extrair entidades e deixar em staging para confirmação do Admin.',
+    tabelas: ['chat_lince_documentos', 'cadastros_manuais'],
+  },
+  DUVIDA_GERAL: {
+    label: 'Dúvida geral',
+    objetivo: 'Responder com base nas regras SISHA e nas evidências disponíveis; abrir Help Desk se faltar dado.',
+    tabelas: ['chat_lince_helpdesk'],
+  },
+};
+
 function stripAccents(value = '') {
   return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
@@ -841,6 +899,138 @@ function sourceSummary(sources) {
   }));
 }
 
+function hasRows(context = {}, table = '') {
+  return tableRows(context.sources || [], table).length > 0;
+}
+
+function detectChatLinceIntent(question = '', context = {}) {
+  const q = normalizeSearchText(question);
+  const hasEvidence = (table) => hasRows(context, table);
+  const entities = detectEntities(question);
+  const hasSn = entities.sn_candidatos.length > 0 || /\b(SN|S\/N|SERIAL|S[ÉE]RIE|SERIE)\b/.test(q);
+  const hasDoc = entities.identificadores_documentais.length > 0 || /\b(OC|ODC|ODA|PD|SEPD|WO|OS|PIM|SB|RFQ|COTACAO|COTAÇÃO)\b/.test(q);
+  const hasPi = /\b(PI|NSN)\b/.test(q) || entities.nsn.length > 0 || entities.tokens.some((token) => /^\d{6,13}$/.test(normalizePn(token)));
+  const hasPn = /\b(PN|P\/N|PART\s*NUMBER|PARTNUMBER)\b/.test(q) || entities.tokens.length > 0;
+
+  const scores = [];
+  const add = (intent, score, motivo) => scores.push({ intent, score, motivo });
+
+  if (/\b(MTBF|MTTR|HISTORICO|HISTÓRICO|MOVIMENTACAO|MOVIMENTAÇÃO|SAIDA|SAÍDA|CONSUMO|OS)\b/.test(q)) add('CONSULTA_HISTORICO_MOVIMENTACAO', 0.82, 'pedido menciona histórico, movimentação, saída, consumo, OS, MTBF ou MTTR');
+  if (/\b(SERVICE\s*BULLETIN|SB|BOLETIM)\b/.test(q) || hasEvidence('service_bulletins') || hasEvidence('service_bulletin_items')) add('CONSULTA_SB', 0.78, 'pedido/documento relacionado a Service Bulletin');
+  if (/\b(RFQ|COTACAO|COTAÇÃO|QUOTATION|PRICE\s*LIST|PRECO|PREÇO|LEAD\s*TIME|VALIDADE)\b/.test(q) || hasEvidence('rfq_cotacoes')) add('CONSULTA_RFQ', 0.78, 'pedido relacionado a RFQ, cotação, preço ou lead time');
+  if (hasSn || hasEvidence('equipamentos_serializados') || hasEvidence('equipamento_eventos')) add('CONSULTA_SN', 0.88, 'pedido ou evidência aponta para serial number/SN');
+  if (hasDoc || hasEvidence('compras_ordens') || hasEvidence('compras_pds') || hasEvidence('work_orders') || hasEvidence('pim_demandas')) add('CONSULTA_DOCUMENTO', 0.75, 'pedido ou evidência aponta para documento operacional');
+  if (wantsOperationalProcess(question) || hasEvidence('leonardo_repairs') || hasEvidence('leonardo_spares')) add('CONSULTA_PROCESSO_LOGISTICO', 0.86, 'pedido menciona compra, PD, OC, WO, repair ou linha de voo');
+  if (/\b(MANUAL|DICIONARIO|DICIONÁRIO|APLICA|APLICACAO|APLICAÇÃO|USADO|USADA|INSTALADO|INSTALADA|DMC)\b/.test(q) || hasEvidence('dicionario_mestre') || hasEvidence('dicionario_manual')) add('CONSULTA_MANUAL_APLICACAO', 0.74, 'pedido ou evidência aponta para manual/aplicação');
+  if (hasPi || hasEvidence('estoque_ceimspa')) add('CONSULTA_PI', 0.72, 'pedido ou evidência aponta para PI/NSN/CeIMSPA');
+  if (hasPn || hasEvidence('items') || hasEvidence('estoque_ppu') || hasEvidence('price_list')) add('CONSULTA_PN', 0.64, 'pedido ou evidência aponta para PN/cadastro/estoque/preço');
+  if (/\b(DOCUMENTO|PDF|ANALISAR|ANALISE|ANÁLISE|UPLOAD|ARQUIVO)\b/.test(q)) add('ANALISE_DOCUMENTAL', 0.6, 'pedido menciona documento ou arquivo');
+
+  const selected = scores.sort((a, b) => b.score - a.score)[0] || { intent: 'DUVIDA_GERAL', score: 0.45, motivo: 'sem intenção logística específica detectada' };
+  const catalog = CHAT_LINCE_INTENTS[selected.intent] || CHAT_LINCE_INTENTS.DUVIDA_GERAL;
+  return {
+    intencao: selected.intent,
+    rotulo: catalog.label,
+    objetivo: catalog.objetivo,
+    confianca: Number(selected.score.toFixed(2)),
+    motivo: selected.motivo,
+    entidades: {
+      pn_candidatos: unique(entities.pn_candidatos.map(normalizePn).filter(Boolean)),
+      sn_candidatos: unique(entities.sn_candidatos.map(normalizeUpper).filter(Boolean)),
+      documentos: entities.identificadores_documentais,
+      os_candidatas: entities.os_candidatas,
+      nsn: entities.nsn,
+    },
+    tabelas_prioritarias: catalog.tabelas,
+  };
+}
+
+function buildAgentPlan(question = '', context = {}) {
+  const intent = detectChatLinceIntent(question, context);
+  const sources = sourceSummary(context.sources || []);
+  const consulted = sources.map((source) => source.tabela);
+  const missingPriority = (intent.tabelas_prioritarias || []).filter((table) => !consulted.includes(table));
+  const evidenceCount = sources.reduce((sum, source) => sum + safeNumber(source.quantidade), 0)
+    + safeNumber(context.snTrace?.length)
+    + safeNumber(context.manualApplications?.length)
+    + safeNumber(context.correlacoesSugeridas?.length);
+
+  return {
+    versao: 'AGENTE_LOGISTICO_LINCE_V1',
+    intencao: intent.intencao,
+    rotulo: intent.rotulo,
+    objetivo: intent.objetivo,
+    confianca_intencao: intent.confianca,
+    motivo_intencao: intent.motivo,
+    entidades: intent.entidades,
+    plano_execucao: {
+      tabelas_prioritarias: intent.tabelas_prioritarias,
+      fontes_consultadas: sources,
+      fontes_prioritarias_sem_retorno: missingPriority,
+      evidencias_total: evidenceCount,
+      usa_banco_operacional: true,
+      usa_rag_documental_textual: hasRows(context, 'chat_lince_documentos'),
+      usa_rag_vetorial: false,
+    },
+    diretriz_resposta: [
+      'Comece pela resposta direta.',
+      'Depois liste fontes consultadas e evidências relevantes.',
+      'Explique a conclusão operacional.',
+      'Informe a próxima ação recomendada.',
+      'Declare confiança alta, média ou baixa conforme qualidade das fontes.',
+    ],
+  };
+}
+
+function confidenceLabel(agent = {}, context = {}) {
+  const evidence = safeNumber(agent?.plano_execucao?.evidencias_total);
+  if (evidence >= 5 && safeNumber(agent?.confianca_intencao) >= 0.75) return 'alta';
+  if (evidence > 0) return 'média';
+  return 'baixa';
+}
+
+function buildAgentSystemPrompt(agent = {}) {
+  return `Você é o Agente Logístico Lince do SISHA-1. Trabalhe como consultor logístico aeronáutico da Divisão de Material, direto e objetivo.\n\nIntenção detectada: ${agent.rotulo || agent.intencao}.\nObjetivo operacional: ${agent.objetivo || 'Responder com base nas evidências do SISHA.'}.\nConfiança da intenção: ${agent.confianca_intencao || 0}.\n\nRegras obrigatórias:\n1. Use somente o contexto fornecido. Nunca invente dado, saldo, PN, preço, OS, WO, PD ou OC.\n2. Banco operacional é fonte de verdade para estoque, PD, OC, WO, PPU, CeIMSPA, RFQ, Price List e histórico. RAG/documentos servem como evidência documental, não substituem saldo real.\n3. CeIMSPA é possibilidade; responda sempre que precisa confirmar com o CeIMSPA.\n4. LISDE não é estoque; reduz lead time após pagamento.\n5. Prontidão só é SIM se 100% da necessidade estiver no PPU.\n6. Status CAN cancela logicamente compra ativa, saldo, radar e necessidade útil, preservando histórico.\n7. Se faltar evidência, diga exatamente o que faltou e recomende Help Desk/PPU.\n\nFormato obrigatório da resposta:\nResposta direta:\nFontes/evidências:\nConclusão operacional:\nPróxima ação recomendada:\nConfiança:`;
+}
+
+function buildAgentOfflineAnswer(question = '', context = {}, helpdesk = null) {
+  const agent = context.agent || buildAgentPlan(question, context);
+  const fontes = sourceSummary(context.sources || []);
+  const confianca = confidenceLabel(agent, context);
+  const lines = [];
+
+  if (!hasConsultEvidence(context)) {
+    lines.push('Resposta direta: não encontrei evidência suficiente no SISHA para responder com segurança.');
+    lines.push('');
+    lines.push('Fontes/evidências: nenhuma fonte operacional retornou registro claro para a intenção detectada.');
+    lines.push('');
+    lines.push(`Conclusão operacional: não vou afirmar disponibilidade, preço, processo, aplicação ou histórico sem fonte confirmada. A intenção detectada foi ${agent.rotulo}.`);
+    lines.push('');
+    lines.push(helpdesk?.ok
+      ? `Próxima ação recomendada: abri pendência para análise humana do PPU/Admin. Protocolo: ${helpdesk.data?.protocolo || helpdesk.data?.id}.`
+      : 'Próxima ação recomendada: validar no PPU/manual/fonte primária e registrar pendência no Help Desk do Chat Lince.');
+    lines.push(`Confiança: ${confianca}.`);
+    return lines.join('\n');
+  }
+
+  lines.push(`Resposta direta: encontrei evidências no SISHA para a intenção ${agent.rotulo}.`);
+  lines.push('');
+  lines.push('Fontes/evidências:');
+  fontes.slice(0, 10).forEach((source) => lines.push(`- ${source.tabela}: ${source.quantidade} registro(s) — ${source.motivo || 'consulta'}.`));
+  const manualText = buildManualApplicationText(context.manualApplications || []);
+  if (manualText) lines.push(`\n${manualText}`);
+  if ((context.snTrace || []).length) {
+    lines.push('\nTrilha SN/OS:');
+    context.snTrace.slice(0, 8).forEach((trace) => lines.push(`- SN ${trace.sn}: ${trace.melhor_evidencia}; PN ${trace.pn || 'não informado'}; status ${trace.status || 'não informado'}; localização/aeronave ${trace.localizacao || trace.aeronave || 'não informada'}; OS/WO ${trace.os || trace.wo || 'não vinculada'}.`));
+  }
+  lines.push('');
+  lines.push('Conclusão operacional: use as evidências acima como leitura inicial do SISHA. Para decisão operacional, valide a fonte primária quando envolver CeIMSPA, status externo, recebimento, embarque, WO ou OS.');
+  lines.push('');
+  lines.push('Próxima ação recomendada: conferir o card/fonte indicada, confirmar dados críticos com PPU/CeIMSPA e registrar ajuste se algum documento estiver desatualizado.');
+  lines.push(`Confiança: ${confianca}.`);
+  return lines.join('\n');
+}
+
 function deriveSnLocation(sn, sources) {
   const snNorm = normalizeUpper(sn);
   const candidates = [];
@@ -1035,6 +1225,17 @@ async function fetchConsultContext(question = '') {
     }
   }
 
+  const ragTerms = unique([...freeTerms, ...normalizedTokens, ...tokens, ...docIdsRaw]).slice(0, 8);
+  const ragClause = buildIlikeOr(['nome_arquivo', 'tipo_documento', 'classificacao', 'resumo', 'texto_extraido'], ragTerms);
+  if (ragClause) {
+    tasks.push(safeSelect(
+      'chat_lince_documentos',
+      'id,tipo_documento,nome_arquivo,resumo,classificacao,destino_sugerido,entidades,registros_sugeridos,acoes_consultivas,status,created_at,texto_extraido',
+      (query) => query.or(ragClause).order('created_at', { ascending: false }),
+      { motivo: 'RAG documental textual: busca nos documentos analisados pelo Chat Lince', limit: 10 }
+    ));
+  }
+
   if (wantsPolicy || wantsCost || wantsNeeds) {
     const terms = unique([...normalizedTokens, ...tokens, ...docIdsRaw, '']).slice(0, 8);
     const policyOr = buildIlikeOr(['tarefas', 'tipo'], terms);
@@ -1099,6 +1300,7 @@ async function fetchConsultContext(question = '') {
       processo_aquisicao_reparo: wantsProcess,
       trilha_sn_os: wantsSnTrace || snTrace.length > 0,
       manual_aplicacao: wantsManualApplication || manualApplications.length > 0,
+      rag_documental: tableRows(sources, 'chat_lince_documentos').length > 0,
     },
     snTrace,
     manualApplications,
@@ -1109,19 +1311,27 @@ async function fetchConsultContext(question = '') {
 }
 
 function summarizeRowsForPrompt(context) {
+  const compactSources = (context.sources || []).map((source) => ({
+    tabela: source.tabela,
+    motivo: source.motivo,
+    linhas: (source.linhas || []).slice(0, 10).map((row) => {
+      const compactRow = { ...row };
+      if (compactRow.texto_extraido) compactRow.texto_extraido = compactText(compactRow.texto_extraido, 2200);
+      if (compactRow.resumo) compactRow.resumo = compactText(compactRow.resumo, 900);
+      if (compactRow.observacao) compactRow.observacao = compactText(compactRow.observacao, 900);
+      return compactRow;
+    }),
+  }));
+
   return JSON.stringify({
-    fontes: context.sources.map((source) => ({
-      tabela: source.tabela,
-      motivo: source.motivo,
-      linhas: source.linhas.slice(0, 10),
-    })),
+    agente: context.agent || null,
+    fontes: compactSources,
     trilha_sn: context.snTrace,
     aplicacoes_manual: context.manualApplications,
     correlacoes_sugeridas: context.correlacoesSugeridas || [],
     modulos_acionados: context.modules,
-  }, null, 2).slice(0, 18000);
+  }, null, 2).slice(0, 22000);
 }
-
 function offlineConsultAnswer(question, context, helpdesk = null) {
   const q = normalizeUpper(question);
   const processAnswer = buildOperationalProcessAnswer(question, context);
@@ -1129,17 +1339,12 @@ function offlineConsultAnswer(question, context, helpdesk = null) {
   const parts = [];
 
   if (context.sources.length === 0 && context.snTrace.length === 0 && context.manualApplications.length === 0 && (context.correlacoesSugeridas || []).length === 0) {
-    parts.push('Analisei o SISHA e não encontrei nenhum registro claro para essa consulta.');
-    parts.push('Isso não significa, necessariamente, que o item não exista: ele pode estar com outro PN, outro nome técnico, uma nomenclatura do manual diferente ou ainda não ter sido atualizado no banco.');
-    if (helpdesk?.ok) {
-      parts.push(`Registrei a dúvida no Help Desk do Chat Lince para análise do PPU. Protocolo: ${helpdesk.data?.protocolo || helpdesk.data?.id}.`);
-    } else {
-      parts.push('Minha recomendação é validar em fonte primária do PPU/manual e, se necessário, registrar a dúvida para análise humana.');
-    }
-    return parts.join('\n\n');
+    return buildAgentOfflineAnswer(question, context, helpdesk);
   }
 
-  parts.push('Consultei o SISHA e encontrei as seguintes evidências:');
+  parts.push(`Resposta direta: encontrei evidências no SISHA para a intenção ${(context.agent && context.agent.rotulo) || 'consulta logística'}.`);
+  parts.push('');
+  parts.push('Fontes/evidências:');
   sourceSummary(context.sources).forEach((source) => {
     parts.push(`- ${source.tabela}: ${source.quantidade} registro(s) — ${source.motivo || 'consulta'}.`);
   });
@@ -1155,17 +1360,20 @@ function offlineConsultAnswer(question, context, helpdesk = null) {
     parts.push('Ressalva: a localização por SN deve priorizar o último evento validado de instalação/remoção quando o relatório oficial de OS estiver cadastrado.');
   }
 
-  if (q.includes('CEIMSPA')) parts.push('Regra SISHA: item no CeIMSPA é possibilidade; confirme com o CeIMSPA antes de assumir disponibilidade real.');
-  if (q.includes('LISDE')) parts.push('Regra SISHA: LISDE não é estoque; ela reduz o lead time efetivo após pagamento, normalmente para cerca de 30 dias.');
-  if (q.includes('PRONT') || q.includes('100%')) parts.push('Regra SISHA: prontidão só é SIM quando 100% da necessidade estiver coberta no PPU.');
-  if (q.includes('CAN') || q.includes('CANCEL')) parts.push('Regra SISHA: status CAN cancela logicamente OC/PD/SEPD e não entra como compra ativa, saldo, radar ou necessidade útil.');
-  if (context.modules.politica_estoque) parts.push('Política de Estoque: quando houver tarefa/receita vinculada, ela alimenta o Gerador de Necessidades e o Custo Operacional.');
-  if (context.modules.custo_operacional) parts.push('Custo Operacional: usa receita x preço unitário e projeção por política; sem preço, o PN entra como pendência de cotação.');
-  if (context.modules.gerador_necessidades) parts.push('Gerador de Necessidades: deve considerar PPU, CeIMSPA como possibilidade, LISDE como lead time e compras ativas não-CAN.');
+  if (q.includes('CEIMSPA')) parts.push('Conclusão operacional: item no CeIMSPA é possibilidade; confirme com o CeIMSPA antes de assumir disponibilidade real.');
+  if (q.includes('LISDE')) parts.push('Conclusão operacional: LISDE não é estoque; ela reduz o lead time efetivo após pagamento, normalmente para cerca de 30 dias.');
+  if (q.includes('PRONT') || q.includes('100%')) parts.push('Conclusão operacional: prontidão só é SIM quando 100% da necessidade estiver coberta no PPU.');
+  if (q.includes('CAN') || q.includes('CANCEL')) parts.push('Conclusão operacional: status CAN cancela logicamente OC/PD/SEPD e não entra como compra ativa, saldo, radar ou necessidade útil.');
+  if (context.modules.politica_estoque) parts.push('Conclusão operacional: Política de Estoque alimenta Gerador de Necessidades e Custo Operacional quando houver tarefa/receita vinculada.');
+  if (context.modules.custo_operacional) parts.push('Conclusão operacional: Custo Operacional usa receita x preço unitário e projeção por política; sem preço, o PN entra como pendência de cotação.');
+  if (context.modules.gerador_necessidades) parts.push('Conclusão operacional: Gerador de Necessidades deve considerar PPU, CeIMSPA como possibilidade, LISDE como lead time e compras ativas não-CAN.');
+
+  parts.push('');
+  parts.push('Próxima ação recomendada: valide a fonte primária quando a decisão envolver retirada, compra, WO, CeIMSPA, recebimento ou OS.');
+  parts.push(`Confiança: ${confidenceLabel(context.agent || buildAgentPlan(question, context), context)}.`);
 
   return parts.join('\n');
 }
-
 function hasConsultEvidence(context) {
   return Boolean(
     context?.sources?.length ||
@@ -1220,11 +1428,13 @@ async function answerConsultQuestion(question = '', user = null) {
       resposta: buildFriendlyGreeting(),
       modelo: 'roteador-local',
       aviso_ia: null,
-      contexto: { tokens: [], sn: [], identificadores_documentais: [], os: [], modulos: {}, trilha_sn: [], aplicacoes_manual: [], fontes: [], helpdesk: null },
+      contexto: { agente: { versao: 'AGENTE_LOGISTICO_LINCE_V1', intencao: 'SAUDACAO', rotulo: 'Saudação', confianca_intencao: 1 }, tokens: [], sn: [], identificadores_documentais: [], os: [], modulos: {}, trilha_sn: [], aplicacoes_manual: [], fontes: [], helpdesk: null },
     };
   }
 
   const context = await fetchConsultContext(question);
+  const agent = buildAgentPlan(question, context);
+  context.agent = agent;
   const contextForPrompt = summarizeRowsForPrompt(context);
 
   let helpdesk = null;
@@ -1238,6 +1448,7 @@ async function answerConsultQuestion(question = '', user = null) {
       modelo: 'roteador-local',
       aviso_ia: null,
       contexto: {
+        agente: agent,
         tokens: context.normalizedTokens,
         termos: context.freeTerms,
         sn: context.snCandidates,
@@ -1261,6 +1472,7 @@ async function answerConsultQuestion(question = '', user = null) {
       modelo: 'roteador-local-processo-logistico',
       aviso_ia: null,
       contexto: {
+        agente: agent,
         tokens: context.normalizedTokens,
         termos: context.freeTerms,
         sn: context.snCandidates,
@@ -1280,11 +1492,11 @@ async function answerConsultQuestion(question = '', user = null) {
   const ai = await callOpenRouter([
     {
       role: 'system',
-      content: `Você é o ${CHAT_LINCE_NAME}, IA consultora documental e logística do SISHA-1. Responda em português-BR com padrão direto 10/10: primeiro a conclusão, depois evidências, fontes consultadas e próxima ação. Seja objetivo, sem JSON bruto, sem campos vazios e sem tabela desnecessária. Use somente o contexto fornecido e nunca invente dados. Se o usuário disser processo, aquisição, compra, PD, OC, ODC, ODA, WO ou reparo, entenda como intenção logística de saber se existe caminho de suprimento/recuperação para resolver a indisponibilidade e colocar o item na linha de voo. Se houver dados de WO/Repair do Order Book, considere isso como evidência de WO/repair mesmo que a tabela seja leonardo_repairs. Se o contexto trouxer correlacoes_sugeridas, explique que encontrou possível equivalência de nomenclatura, apresente a ressalva e peça confirmação para cadastrar apelido operacional. Se houver aplicação no manual/dicionário técnico, informe DMC, item/subitem, nomenclatura e ressalva. Se não houver evidência, diga que não encontrou e oriente Help Desk. Regras fixas: CeIMSPA é possibilidade e deve ser confirmado; LISDE não é estoque e reduz LT efetivo; prontidão só é SIM com 100% no PPU; OC/ODC/ODA devem aparecer junto dos PDs; PN sem Price List/RFQ/recebimento precisa cotar; busca PN deve ser exata ou por prefixo, não por contém; CAN cancela logicamente compra ativa, saldo, radar e necessidade útil, preservando histórico. Integre Política de Estoque, Custo Operacional e Gerador de Necessidades quando a pergunta tocar nesses temas. Para pergunta “onde está o SN”, responda pela melhor trilha: equipamento serializado, eventos, WO/Repair/RECEX, PPU e staging de OS; ressalve quando faltar relatório oficial de OS de instalação/remoção.`,
+      content: `${buildAgentSystemPrompt(agent)}\n\nOrientação complementar: responda em português-BR, de forma humana, cordial e objetiva, como assistente do PPU. Evite parecer relatório robótico: nada de JSON bruto, nada de listar campos internos vazios, nada de tabela desnecessária. Se o usuário disser processo, aquisição, compra, PD, OC, ODC, ODA, WO ou reparo, entenda como intenção logística de saber se existe caminho de suprimento/recuperação para resolver a indisponibilidade e colocar o item na linha de voo. Se houver dados de WO/Repair do Order Book, considere isso como evidência de WO/repair mesmo que a tabela seja leonardo_repairs. Se o contexto trouxer correlacoes_sugeridas, explique que encontrou possível equivalência de nomenclatura, apresente os dados com ressalva e peça confirmação para cadastrar como apelido operacional. Se o contexto trouxer aplicação no manual/dicionário técnico, explique DMC, item/subitem, nomenclatura e ressalva. Integre Política de Estoque, Custo Operacional e Gerador de Necessidades quando a pergunta tocar nesses temas.`,
     },
     {
       role: 'user',
-      content: `Pergunta do usuário:\n${question}\n\nContexto consultado no banco SISHA:\n${contextForPrompt || '[]'}\n\nIdentificadores detectados: ${JSON.stringify({ pn: context.normalizedTokens, sn: context.snCandidates, docs: context.docIds, os: context.osCandidates })}\n\nMonte uma resposta conversacional, clara e útil. Informe o que encontrou, onde encontrou, aplicação no manual quando existir, impacto em Política/Custo/Gerador quando aplicável, trilha SN/OS quando aplicável, ressalvas e próxima ação recomendada. Não mostre JSON bruto nem tabelas vazias.`,
+      content: `Pergunta do usuário:\n${question}\n\nPlano do Agente Logístico Lince:\n${JSON.stringify(agent, null, 2)}\n\nContexto consultado no banco SISHA e no RAG documental textual:\n${contextForPrompt || '[]'}\n\nIdentificadores detectados: ${JSON.stringify({ pn: context.normalizedTokens, sn: context.snCandidates, docs: context.docIds, os: context.osCandidates })}\n\nMonte uma resposta conversacional, clara e útil, seguindo o formato obrigatório. Informe o que encontrou, onde encontrou, aplicação no manual quando existir, impacto em Política/Custo/Gerador quando aplicável, trilha SN/OS quando aplicável, ressalvas e próxima ação recomendada. Não mostre JSON bruto nem tabelas vazias.`,
     },
   ], { temperature: 0.15 });
 
@@ -1294,6 +1506,7 @@ async function answerConsultQuestion(question = '', user = null) {
     modelo: ai.ok ? ai.model : 'offline',
     aviso_ia: ai.ok ? null : ai.reason,
     contexto: {
+      agente: agent,
       tokens: context.normalizedTokens,
       termos: context.freeTerms,
       sn: context.snCandidates,

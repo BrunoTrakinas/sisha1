@@ -50,6 +50,11 @@ function normalizeUpper(value) {
     return String(value || '').trim().toUpperCase();
 }
 
+function looksLikePn(value = '') {
+    const pn = normalizeUpper(value);
+    return pn.length >= 5 && /[0-9]/.test(pn) && !pn.includes(' ');
+}
+
 function getSubItemPriority(value) {
     const text = normalizeUpper(value);
     if (!text) return 999;
@@ -120,6 +125,10 @@ const NAME_SOURCE_PRIORITY = {
     PRICE_LIST: 90,
     SERVICE_BULLETIN: 85,
     RFQ_COTACOES: 80,
+    ORDER_BOOK: 78,
+    ORDER_BOOK_FOC: 76,
+    ORDER_BOOK_REPAIR: 75,
+    ORDER_BOOK_ADMIN_DOC: 72,
     ESTOQUE_PPU: 70,
     LISDE: 60,
     CEIMSPA_VIA_DICIONARIO: 55,
@@ -265,8 +274,12 @@ exports.searchItems = async (req, res) => {
         const p9 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura').or(`pn.ilike.%${query}%`).limit(80);
         const p10 = supabase.from('service_bulletins').select('sb_numero, titulo').or(`sb_numero.ilike.%${query}%,titulo.ilike.%${query}%`).limit(30);
         const p11 = supabase.from('item_apelidos').select('pn, apelido, descricao_oficial').eq('ativo', true).or(`pn.ilike.%${query}%,apelido.ilike.%${query}%,descricao_oficial.ilike.%${query}%`).limit(50);
+        const p12 = supabase.from('leonardo_spares').select('pn,descricao,documento_referencia,oc_referencia,status_categoria').or(`pn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%,oc_referencia.ilike.%${query}%,status_categoria.ilike.%${query}%`).limit(80);
+        const p13 = supabase.from('leonardo_foc_spares').select('pn,descricao,documento_referencia').or(`pn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%`).limit(80);
+        const p14 = supabase.from('leonardo_repairs').select('pn,sn,descricao,tipo,documento_referencia,status').or(`pn.ilike.%${query}%,sn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%,status.ilike.%${query}%,tipo.ilike.%${query}%`).limit(120);
+        const p15 = supabase.from('leonardo_admin_docs').select('tipo_doc,numero_doc,assunto_pn,status').or(`numero_doc.ilike.%${query}%,assunto_pn.ilike.%${query}%,status.ilike.%${query}%`).limit(80);
 
-        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11]);
+        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15]);
         const getRes = (index) => results[index].status === 'fulfilled' ? results[index].value.data : null;
 
         const itemsMatch = getRes(0) || [];
@@ -280,6 +293,10 @@ exports.searchItems = async (req, res) => {
         const sbPnMatch = getRes(8) || [];
         const sbHeaderMatch = getRes(9) || [];
         const apelidosMatch = getRes(10) || [];
+        const orderBookMatch = getRes(11) || [];
+        const focMatch = getRes(12) || [];
+        const repairMatch = getRes(13) || [];
+        const adminDocMatch = getRes(14) || [];
 
         apelidosMatch.forEach((i) => {
             const pn = normalizeUpper(i.pn);
@@ -287,6 +304,38 @@ exports.searchItems = async (req, res) => {
             pnsEncontrados.add(pn);
             registerSource(fontesEncontradas, pn, 'APELIDO_OPERACIONAL');
             setBestName(baseNomes, origemNomenclaturaBase, pn, i.descricao_oficial, 'ITEMS');
+        });
+
+        orderBookMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'ORDER_BOOK');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.descricao, 'ORDER_BOOK');
+        });
+
+        focMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'ORDER_BOOK_FOC');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.descricao, 'ORDER_BOOK_FOC');
+        });
+
+        repairMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'ORDER_BOOK_REPAIR');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.descricao, 'ORDER_BOOK_REPAIR');
+        });
+
+        adminDocMatch.forEach((i) => {
+            const pn = normalizeUpper(i.assunto_pn);
+            if (!looksLikePn(pn)) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, `ORDER_BOOK_${normalizeUpper(i.tipo_doc || 'DOC')}`);
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.assunto_pn, 'ORDER_BOOK_ADMIN_DOC');
         });
 
         itemsMatch.forEach((i) => {
@@ -447,8 +496,9 @@ exports.searchItems = async (req, res) => {
         const q10 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura, qtd, capitulo, item_num, aplicabilidade').in('pn', arrayPns);
         const q11 = supabase.from('compras_pds').select('*').in('pn', arrayPns).eq('ativo', true);
         const q12 = supabase.from('work_orders').select('*').in('pn', arrayPns).eq('ativo', true);
+        const q13 = supabase.from('leonardo_admin_docs').select('*').in('assunto_pn', arrayPns);
 
-        const batchResults = await Promise.allSettled([q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12]);
+        const batchResults = await Promise.allSettled([q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12, q13]);
         const getBatchRes = (index) => batchResults[index].status === 'fulfilled' ? batchResults[index].value.data : null;
 
         const ppuData = getBatchRes(0) || [];
@@ -471,6 +521,7 @@ exports.searchItems = async (req, res) => {
         const sbItemData = getBatchRes(9) || [];
         const comprasPdData = getBatchRes(10) || [];
         const workOrdersData = getBatchRes(11) || [];
+        const adminDocData = getBatchRes(12) || [];
 
         let altDocRows = [];
         try {
@@ -664,7 +715,18 @@ exports.searchItems = async (req, res) => {
                     observacao: wo.observacao || null,
                     data_previsao: wo.data_previsao_entrega || wo.data_previsao,
                 }));
-            item.repairs = [...repairsOrderBook, ...repairsWo];
+            const docsOrderBook = adminDocData
+                .filter((doc) => normalizeUpper(doc.assunto_pn) === pnUpper)
+                .map((doc) => ({
+                    origem: 'ORDER_BOOK_ADMIN_DOC',
+                    tipo: doc.tipo_doc || 'DOC',
+                    documento_referencia: doc.numero_doc,
+                    status: doc.status || 'N/I',
+                    sn: 'N/I',
+                    pn: pnUpper,
+                    observacao: `Documento ${doc.tipo_doc || 'Order Book'} vinculado ao PN ${pnUpper}`,
+                }));
+            item.repairs = [...repairsOrderBook, ...repairsWo, ...docsOrderBook];
             item.lisde = lisdeData.filter((l) => normalizeUpper(l.pn) === pnUpper);
 
             let cotacoesValidasParaOPriceList = [];

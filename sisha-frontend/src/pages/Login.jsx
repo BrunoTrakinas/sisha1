@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { API_BASE_URL } from '../lib/api';
+import { API_BASE_URL, LOGIN_NOTICE_KEY } from '../lib/api';
 
 export default function Login() {
   const navigate = useNavigate();
@@ -10,6 +10,18 @@ export default function Login() {
   const [senha, setSenha] = useState('');
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState('');
+
+  useEffect(() => {
+    try {
+      const notice = sessionStorage.getItem(LOGIN_NOTICE_KEY);
+      if (notice) {
+        setErro(notice);
+        sessionStorage.removeItem(LOGIN_NOTICE_KEY);
+      }
+    } catch {
+      // Ignora falhas de storage.
+    }
+  }, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();

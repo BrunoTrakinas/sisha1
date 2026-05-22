@@ -134,14 +134,21 @@ exports.login = async (req, res) => {
 
 exports.logout = async (req, res) => {
   try {
+    const reason = String(req.body?.reason || 'MANUAL').trim().toUpperCase();
+    const isIdle = reason === 'INATIVIDADE' || reason === 'IDLE_TIMEOUT';
+    const action = isIdle ? 'LOGOUT_INATIVIDADE' : 'LOGOUT';
+    const summary = isIdle
+      ? `${req.user?.email || 'Usuário'} teve a sessão encerrada por inatividade.`
+      : `${req.user?.email || 'Usuário'} saiu do SISHA.`;
+
     await markPresenceOffline({ req, user: req.user });
     await registrarAuditoria({
       req,
-      action: 'LOGOUT',
+      action,
       entity: 'AUTH',
       entityId: req.user?.email,
-      summary: `${req.user?.email || 'Usuário'} saiu do SISHA.`,
-      details: { email: req.user?.email, role: req.user?.role },
+      summary,
+      details: { email: req.user?.email, role: req.user?.role, reason },
       level: 'INFO',
       visibility: 'GOD',
     });

@@ -332,6 +332,41 @@ function calcWoResumo(wo = {}) {
   };
 }
 
+function excelSafe(value) {
+  if (value === undefined || value === null) return '';
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return value;
+}
+
+function flattenForExcel(row = {}) {
+  return Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, excelSafe(value)]));
+}
+
+function appendJsonSheet(workbook, name, rows = []) {
+  const safeName = String(name || 'Planilha').slice(0, 31);
+  const safeRows = (rows || []).map(flattenForExcel);
+  const sheet = safeRows.length > 0
+    ? XLSX.utils.json_to_sheet(safeRows)
+    : XLSX.utils.aoa_to_sheet([['Sem registros para esta seção.']]);
+  XLSX.utils.book_append_sheet(workbook, sheet, safeName);
+}
+
+function sendExcelWorkbook(res, workbook, fileName) {
+  const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  return res.status(200).send(buffer);
+}
+
+function exportFileName(prefix, identifier) {
+  const clean = normalizeComparable(identifier || 'export') || 'export';
+  return `${prefix}_${clean}.xlsx`;
+}
+
+
 async function buscarPnsRelacionadosPorWoOuSn(q = '') {
   const linked = new Set();
   if (!q) return linked;
@@ -436,7 +471,7 @@ function mergeOrderBookPdsIntoOrdem(ordem = {}, orderBookOrdem = null) {
 }
 
 async function listarOrdensOrderBook(q = '', linkedPns = new Set()) {
-  const { data, error } = await supabase.from('leonardo_spares').select('id,pn,descricao,documento_referencia,oc_referencia,qtd_pendente,valor_unitario,valor_total,data_previsao_lh,status_categoria,qtd_aguardando_coleta,qtd_em_rota,qtd_entregue').limit(5000);
+  const { data, error } = await supabase.from('leonardo_spares').select('*').limit(10000);
   if (error) {
     console.warn('[SISHA][compras] Order Book indisponível na consulta de OC:', error.message || error);
     return [];
@@ -451,12 +486,12 @@ function buildOrderBookWorkOrders(rows = []) {
     const tipo = normalizeUpper(row.tipo || 'REPAIR');
     const documento = normalizeUpper(row.documento_referencia || `ORDERBOOK-${tipo}-${row.sn || row.pn}`);
     const status = normalizeUpper(row.status || tipo || 'EM_REPARO');
-    return { id: `orderbook-repair-${row.id || `${documento}-${row.pn}-${row.sn || 'SN'}`}`, source: 'ORDER_BOOK_REPAIR', fonte: 'ORDER_BOOK', order_book_ref: true, read_only: true, numero_wo: documento, documento_referencia: documento, pn: normalizeUpper(row.pn), sn: normalizeUpper(row.sn), sn_pendente: !normalizeUpper(row.sn), quantidade: 1, empresa: tipo === 'WARRANTY' ? 'Leonardo / Warranty' : 'Leonardo / Repair', origem: `ORDER_BOOK_${tipo}`, tipo, tipo_wo: tipo === 'WARRANTY' ? 'GARANTIA' : 'REPARO', status, status_original: row.status || null, resultado: null, resultado_tecnico: 'PENDENTE', valor_total: 0, valor_total_usd: 0, moeda: 'USD', data_previsao: row.data_previsao || null, data_previsao_entrega: row.data_previsao || null, data_retorno: null, nomenclatura: row.descricao || null, fonte_nomenclatura: row.descricao ? 'ORDER_BOOK' : 'PENDENTE', observacao: row.descricao || null, aeronave: row.aeronave || null, pn_saida: row.pn_saida || null, ativo: true, work_order_suplementacoes: [], resumo: calcWoResumo({ valor_total: 0, work_order_suplementacoes: [] }) };
+    return { id: `orderbook-repair-${row.id || `${documento}-${row.pn}-${row.sn || 'SN'}`}`, source: 'ORDER_BOOK_REPAIR', fonte: 'ORDER_BOOK', order_book_ref: true, read_only: true, numero_wo: documento, documento_referencia: documento, pn: normalizeUpper(row.pn), sn: normalizeUpper(row.sn), sn_pendente: !normalizeUpper(row.sn), quantidade: 1, empresa: tipo === 'WARRANTY' ? 'Leonardo / Warranty' : 'Leonardo / Repair', origem: `ORDER_BOOK_${tipo}`, tipo, tipo_wo: tipo === 'WARRANTY' ? 'GARANTIA' : 'REPARO', status, status_original: row.status || null, resultado: null, resultado_tecnico: 'PENDENTE', valor_total: 0, valor_total_usd: 0, moeda: 'USD', data_previsao: row.data_previsao || row.forecast_date_lh || null, data_previsao_entrega: row.data_previsao || row.forecast_date_lh || null, data_retorno: null, nomenclatura: row.descricao || null, fonte_nomenclatura: row.descricao ? 'ORDER_BOOK' : 'PENDENTE', observacao: row.lh_updates || row.bn_comments || row.descricao || null, aeronave: row.aeronave || null, pn_saida: row.pn_saida || null, notification: row.notification || null, po_number: row.po_number || null, delivery_number: row.delivery_number || null, lh_updates: row.lh_updates || null, bn_comments: row.bn_comments || null, event_report_title: row.event_report_title || null, raw_payload: row.raw_payload || null, ativo: true, work_order_suplementacoes: [], resumo: calcWoResumo({ valor_total: 0, work_order_suplementacoes: [] }) };
   });
 }
 
 async function listarWorkOrdersOrderBook(q = '', status = '') {
-  const { data, error } = await supabase.from('leonardo_repairs').select('id,pn,sn,descricao,tipo,documento_referencia,status,data_previsao').limit(5000);
+  const { data, error } = await supabase.from('leonardo_repairs').select('*').limit(10000);
   if (error) {
     console.warn('[SISHA][compras] Repairs/Warranty do Order Book indisponíveis na consulta de WO:', error.message || error);
     return [];
@@ -511,6 +546,123 @@ exports.listarOrdens = async (req, res) => {
   } catch (error) {
     console.error('[SISHA][compras] listarOrdens:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao consultar Ordens de Compra.' });
+  }
+};
+
+
+exports.exportarOrdem = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let ordem = null;
+    let orderBookRows = [];
+
+    if (String(id).startsWith('orderbook-')) {
+      const numeroOc = normalizeUpper(String(id).replace(/^orderbook-/i, ''));
+      const { data, error } = await supabase.from('leonardo_spares').select('*').limit(10000);
+      if (error) throw error;
+      orderBookRows = (data || []).filter((row) => normalizeOcRaiz(row.oc_referencia) === normalizeOcRaiz(numeroOc));
+      ordem = buildOrderBookOrdens(orderBookRows)[0] || null;
+    } else {
+      const { data, error } = await supabase
+        .from('compras_ordens')
+        .select('*, compras_pds(*), compras_suplementacoes(*)')
+        .eq('id', id)
+        .single();
+      if (error) throw error;
+      ordem = { ...data, source: 'SISHA', fonte: 'SISHA', resumo: calcOrdemResumo(data) };
+      const numeroOc = normalizeOcRaiz(ordem.numero_oc);
+      const { data: bookData } = await supabase.from('leonardo_spares').select('*').limit(10000);
+      orderBookRows = (bookData || []).filter((row) => normalizeOcRaiz(row.oc_referencia) === numeroOc);
+    }
+
+    if (!ordem) return res.status(404).json({ status: 'error', message: 'OC não encontrada para exportação.' });
+
+    const workbook = XLSX.utils.book_new();
+    appendJsonSheet(workbook, 'Resumo OC', [{
+      id: ordem.id,
+      numero_oc: ordem.numero_oc,
+      numero_oc_original: ordem.numero_oc_original,
+      status: ordem.status,
+      moeda: ordem.moeda,
+      valor_total: ordem.valor_total,
+      valor_total_gbp: ordem.valor_total_gbp,
+      valor_total_usd: ordem.valor_total_usd,
+      valor_suplementado: ordem.resumo?.valor_suplementado,
+      saldo_restante: ordem.resumo?.saldo_restante,
+      percentual_suplementado: ordem.resumo?.percentual_suplementado,
+      observacao: ordem.observacao,
+      motivo_ressalva: ordem.motivo_ressalva,
+      fonte: ordem.fonte || ordem.fonte_confirmacao || ordem.source,
+      exportado_em: new Date().toISOString(),
+    }]);
+    appendJsonSheet(workbook, 'PDs', ordem.compras_pds || []);
+    appendJsonSheet(workbook, 'Suplementacoes', ordem.compras_suplementacoes || []);
+    appendJsonSheet(workbook, 'OrderBook', orderBookRows || []);
+
+    await auditCompra(req, 'OC_EXPORTADA', 'OC', ordem.numero_oc || id, `OC ${ordem.numero_oc || id} exportada.`, { id, pds: (ordem.compras_pds || []).length, order_book: orderBookRows.length }, 'PUBLIC');
+    return sendExcelWorkbook(res, workbook, exportFileName('OC', ordem.numero_oc_original || ordem.numero_oc || id));
+  } catch (error) {
+    console.error('[SISHA][compras] exportarOrdem:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao exportar OC.' });
+  }
+};
+
+exports.exportarWorkOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let wo = null;
+    let orderBookRows = [];
+
+    if (String(id).startsWith('orderbook-repair-')) {
+      const rawId = String(id).replace(/^orderbook-repair-/i, '');
+      const { data, error } = await supabase.from('leonardo_repairs').select('*').limit(10000);
+      if (error) throw error;
+      orderBookRows = (data || []).filter((row) => String(row.id) === rawId || normalizeComparable(`${row.documento_referencia}-${row.pn}-${row.sn || 'SN'}`) === normalizeComparable(rawId));
+      wo = buildOrderBookWorkOrders(orderBookRows)[0] || null;
+    } else {
+      const { data, error } = await supabase
+        .from('work_orders')
+        .select('*, work_order_suplementacoes(*)')
+        .eq('id', id)
+        .single();
+      if (error) throw error;
+      wo = { ...data, source: 'SISHA', fonte: 'SISHA', resumo: calcWoResumo(data) };
+      const { data: bookData } = await supabase.from('leonardo_repairs').select('*').eq('pn', wo.pn).limit(1000);
+      orderBookRows = bookData || [];
+    }
+
+    if (!wo) return res.status(404).json({ status: 'error', message: 'WO não encontrada para exportação.' });
+
+    const workbook = XLSX.utils.book_new();
+    appendJsonSheet(workbook, 'Resumo WO', [{
+      id: wo.id,
+      numero_wo: wo.numero_wo,
+      documento_referencia: wo.documento_referencia,
+      pn: wo.pn,
+      sn: wo.sn,
+      status: wo.status,
+      tipo_wo: wo.tipo_wo || wo.tipo,
+      resultado_tecnico: wo.resultado_tecnico || wo.resultado,
+      empresa: wo.empresa || wo.codemp,
+      valor_total: wo.valor_total,
+      moeda: wo.moeda,
+      valor_suplementado: wo.resumo?.valor_suplementado,
+      saldo_restante: wo.resumo?.saldo_restante,
+      data_previsao: wo.data_previsao || wo.data_previsao_entrega,
+      lh_updates: wo.lh_updates,
+      bn_comments: wo.bn_comments,
+      observacao: wo.observacao,
+      fonte: wo.fonte || wo.source,
+      exportado_em: new Date().toISOString(),
+    }]);
+    appendJsonSheet(workbook, 'Suplementacoes', wo.work_order_suplementacoes || []);
+    appendJsonSheet(workbook, 'OrderBook_Repair', orderBookRows || []);
+
+    await auditCompra(req, 'WO_EXPORTADA', 'WO', wo.numero_wo || id, `WO ${wo.numero_wo || id} exportada.`, { id, order_book: orderBookRows.length }, 'PUBLIC');
+    return sendExcelWorkbook(res, workbook, exportFileName('WO', wo.numero_wo || wo.documento_referencia || id));
+  } catch (error) {
+    console.error('[SISHA][compras] exportarWorkOrder:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao exportar WO.' });
   }
 };
 

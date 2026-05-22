@@ -53,6 +53,23 @@ const formatDbDate = (value) => {
 };
 
 
+const rawPayloadFromRow = (headers = [], row = []) => {
+    const payload = {};
+    headers.forEach((header, index) => {
+        const key = String(header || '').trim() || `COL_${index + 1}`;
+        if (!key) return;
+        const value = row[index];
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+            payload[key] = value;
+        }
+    });
+    return payload;
+};
+
+const safeCell = (row = [], index = -1) => (index >= 0 ? row[index] : null);
+
+
+
 const uniqueBy = (rows = [], keyFn) => {
     const map = new Map();
     rows.forEach((row) => {
@@ -405,9 +422,14 @@ exports.importData = async (req, res) => {
                         const idx = buildIndexMap(headers, {
                             pd: 'pd',
                             oc: 'oc',
+                            custPoItem: ['cust po item', 'customer po item'],
                             pn: 'pn',
                             desc: 'nomenclatura',
+                            salesOrder: ['sales order'],
+                            salesOrderItem: ['s/o item', 'sales order item'],
+                            soLoad: ['so load'],
                             val: 'price',
+                            total: ['total'],
                             req: 'qtd',
                             date: 'delivery',
                             categoria: 'categoria',
@@ -418,18 +440,31 @@ exports.importData = async (req, res) => {
                         });
                         
                         rawRows.slice(hIdx + 1).forEach(r => {
-                            const pn = normalizePn(safeString(r[idx.pn])); 
-                            const categoryInfo = safeString(r[idx.categoria]);
-                            let saldoPendente = (idx.notDelivered !== -1 && r[idx.notDelivered] !== '') ? cleanCurrency(r[idx.notDelivered]) : cleanCurrency(r[idx.req]);
+                            const pn = normalizePn(safeString(safeCell(r, idx.pn))); 
+                            const categoryInfo = safeString(safeCell(r, idx.categoria));
+                            let saldoPendente = (idx.notDelivered !== -1 && safeCell(r, idx.notDelivered) !== '') ? cleanCurrency(safeCell(r, idx.notDelivered)) : cleanCurrency(safeCell(r, idx.req));
 
                             if (pn && saldoPendente > 0 && pn.toLowerCase() !== 'part number' && (!categoryInfo || !categoryInfo.includes('5-'))) {
-                                pnsToRegister.set(pn, safeString(r[idx.desc]) || 'N/A');
+                                pnsToRegister.set(pn, safeString(safeCell(r, idx.desc)) || 'N/A');
                                 allSpares.push({ 
-                                    pn, documento_referencia: safeString(r[idx.pd]) || 'N/A', oc_referencia: safeString(r[idx.oc]) || 'N/A', 
-                                    descricao: pnsToRegister.get(pn), qtd_pendente: saldoPendente, valor_unitario: cleanCurrency(r[idx.val]), 
-                                    data_previsao_lh: formatExcelDate(r[idx.date]), status_categoria: categoryInfo || 'N/A',
-                                    qtd_aguardando_coleta: cleanCurrency(r[idx.onDelivery]), qtd_em_rota: cleanCurrency(r[idx.inShipment]),
-                                    qtd_entregue: cleanCurrency(r[idx.delivered])
+                                    pn,
+                                    documento_referencia: safeString(safeCell(r, idx.pd)) || 'N/A',
+                                    oc_referencia: safeString(safeCell(r, idx.oc)) || 'N/A',
+                                    cust_po_item: safeString(safeCell(r, idx.custPoItem)),
+                                    sales_order: safeString(safeCell(r, idx.salesOrder)),
+                                    sales_order_item: safeString(safeCell(r, idx.salesOrderItem)),
+                                    so_load: safeString(safeCell(r, idx.soLoad)),
+                                    descricao: pnsToRegister.get(pn),
+                                    qtd_pendente: saldoPendente,
+                                    valor_unitario: cleanCurrency(safeCell(r, idx.val)),
+                                    valor_total: cleanCurrency(safeCell(r, idx.total)),
+                                    data_previsao_lh: formatExcelDate(safeCell(r, idx.date)),
+                                    status_categoria: categoryInfo || 'N/A',
+                                    qtd_aguardando_coleta: cleanCurrency(safeCell(r, idx.onDelivery)),
+                                    qtd_em_rota: cleanCurrency(safeCell(r, idx.inShipment)),
+                                    qtd_entregue: cleanCurrency(safeCell(r, idx.delivered)),
+                                    raw_payload: rawPayloadFromRow(headers, r),
+                                    data_importacao: new Date().toISOString(),
                                 });
                             }
                         });
@@ -441,12 +476,23 @@ exports.importData = async (req, res) => {
                     let hIdx = findHeaderRow(rawRows, ['pn', 'qtd']);
                     if (hIdx !== -1) {
                         const headers = rawRows[hIdx];
-                        const idx = buildIndexMap(headers, { pn: 'pn', desc: 'nomenclatura', doc: 'oc', qty: 'qtd', date: 'delivery' });
+                        const idx = buildIndexMap(headers, { pn: 'pn', desc: 'nomenclatura', doc: 'oc', custPoItem: ['cust po item', 'customer po item'], salesOrder: ['sales order'], salesOrderItem: ['s/o item', 'sales order item'], qty: 'qtd', date: 'delivery', comments: ['lh comments', 'comments'] });
                         rawRows.slice(hIdx + 1).forEach(r => {
-                            const pn = normalizePn(safeString(r[idx.pn])); const qty = cleanCurrency(r[idx.qty]);
+                            const pn = normalizePn(safeString(safeCell(r, idx.pn))); const qty = cleanCurrency(safeCell(r, idx.qty));
                             if (pn && qty > 0 && pn.toLowerCase() !== 'part number') {
-                                pnsToRegister.set(pn, safeString(r[idx.desc]) || 'N/A');
-                                allFoc.push({ pn, descricao: pnsToRegister.get(pn), documento_referencia: safeString(r[idx.doc]), qtd_pendente: qty, data_previsao_lh: formatExcelDate(r[idx.date]) });
+                                pnsToRegister.set(pn, safeString(safeCell(r, idx.desc)) || 'N/A');
+                                allFoc.push({
+                                    pn,
+                                    descricao: pnsToRegister.get(pn),
+                                    documento_referencia: safeString(safeCell(r, idx.doc)),
+                                    cust_po_item: safeString(safeCell(r, idx.custPoItem)),
+                                    sales_order: safeString(safeCell(r, idx.salesOrder)),
+                                    sales_order_item: safeString(safeCell(r, idx.salesOrderItem)),
+                                    qtd_pendente: qty,
+                                    data_previsao_lh: formatExcelDate(safeCell(r, idx.date)),
+                                    lh_comments: safeString(safeCell(r, idx.comments)),
+                                    raw_payload: rawPayloadFromRow(headers, r),
+                                });
                             }
                         });
                     }
@@ -457,12 +503,41 @@ exports.importData = async (req, res) => {
                     let hIdx = findHeaderRow(rawRows, ['incoming_part', 'serial_number']);
                     if (hIdx !== -1) {
                         const headers = rawRows[hIdx];
-                        const idx = buildIndexMap(headers, { pn: 'incoming_part', pn_out: 'outgoing_part', sn: 'serial_number', desc: 'nomenclatura', doc: 'oc', status: 'lh_comments', date: 'delivery' });
+                        const idx = buildIndexMap(headers, {
+                            doc: ['cust po ref', 'customer po ref', 'event report number', 'number'],
+                            notification: ['notification'],
+                            receptionDate: ['reception date', 'date received'],
+                            pn: 'incoming_part',
+                            pn_out: 'outgoing_part',
+                            sn: 'serial_number',
+                            desc: 'nomenclatura',
+                            vendorFc: ['vendor fc', 'forecast date', 'f/c date @ lh'],
+                            deliveryNumber: ['delivery', 'delivery number'],
+                            poNumber: ['po number', 'po'],
+                            status: 'lh_comments',
+                            bnComments: ['bn comments'],
+                        });
                         rawRows.slice(hIdx + 1).forEach(r => {
-                            const pn = normalizePn(safeString(r[idx.pn])); const sn = safeString(r[idx.sn]);
-                            if (pn && sn && pn.toLowerCase() !== 'incoming part') {
-                                pnsToRegister.set(pn, safeString(r[idx.desc]) || 'N/A');
-                                allRepairs.push({ pn, sn, descricao: pnsToRegister.get(pn), tipo: 'PAID', documento_referencia: safeString(r[idx.doc]), status: safeString(r[idx.status]), data_previsao: formatExcelDate(r[idx.date]), pn_saida: safeString(r[idx.pn_out]) });
+                            const pn = normalizePn(safeString(safeCell(r, idx.pn))); const sn = safeString(safeCell(r, idx.sn));
+                            if (pn && pn.toLowerCase() !== 'incoming part') {
+                                pnsToRegister.set(pn, safeString(safeCell(r, idx.desc)) || 'N/A');
+                                allRepairs.push({
+                                    pn,
+                                    sn,
+                                    descricao: pnsToRegister.get(pn),
+                                    tipo: 'PAID',
+                                    documento_referencia: safeString(safeCell(r, idx.doc)),
+                                    notification: safeString(safeCell(r, idx.notification)),
+                                    reception_date: formatExcelDate(safeCell(r, idx.receptionDate)),
+                                    po_number: safeString(safeCell(r, idx.poNumber)),
+                                    delivery_number: safeString(safeCell(r, idx.deliveryNumber)),
+                                    lh_updates: safeString(safeCell(r, idx.status)),
+                                    bn_comments: safeString(safeCell(r, idx.bnComments)),
+                                    status: safeString(safeCell(r, idx.status)) || 'Sem status LH',
+                                    data_previsao: formatExcelDate(safeCell(r, idx.vendorFc)),
+                                    pn_saida: safeString(safeCell(r, idx.pn_out)),
+                                    raw_payload: rawPayloadFromRow(headers, r),
+                                });
                             }
                         });
                     }
@@ -473,12 +548,48 @@ exports.importData = async (req, res) => {
                     let hIdx = findHeaderRow(rawRows, ['part_required', 'serial_number']);
                     if (hIdx !== -1) {
                         const headers = rawRows[hIdx];
-                        const idx = buildIndexMap(headers, { pn: 'part_required', sn: 'serial_number', desc: 'nomenclatura', doc: ['event report number', 'number'], ac: ['tail number', 'aircraft'], status: ['lh updates', 'status'], date: ['delivery number', 'delivery'] });
+                        const idx = buildIndexMap(headers, {
+                            doc: ['event report number', 'number'],
+                            ac: ['tail number', 'aircraft', 'a/c'],
+                            eventTitle: ['event report title', 'title', 'symptom'],
+                            dateReceived: ['date received', 'reception date'],
+                            approvedBy: ['approved by'],
+                            pn: 'part_required',
+                            partDelivered: ['part delivered'],
+                            desc: 'nomenclatura',
+                            sn: 'serial_number',
+                            notification: ['notification'],
+                            po: ['po', 'po number'],
+                            forecast: ['forecast date @ lh', 'forecast date', 'f/c date @ lh'],
+                            deliveryNumber: ['delivery number', 'delivery'],
+                            status: ['lh updates', 'status'],
+                            bnComments: ['bn comments'],
+                        });
                         rawRows.slice(hIdx + 1).forEach(r => {
-                            const pn = normalizePn(safeString(r[idx.pn])); const sn = safeString(r[idx.sn]);
-                            if (pn && sn && pn.toLowerCase() !== 'part required') {
-                                pnsToRegister.set(pn, safeString(r[idx.desc]) || 'N/A');
-                                allRepairs.push({ pn, sn, descricao: pnsToRegister.get(pn), tipo: 'WARRANTY', documento_referencia: safeString(r[idx.doc]), status: safeString(r[idx.status]), data_previsao: formatExcelDate(r[idx.date]), aeronave: safeString(r[idx.ac]) });
+                            const pn = normalizePn(safeString(safeCell(r, idx.pn))); const sn = safeString(safeCell(r, idx.sn));
+                            if (pn && pn.toLowerCase() !== 'part required') {
+                                pnsToRegister.set(pn, safeString(safeCell(r, idx.desc)) || 'N/A');
+                                allRepairs.push({
+                                    pn,
+                                    sn,
+                                    descricao: pnsToRegister.get(pn),
+                                    tipo: 'WARRANTY',
+                                    documento_referencia: safeString(safeCell(r, idx.doc)),
+                                    aeronave: safeString(safeCell(r, idx.ac)),
+                                    event_report_title: safeString(safeCell(r, idx.eventTitle)),
+                                    date_received: formatExcelDate(safeCell(r, idx.dateReceived)),
+                                    approved_by: safeString(safeCell(r, idx.approvedBy)),
+                                    part_delivered: safeString(safeCell(r, idx.partDelivered)),
+                                    notification: safeString(safeCell(r, idx.notification)),
+                                    po_number: safeString(safeCell(r, idx.po)),
+                                    forecast_date_lh: formatExcelDate(safeCell(r, idx.forecast)),
+                                    delivery_number: safeString(safeCell(r, idx.deliveryNumber)),
+                                    lh_updates: safeString(safeCell(r, idx.status)),
+                                    bn_comments: safeString(safeCell(r, idx.bnComments)),
+                                    status: safeString(safeCell(r, idx.status)) || 'Sem status LH',
+                                    data_previsao: formatExcelDate(safeCell(r, idx.forecast)),
+                                    raw_payload: rawPayloadFromRow(headers, r),
+                                });
                             }
                         });
                     }
