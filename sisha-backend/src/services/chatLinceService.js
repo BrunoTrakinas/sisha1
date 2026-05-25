@@ -776,6 +776,182 @@ function buildIlikeOr(columns = [], values = []) {
   return clauses.join(',');
 }
 
+function buildRagIndexTextFromDocument(documento = {}) {
+  const extras = [
+    documento.entidades,
+    documento.registros_sugeridos,
+    documento.os_eventos_sugeridos,
+    documento.sn_trilha_sugerida,
+    documento.acoes_consultivas,
+    documento.riscos,
+    documento.confirmacao_payload,
+  ]
+    .filter(Boolean)
+    .map((value) => {
+      try { return JSON.stringify(value); } catch (_) { return ''; }
+    })
+    .filter(Boolean);
+
+  return compactText([
+    `Arquivo: ${documento.nome_arquivo || ''}`,
+    `Tipo: ${documento.tipo_documento || ''}`,
+    `Classificação: ${documento.classificacao || ''}`,
+    `Destino sugerido: ${documento.destino_sugerido || ''}`,
+    `Status: ${documento.status || ''}`,
+    '',
+    documento.resumo || '',
+    '',
+    documento.texto_extraido || '',
+    '',
+    extras.join('\n'),
+  ].join('\n'), 220000);
+}
+
+function chunkTextForRag(text = '', { maxChars = 1800, overlapChars = 240 } = {}) {
+  const clean = compactText(text, 220000);
+  if (!clean) return [];
+
+  const chunks = [];
+  const paragraphs = clean.split(/\n{2,}/g).map((p) => p.trim()).filter(Boolean);
+  let current = '';
+
+  const flush = () => {
+    const chunk = compactText(current, maxChars + 500);
+    if (chunk.length >= 40) chunks.push(chunk.slice(0, maxChars));
+    current = '';
+  };
+
+  paragraphs.forEach((paragraph) => {
+    if (paragraph.length > maxChars) {
+      flush();
+      let start = 0;
+      while (start < paragraph.length) {
+        const piece = paragraph.slice(start, start + maxChars).trim();
+        if (piece.length >= 40) chunks.push(piece);
+        start += Math.max(1, maxChars - overlapChars);
+      }
+      return;
+    }
+
+    if ((current + '\n\n' + paragraph).length > maxChars) {
+      const previousTail = current.slice(Math.max(0, current.length - overlapChars));
+      flush();
+      current = previousTail ? `${previousTail}\n\n${paragraph}` : paragraph;
+    } else {
+      current = current ? `${current}\n\n${paragraph}` : paragraph;
+    }
+  });
+
+  flush();
+  return chunks.slice(0, 120);
+}
+
+function extractRagCandidates(text = '') {
+  const entities = detectEntities(text);
+  return {
+    pn: unique((entities.pn_candidatos || []).map(normalizePn).filter(Boolean)).slice(0, 40),
+    sn: unique((entities.sn_candidatos || []).map(normalizeUpper).filter(Boolean)).slice(0, 40),
+    docs: unique([...(entities.identificadores_documentais || []), ...(entities.os_candidatas || [])].map(normalizeUpper).filter(Boolean)).slice(0, 40),
+  };
+}
+
+async function indexChatLinceDocumentForRag(documento = {}) {
+  try {
+    if (!documento?.id) return { ok: false, error: 'Documento sem ID para indexação RAG.' };
+
+    const indexText = buildRagIndexTextFromDocument(documento);
+    const chunks = chunkTextForRag(indexText);
+    if (chunks.length === 0) return { ok: false, error: 'Documento sem texto útil para chunking RAG.' };
+
+    const sourceId = String(documento.id);
+    const ragDocPayload = {
+      source_type: 'CHAT_LINCE_DOCUMENTO',
+      source_table: 'chat_lince_documentos',
+      source_id: sourceId,
+      tipo_documento: documento.tipo_documento || null,
+      nome_arquivo: documento.nome_arquivo || null,
+      classificacao: documento.classificacao || null,
+      status: documento.status || 'ATIVO',
+      resumo: documento.resumo || null,
+      metadata: {
+        destino_sugerido: documento.destino_sugerido || null,
+        destinos_possiveis: documento.destinos_possiveis || [],
+        confianca: documento.confianca || 0,
+        created_by_email: documento.created_by_email || null,
+        confirmado_por: documento.confirmado_por || null,
+        confirmado_em: documento.confirmado_em || null,
+      },
+      created_by_email: documento.created_by_email || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: ragDoc, error: docError } = await supabase
+      .from('chat_lince_rag_documents')
+      .upsert(ragDocPayload, { onConflict: 'source_table,source_id' })
+      .select('*')
+      .single();
+
+    if (docError) return { ok: false, error: docError.message };
+
+    await supabase.from('chat_lince_rag_chunks').delete().eq('document_id', ragDoc.id);
+
+    const rows = chunks.map((content, index) => {
+      const candidates = extractRagCandidates(content);
+      return {
+        document_id: ragDoc.id,
+        source_table: 'chat_lince_documentos',
+        source_id: sourceId,
+        chunk_index: index,
+        content,
+        metadata: {
+          nome_arquivo: documento.nome_arquivo || null,
+          tipo_documento: documento.tipo_documento || null,
+          classificacao: documento.classificacao || null,
+          status: documento.status || null,
+        },
+        pn_candidates: candidates.pn,
+        sn_candidates: candidates.sn,
+        doc_candidates: candidates.docs,
+      };
+    });
+
+    const { data: inserted, error: chunkError } = await supabase
+      .from('chat_lince_rag_chunks')
+      .insert(rows)
+      .select('id');
+
+    if (chunkError) return { ok: false, error: chunkError.message };
+    return { ok: true, document_id: ragDoc.id, chunks: inserted?.length || rows.length };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+async function reindexChatLinceDocuments({ limit = 250 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 250, 1), 1000);
+  const { data, error } = await supabase
+    .from('chat_lince_documentos')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(safeLimit);
+
+  if (error) throw error;
+
+  const results = [];
+  for (const documento of data || []) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await indexChatLinceDocumentForRag(documento);
+    results.push({ documento_id: documento.id, nome_arquivo: documento.nome_arquivo, ...result });
+  }
+
+  return {
+    total_lidos: data?.length || 0,
+    total_indexados: results.filter((item) => item.ok).length,
+    total_falhas: results.filter((item) => !item.ok).length,
+    resultados: results,
+  };
+}
+
 
 const EQUIPMENT_STOP_WORDS = new Set([
   'EXISTE', 'ALGUMA', 'ALGUM', 'ABERTA', 'ABERTO', 'WO', 'OS', 'DE', 'DO', 'DA', 'DAS', 'DOS',
@@ -956,7 +1132,7 @@ function buildAgentPlan(question = '', context = {}) {
     + safeNumber(context.correlacoesSugeridas?.length);
 
   return {
-    versao: 'AGENTE_LOGISTICO_LINCE_V1',
+    versao: 'AGENTE_LOGISTICO_LINCE_V1_1_RAG_PREMIUM',
     intencao: intent.intencao,
     rotulo: intent.rotulo,
     objetivo: intent.objetivo,
@@ -970,6 +1146,7 @@ function buildAgentPlan(question = '', context = {}) {
       evidencias_total: evidenceCount,
       usa_banco_operacional: true,
       usa_rag_documental_textual: hasRows(context, 'chat_lince_documentos'),
+      usa_rag_premium_chunks: hasRows(context, 'chat_lince_rag_chunks'),
       usa_rag_vetorial: false,
     },
     diretriz_resposta: [
@@ -990,7 +1167,7 @@ function confidenceLabel(agent = {}, context = {}) {
 }
 
 function buildAgentSystemPrompt(agent = {}) {
-  return `Você é o Agente Logístico Lince do SISHA-1. Trabalhe como consultor logístico aeronáutico da Divisão de Material, direto e objetivo.\n\nIntenção detectada: ${agent.rotulo || agent.intencao}.\nObjetivo operacional: ${agent.objetivo || 'Responder com base nas evidências do SISHA.'}.\nConfiança da intenção: ${agent.confianca_intencao || 0}.\n\nRegras obrigatórias:\n1. Use somente o contexto fornecido. Nunca invente dado, saldo, PN, preço, OS, WO, PD ou OC.\n2. Banco operacional é fonte de verdade para estoque, PD, OC, WO, PPU, CeIMSPA, RFQ, Price List e histórico. RAG/documentos servem como evidência documental, não substituem saldo real.\n3. CeIMSPA é possibilidade; responda sempre que precisa confirmar com o CeIMSPA.\n4. LISDE não é estoque; reduz lead time após pagamento.\n5. Prontidão só é SIM se 100% da necessidade estiver no PPU.\n6. Status CAN cancela logicamente compra ativa, saldo, radar e necessidade útil, preservando histórico.\n7. Se faltar evidência, diga exatamente o que faltou e recomende Help Desk/PPU.\n\nFormato obrigatório da resposta:\nResposta direta:\nFontes/evidências:\nConclusão operacional:\nPróxima ação recomendada:\nConfiança:`;
+  return `Você é o Agente Logístico Lince do SISHA-1. Trabalhe como consultor logístico aeronáutico da Divisão de Material, direto e objetivo.\n\nIntenção detectada: ${agent.rotulo || agent.intencao}.\nObjetivo operacional: ${agent.objetivo || 'Responder com base nas evidências do SISHA.'}.\nConfiança da intenção: ${agent.confianca_intencao || 0}.\n\nRegras obrigatórias:\n1. Use somente o contexto fornecido. Nunca invente dado, saldo, PN, preço, OS, WO, PD ou OC.\n2. Banco operacional é fonte de verdade para estoque, PD, OC, WO, PPU, CeIMSPA, RFQ, Price List e histórico. RAG Premium/documentos servem como evidência documental com fonte/trecho, não substituem saldo real.\n3. CeIMSPA é possibilidade; responda sempre que precisa confirmar com o CeIMSPA.\n4. LISDE não é estoque; reduz lead time após pagamento.\n5. Prontidão só é SIM se 100% da necessidade estiver no PPU.\n6. Status CAN cancela logicamente compra ativa, saldo, radar e necessidade útil, preservando histórico.\n7. Se faltar evidência, diga exatamente o que faltou e recomende Help Desk/PPU.\n\nFormato obrigatório da resposta:\nResposta direta:\nFontes/evidências:\nConclusão operacional:\nPróxima ação recomendada:\nConfiança:`;
 }
 
 function buildAgentOfflineAnswer(question = '', context = {}, helpdesk = null) {
@@ -1234,6 +1411,13 @@ async function fetchConsultContext(question = '') {
       (query) => query.or(ragClause).order('created_at', { ascending: false }),
       { motivo: 'RAG documental textual: busca nos documentos analisados pelo Chat Lince', limit: 10 }
     ));
+
+    tasks.push(safeSelect(
+      'chat_lince_rag_chunks',
+      'id,document_id,source_table,source_id,chunk_index,content,metadata,pn_candidates,sn_candidates,doc_candidates,created_at',
+      (query) => query.or(buildIlikeOr(['content', 'source_id'], ragTerms)).order('created_at', { ascending: false }),
+      { motivo: 'RAG Premium: trechos/chunks indexados com fonte documental', limit: 14 }
+    ));
   }
 
   if (wantsPolicy || wantsCost || wantsNeeds) {
@@ -1300,7 +1484,8 @@ async function fetchConsultContext(question = '') {
       processo_aquisicao_reparo: wantsProcess,
       trilha_sn_os: wantsSnTrace || snTrace.length > 0,
       manual_aplicacao: wantsManualApplication || manualApplications.length > 0,
-      rag_documental: tableRows(sources, 'chat_lince_documentos').length > 0,
+      rag_documental: tableRows(sources, 'chat_lince_documentos').length > 0 || tableRows(sources, 'chat_lince_rag_chunks').length > 0,
+      rag_premium: tableRows(sources, 'chat_lince_rag_chunks').length > 0,
     },
     snTrace,
     manualApplications,
@@ -1317,6 +1502,7 @@ function summarizeRowsForPrompt(context) {
     linhas: (source.linhas || []).slice(0, 10).map((row) => {
       const compactRow = { ...row };
       if (compactRow.texto_extraido) compactRow.texto_extraido = compactText(compactRow.texto_extraido, 2200);
+      if (compactRow.content) compactRow.content = compactText(compactRow.content, 1800);
       if (compactRow.resumo) compactRow.resumo = compactText(compactRow.resumo, 900);
       if (compactRow.observacao) compactRow.observacao = compactText(compactRow.observacao, 900);
       return compactRow;
@@ -1496,7 +1682,7 @@ async function answerConsultQuestion(question = '', user = null) {
     },
     {
       role: 'user',
-      content: `Pergunta do usuário:\n${question}\n\nPlano do Agente Logístico Lince:\n${JSON.stringify(agent, null, 2)}\n\nContexto consultado no banco SISHA e no RAG documental textual:\n${contextForPrompt || '[]'}\n\nIdentificadores detectados: ${JSON.stringify({ pn: context.normalizedTokens, sn: context.snCandidates, docs: context.docIds, os: context.osCandidates })}\n\nMonte uma resposta conversacional, clara e útil, seguindo o formato obrigatório. Informe o que encontrou, onde encontrou, aplicação no manual quando existir, impacto em Política/Custo/Gerador quando aplicável, trilha SN/OS quando aplicável, ressalvas e próxima ação recomendada. Não mostre JSON bruto nem tabelas vazias.`,
+      content: `Pergunta do usuário:\n${question}\n\nPlano do Agente Logístico Lince:\n${JSON.stringify(agent, null, 2)}\n\nContexto consultado no banco SISHA e no RAG documental Premium/textual:\n${contextForPrompt || '[]'}\n\nIdentificadores detectados: ${JSON.stringify({ pn: context.normalizedTokens, sn: context.snCandidates, docs: context.docIds, os: context.osCandidates })}\n\nMonte uma resposta conversacional, clara e útil, seguindo o formato obrigatório. Informe o que encontrou, onde encontrou, aplicação no manual quando existir, impacto em Política/Custo/Gerador quando aplicável, trilha SN/OS quando aplicável, ressalvas e próxima ação recomendada. Não mostre JSON bruto nem tabelas vazias.`,
     },
   ], { temperature: 0.15 });
 
@@ -1556,7 +1742,8 @@ async function saveDocumentAnalysis({ file, tipoDocumento, text, analysis, user 
     return { ok: false, error: error.message, payload };
   }
 
-  return { ok: true, data };
+  const rag = await indexChatLinceDocumentForRag(data);
+  return { ok: true, data, rag };
 }
 
 async function insertOsEventsStaging(documento, user, destinoConfirmado) {
@@ -1764,6 +1951,8 @@ module.exports = {
   listHelpdeskTickets,
   answerHelpdeskTicket,
   confirmarApelidoSugerido,
+  indexChatLinceDocumentForRag,
+  reindexChatLinceDocuments,
   extractTextFromImagesWithAi,
   compactText,
 };

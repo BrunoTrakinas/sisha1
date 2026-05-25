@@ -10,6 +10,7 @@ const {
   listHelpdeskTickets,
   answerHelpdeskTicket,
   confirmarApelidoSugerido,
+  reindexChatLinceDocuments,
   extractTextFromImagesWithAi,
   compactText,
 } = require('../services/chatLinceService');
@@ -183,6 +184,7 @@ exports.analisarDocumento = async (req, res) => {
         destino_sugerido: analise?.destino_sugerido || null,
         confianca: analise?.confianca || 0,
         origem: analise?.origem || null,
+        rag: saved.rag || null,
       },
       level: 'INFO',
       visibility: 'GOD',
@@ -195,6 +197,7 @@ exports.analisarDocumento = async (req, res) => {
         documento_id: saved.data.id,
         documento: saved.data,
         analise,
+        rag: saved.rag || null,
       },
     });
   } catch (error) {
@@ -217,6 +220,38 @@ exports.listarDocumentos = async (req, res) => {
     return res.status(200).json({ status: 'success', data: data || [] });
   } catch (error) {
     return res.status(500).json({ status: 'error', message: 'Falha ao listar documentos do Chat Lince.' });
+  }
+};
+
+exports.reindexarRag = async (req, res) => {
+  try {
+    const limit = Number(req.body?.limit || req.query?.limit || 250);
+    const result = await reindexChatLinceDocuments({ limit });
+
+    await registrarAuditoria({
+      req,
+      action: 'CHAT_LINCE_RAG_REINDEX',
+      entity: 'CHAT_LINCE_RAG',
+      entityId: 'REINDEX',
+      summary: `${req.user?.email || 'Admin'} reindexou documentos no RAG Premium do Chat Lince.`,
+      details: {
+        limit,
+        total_lidos: result.total_lidos,
+        total_indexados: result.total_indexados,
+        total_falhas: result.total_falhas,
+      },
+      level: result.total_falhas > 0 ? 'WARN' : 'INFO',
+      visibility: 'GOD',
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      message: 'Reindexação RAG Premium concluída.',
+      data: result,
+    });
+  } catch (error) {
+    console.error('[Chat Lince] Falha ao reindexar RAG:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao reindexar RAG Premium.' });
   }
 };
 

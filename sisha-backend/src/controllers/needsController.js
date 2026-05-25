@@ -243,7 +243,11 @@ function formatWorkbookRows(rows = []) {
     Necessidade_Total: row.necessidade_total,
     Cobertura_Etapa: row.cobertura_etapa ?? '',
     Saldo_Apos_Etapa: row.saldo_apos_etapa ?? '',
+    Usado_em_Receita: row.usado_em_receita || (row.receitas_texto ? 'SIM' : ''),
     Receitas: row.receitas_texto || '',
+    Receita_Qtd_Por_Ciclo: row.receita_qtd_por_ciclo_texto || '',
+    Receita_PN_Base: row.receita_pn_base_texto || '',
+    Receita_Vinculo: row.receita_vinculo_texto || '',
     PIMs: row.pims_texto || '',
     Origens: row.origens_texto || '',
     Observacao: row.observacao || '',
@@ -297,6 +301,108 @@ function finalizeNeedRows(map) {
       observacao: Array.from(row.observacoes).sort().join(' | '),
     }))
     .sort((a, b) => a.pn.localeCompare(b.pn));
+}
+
+function splitRecipePnList(value) {
+  return String(value || '')
+    .split(/[|;,\n\r]+/)
+    .map((item) => normalizePn(item))
+    .filter(Boolean);
+}
+
+function buildRecipeApplicationMap(receitaRows = []) {
+  const map = new Map();
+  const seen = new Set();
+
+  const addApplication = (lookupPn, row = {}, tipoVinculo = 'PN DA RECEITA') => {
+    const key = normalizeKey(lookupPn);
+    const pnReceita = normalizeKey(row.pn);
+    const inspecao = String(row.inspecao || '').trim();
+    if (!key || !inspecao) return;
+
+    const qtdPorCiclo = toNumber(row.qtd_por_ciclo);
+    const dedupeKey = [key, inspecao, pnReceita, tipoVinculo, qtdPorCiclo].join('::');
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push({
+      pn_consulta: key,
+      pn_receita: pnReceita || key,
+      inspecao,
+      qtd_por_ciclo: qtdPorCiclo,
+      nomenclatura: safeString(row.nomenclatura),
+      tipo_vinculo: tipoVinculo,
+    });
+  };
+
+  (receitaRows || []).forEach((row) => {
+    const pnReceita = normalizeKey(row.pn);
+    if (pnReceita) addApplication(pnReceita, row, 'PN DA RECEITA');
+
+    splitRecipePnList(row.pn_alt).forEach((pnAlt) => {
+      if (pnAlt && pnAlt !== pnReceita) addApplication(pnAlt, row, 'PN ALTERNATIVO DA RECEITA');
+    });
+  });
+
+  map.forEach((applications) => {
+    applications.sort((a, b) => {
+      const byInspecao = String(a.inspecao || '').localeCompare(String(b.inspecao || ''));
+      if (byInspecao !== 0) return byInspecao;
+      return String(a.pn_receita || '').localeCompare(String(b.pn_receita || ''));
+    });
+  });
+
+  return map;
+}
+
+function summarizeRecipeApplications(applications = []) {
+  const apps = Array.isArray(applications) ? applications : [];
+  if (!apps.length) {
+    return {
+      usado_em_receita: 'NÃO',
+      receitas_texto: '',
+      receita_qtd_por_ciclo_texto: '',
+      receita_pn_base_texto: '',
+      receita_vinculo_texto: '',
+      receita_observacao: 'Não localizado em receita cadastrada.',
+    };
+  }
+
+  const receitas = [...new Set(apps.map((item) => item.inspecao).filter(Boolean))].sort();
+  const qtdPorCiclo = [...new Set(apps.map((item) => {
+    const qtd = toNumber(item.qtd_por_ciclo);
+    return `${item.inspecao}: ${qtd > 0 ? qtd : 'sem qtd'}`;
+  }).filter(Boolean))].sort();
+  const pnBase = [...new Set(apps.map((item) => item.pn_receita).filter(Boolean))].sort();
+  const vinculos = [...new Set(apps.map((item) => item.tipo_vinculo).filter(Boolean))].sort();
+
+  return {
+    usado_em_receita: 'SIM',
+    receitas_texto: receitas.join(' | '),
+    receita_qtd_por_ciclo_texto: qtdPorCiclo.join(' | '),
+    receita_pn_base_texto: pnBase.join(' | '),
+    receita_vinculo_texto: vinculos.join(' | '),
+    receita_observacao: `${apps.length} aplicação(ões) em receita cadastrada.`,
+  };
+}
+
+function enrichBatchRowWithRecipeApplications(row = {}, context = {}) {
+  const pn = normalizeKey(row.pn);
+  const applications = context.recipeApplicationMap?.get(pn) || [];
+  const summary = summarizeRecipeApplications(applications);
+
+  return {
+    ...row,
+    aplicacoes_receita: applications,
+    usado_em_receita: summary.usado_em_receita,
+    receitas: applications.map((item) => item.inspecao).filter(Boolean),
+    receitas_texto: summary.receitas_texto,
+    receita_qtd_por_ciclo_texto: summary.receita_qtd_por_ciclo_texto,
+    receita_pn_base_texto: summary.receita_pn_base_texto,
+    receita_vinculo_texto: summary.receita_vinculo_texto,
+    receita_observacao: summary.receita_observacao,
+  };
 }
 
 async function buscarPnAlternativoAutomatico(pn) {
@@ -560,6 +666,7 @@ async function loadGeneratorContext(force = false) {
 
   const receitaOptions = buildReceitaOptions(receitaRows, politicaRows);
   const origemOptions = buildOrigemOptions(pimRows);
+  const recipeApplicationMap = buildRecipeApplicationMap(receitaRows);
 
   const ppuMap = new Map();
   (ppuRows || []).forEach((row) => {
@@ -695,6 +802,7 @@ async function loadGeneratorContext(force = false) {
     sbRows,
     sbItemRows,
     sbItemsByNumero,
+    recipeApplicationMap,
     ppuMap,
     odaMap,
     odcMap,
@@ -1667,7 +1775,7 @@ function parseUploadedBatchWorkbook(file) {
 function buildBatchQueryPreview(parsedFile, context) {
   const inputRows = (parsedFile?.linhasBase || []).map((row) => {
     const meta = context.pnMetaMap.get(row.pn) || {};
-    return {
+    const base = {
       pn: row.pn,
       nsn: row.nsn || meta.nsn || null,
       nomenclatura: row.nomenclatura || meta.nomenclatura || 'N/A',
@@ -1681,6 +1789,8 @@ function buildBatchQueryPreview(parsedFile, context) {
       origens_texto: '',
       observacao: 'Pesquisa em lote',
     };
+
+    return enrichBatchRowWithRecipeApplications(base, context);
   });
 
   const sections = { ppu: [], ceimspa: [], oda: [], pricelist: [], odc: [], comprar: [] };
@@ -1794,6 +1904,12 @@ function buildBatchQueryPreview(parsedFile, context) {
       nsn: row.nsn || '',
       nomenclatura: row.nomenclatura || '',
       quantidade_total: row.necessidade_total,
+      usado_em_receita: row.usado_em_receita || '',
+      receitas_texto: row.receitas_texto || '',
+      receita_qtd_por_ciclo_texto: row.receita_qtd_por_ciclo_texto || '',
+      receita_pn_base_texto: row.receita_pn_base_texto || '',
+      receita_vinculo_texto: row.receita_vinculo_texto || '',
+      aplicacoes_receita: row.aplicacoes_receita || [],
     })),
     summary: {
       linhas_base: inputRows.length,
@@ -1804,6 +1920,8 @@ function buildBatchQueryPreview(parsedFile, context) {
       coberto_odc: Number(totalOdc.toFixed(2)),
       comprar_qtd: Number(totalComprar.toFixed(2)),
       comprar_valor_gbp: Number(valorComprar.toFixed(2)),
+      itens_usados_em_receita: inputRows.filter((row) => row.usado_em_receita === 'SIM').length,
+      itens_sem_receita: inputRows.filter((row) => row.usado_em_receita !== 'SIM').length,
     },
     sections,
   };
@@ -1815,7 +1933,43 @@ function formatBatchInputRows(rows = []) {
     NSN: row.nsn || '',
     Nomenclatura: row.nomenclatura || '',
     Quantidade_Solicitada: row.quantidade_total,
+    Usado_em_Receita: row.usado_em_receita || '',
+    Receitas: row.receitas_texto || '',
+    Receita_Qtd_Por_Ciclo: row.receita_qtd_por_ciclo_texto || '',
+    Receita_PN_Base: row.receita_pn_base_texto || '',
+    Receita_Vinculo: row.receita_vinculo_texto || '',
   }));
+}
+
+function formatBatchRecipeApplicationRows(rows = []) {
+  return rows.flatMap((row) => {
+    const applications = row.aplicacoes_receita || [];
+    if (!applications.length) {
+      return [{
+        PN_Consultado: row.pn,
+        Nomenclatura: row.nomenclatura || '',
+        Usado_em_Receita: 'NÃO',
+        Receita_Inspecao: '',
+        Qtd_Por_Ciclo: '',
+        PN_Base_na_Receita: '',
+        Vinculo: '',
+        Nomenclatura_Receita: '',
+        Observacao: 'Não localizado em receita cadastrada.',
+      }];
+    }
+
+    return applications.map((item) => ({
+      PN_Consultado: row.pn,
+      Nomenclatura: row.nomenclatura || '',
+      Usado_em_Receita: 'SIM',
+      Receita_Inspecao: item.inspecao || '',
+      Qtd_Por_Ciclo: toNumber(item.qtd_por_ciclo) || '',
+      PN_Base_na_Receita: item.pn_receita || '',
+      Vinculo: item.tipo_vinculo || '',
+      Nomenclatura_Receita: item.nomenclatura || '',
+      Observacao: 'Aplicação encontrada em receita cadastrada.',
+    }));
+  });
 }
 
 exports.previewBatchQuery = async (req, res) => {
@@ -1849,6 +2003,8 @@ exports.exportBatchQueryXlsx = async (req, res) => {
       { Indicador: 'Coberto ODC', Valor: preview.summary.coberto_odc },
       { Indicador: 'Comprar qtd', Valor: preview.summary.comprar_qtd },
       { Indicador: 'Comprar valor GBP', Valor: preview.summary.comprar_valor_gbp },
+      { Indicador: 'Itens usados em receita', Valor: preview.summary.itens_usados_em_receita },
+      { Indicador: 'Itens sem receita cadastrada', Valor: preview.summary.itens_sem_receita },
     ];
     xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(resumoRows), '00_RESUMO');
     xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(formatBatchInputRows(preview.input)), '00_ENTRADA');
@@ -1863,6 +2019,8 @@ exports.exportBatchQueryXlsx = async (req, res) => {
     ].forEach(([name, rows]) => {
       xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(formatWorkbookRows(rows)), name);
     });
+
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(formatBatchRecipeApplicationRows(preview.input)), '07_APLICACAO_RECEITAS');
 
     const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');

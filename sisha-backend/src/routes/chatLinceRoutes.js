@@ -9,6 +9,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 router.post('/perguntar', chatLinceController.perguntar);
 router.post('/documentos/analisar', requireRole(['admin', 'dono']), upload.single('file'), chatLinceController.analisarDocumento);
 router.get('/documentos', requireRole(['admin', 'dono']), chatLinceController.listarDocumentos);
+router.post('/rag/reindexar', requireRole(['admin', 'dono']), chatLinceController.reindexarRag);
 router.post('/documentos/:id/confirmar', requireRole(['admin', 'dono']), chatLinceController.confirmarDocumento);
 router.post('/documentos/:id/rejeitar', requireRole(['admin', 'dono']), chatLinceController.rejeitarDocumento);
 router.post('/apelidos/confirmar', requireRole(['admin', 'dono']), chatLinceController.confirmarApelido);
