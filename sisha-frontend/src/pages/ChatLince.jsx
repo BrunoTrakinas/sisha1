@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, FileSearch, Send, Upload, CheckCircle2, XCircle, LoaderCircle, Database, ShieldCheck, Compass, Layers, ClipboardCheck, MessageSquare } from 'lucide-react';
+import { Bot, FileSearch, Send, Upload, CheckCircle2, XCircle, LoaderCircle, Database, ShieldCheck, Compass, Layers, ClipboardCheck, MessageSquare, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { apiFetch, buildAuthHeaders } from '../lib/api';
 
@@ -112,6 +112,12 @@ export default function ChatLince() {
   const [carregandoHelpdesk, setCarregandoHelpdesk] = useState(false);
   const [respostasHelpdesk, setRespostasHelpdesk] = useState({});
   const [helpdeskMsg, setHelpdeskMsg] = useState(null);
+  const [acaoPendente, setAcaoPendente] = useState(null);
+  const [senhaAcao, setSenhaAcao] = useState('');
+  const [executandoAcao, setExecutandoAcao] = useState(false);
+  const [acaoMsg, setAcaoMsg] = useState(null);
+  const [reindexandoRag, setReindexandoRag] = useState(false);
+  const [ragMsg, setRagMsg] = useState(null);
 
   const registrosSugeridos = useMemo(() => safeList(analise?.registros_sugeridos), [analise]);
   const riscos = useMemo(() => safeList(analise?.riscos), [analise]);
@@ -150,6 +156,35 @@ export default function ChatLince() {
     }
   };
 
+
+  const reindexarRag = async () => {
+    if (!isAdmin || !token || reindexandoRag) return;
+    setReindexandoRag(true);
+    setRagMsg(null);
+    try {
+      const response = await apiFetch(
+        '/chat-lince/rag/reindexar',
+        {
+          method: 'POST',
+          headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ limit: 1000 }),
+        },
+        token
+      );
+      const result = await response.json();
+      if (result.status === 'success') {
+        const data = result.data || {};
+        setRagMsg({ tipo: 'success', texto: `RAG reindexado: ${data.indexed || 0}/${data.processed || 0} documento(s) indexado(s).` });
+      } else {
+        setRagMsg({ tipo: 'error', texto: result.message || 'Falha ao reindexar documentos.' });
+      }
+    } catch {
+      setRagMsg({ tipo: 'error', texto: 'Falha de comunicação ao reindexar o RAG.' });
+    } finally {
+      setReindexandoRag(false);
+    }
+  };
+
   useEffect(() => {
     carregarPendentes();
     carregarHelpdesk();
@@ -183,6 +218,16 @@ export default function ChatLince() {
     const correlacoes = result.data?.contexto?.correlacoes_sugeridas || [];
     const melhorCorrelacao = correlacoes[0] || null;
     let respostaFinal = result.data?.resposta || 'Sem resposta.';
+    const acao = result.data?.contexto?.acao_pendente || null;
+    if (acao?.id) {
+      setAcaoPendente(acao);
+      setSenhaAcao('');
+      setAcaoMsg(null);
+    } else {
+      setAcaoPendente(null);
+      setSenhaAcao('');
+      setAcaoMsg(null);
+    }
 
     if (melhorCorrelacao?.pn) {
       const pendente = { ...melhorCorrelacao, pergunta_original: textoOriginal };
@@ -313,6 +358,37 @@ export default function ChatLince() {
     }
   };
 
+  const confirmarAcaoExecutor = async (e) => {
+    e.preventDefault();
+    if (!acaoPendente?.id || !senhaAcao.trim() || executandoAcao) return;
+    setExecutandoAcao(true);
+    setAcaoMsg(null);
+    try {
+      const response = await apiFetch(
+        `/chat-lince/acoes/${acaoPendente.id}/confirmar`,
+        {
+          method: 'POST',
+          headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ senha: senhaAcao }),
+        },
+        token
+      );
+      const result = await response.json();
+      if (result.status === 'success') {
+        setMensagens((prev) => [...prev, { role: 'assistant', content: `${result.message || 'Alteração executada com sucesso.'}\n\nOperação registrada no log de auditoria do SISHA.` }]);
+        setAcaoPendente(null);
+        setSenhaAcao('');
+        setAcaoMsg({ tipo: 'success', texto: result.message || 'Ação executada.' });
+      } else {
+        setAcaoMsg({ tipo: 'error', texto: result.message || 'Senha não confirmada ou ação não executada.' });
+      }
+    } catch {
+      setAcaoMsg({ tipo: 'error', texto: 'Falha de comunicação ao confirmar a ação.' });
+    } finally {
+      setExecutandoAcao(false);
+    }
+  };
+
   const analisarDocumento = async (e) => {
     e.preventDefault();
     if (!arquivo || !isAdmin) return;
@@ -415,7 +491,7 @@ export default function ChatLince() {
               <Bot className="text-blue-600" /> Chat Lince
             </h1>
             <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 font-semibold">
-              IA consultiva e documental do SISHA-1. Integrada a PN/SN, WO, OC/PD, Manual/Dicionário, Política de Estoque, Custo Operacional, Gerador de Necessidades e Help Desk PPU.
+              IA consultiva e documental do SISHA-1. Integrada a PN/SN, WO, OC/PD, recibos, Manual/Dicionário, Política de Estoque, Custo Operacional, Gerador de Necessidades, RAG documental e Help Desk PPU.
             </p>
           </div>
           <span className="inline-flex items-center gap-2 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 py-2 text-xs font-black text-blue-700 dark:text-blue-300 uppercase tracking-widest">
@@ -438,6 +514,36 @@ export default function ChatLince() {
               )}
             </div>
 
+            {acaoPendente && isAdmin && (
+              <form onSubmit={confirmarAcaoExecutor} className="p-4 border-t border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 space-y-3">
+                <div className="flex items-start gap-3">
+                  <ShieldCheck size={20} className="text-amber-600 shrink-0 mt-1" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-black text-amber-800 dark:text-amber-200 uppercase">Confirmação de ação no banco</p>
+                    <p className="text-xs font-semibold text-amber-700 dark:text-amber-300 mt-1">
+                      O Chat Lince preparou um plano de alteração. A senha é enviada somente para validação do backend; ela não entra como mensagem no chat.
+                    </p>
+                  </div>
+                </div>
+                {acaoMsg && <p className={`text-sm font-black ${acaoMsg.tipo === 'success' ? 'text-green-700' : 'text-red-700'}`}>{acaoMsg.texto}</p>}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input
+                    type="password"
+                    value={senhaAcao}
+                    onChange={(e) => setSenhaAcao(e.target.value)}
+                    placeholder="Digite sua senha para autorizar"
+                    className="flex-1 p-4 rounded-2xl border-2 border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white font-bold placeholder:text-slate-400"
+                  />
+                  <button disabled={executandoAcao || !senhaAcao.trim()} className="px-6 py-4 rounded-2xl bg-amber-600 text-white font-black hover:bg-amber-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                    {executandoAcao ? <LoaderCircle size={18} className="animate-spin" /> : <ShieldCheck size={18} />} CONFIRMAR
+                  </button>
+                  <button type="button" onClick={() => { setAcaoPendente(null); setSenhaAcao(''); setAcaoMsg(null); }} className="px-6 py-4 rounded-2xl bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-black hover:bg-slate-300 dark:hover:bg-slate-700">
+                    CANCELAR
+                  </button>
+                </div>
+              </form>
+            )}
+
             <form onSubmit={enviarPergunta} className="p-4 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col sm:flex-row gap-3">
               <input
                 value={pergunta}
@@ -456,6 +562,19 @@ export default function ChatLince() {
               <Database size={18} className="text-blue-600" />
               <h3 className="font-black uppercase text-sm">Contexto usado</h3>
             </div>
+
+            {isAdmin && (
+              <div className="rounded-2xl border border-blue-100 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/20 p-4 space-y-3">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-700 dark:text-blue-300">RAG documental</p>
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 mt-1">Reindexa documentos já analisados pelo Chat Lince sem precisar copiar token JWT manualmente.</p>
+                </div>
+                {ragMsg && <p className={`text-xs font-black ${ragMsg.tipo === 'success' ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>{ragMsg.texto}</p>}
+                <button type="button" onClick={reindexarRag} disabled={reindexandoRag} className="w-full px-4 py-3 rounded-2xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                  {reindexandoRag ? <LoaderCircle size={16} className="animate-spin" /> : <RefreshCw size={16} />} REINDEXAR DOCUMENTOS
+                </button>
+              </div>
+            )}
 
             {modulos && (
               <div className="rounded-2xl bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900 p-4">
