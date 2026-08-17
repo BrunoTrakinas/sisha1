@@ -1,20 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Download, LoaderCircle, PackageCheck, ShieldAlert, FileText } from 'lucide-react';
+import { Download, LoaderCircle, PackageCheck, ShieldAlert, FileText, FileQuestion, BrainCircuit } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { apiFetch, buildAuthHeaders } from '../lib/api';
+import CotacaoRequestModal from '../components/CotacaoRequestModal';
+import LogisticsIntelligenceModal from '../components/LogisticsIntelligenceModal';
 
 const numberBr = (value) => Number(value || 0).toLocaleString('pt-BR');
 const moneyGbp = (value) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value || 0));
 
-function SummaryCard({ title, value, subtitle, icon: Icon }) {
+function SummaryCard({ title, value, subtitle, icon }) {
   return (
-    <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 flex items-start justify-between gap-4">
+    <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 flex items-start justify-between gap-4">
       <div>
         <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">{title}</p>
-        <p className="text-3xl font-black text-slate-900 mt-2">{value}</p>
-        {subtitle ? <p className="text-sm text-slate-600 mt-2 font-bold">{subtitle}</p> : null}
+        <p className="text-3xl font-black text-slate-900 dark:text-slate-100 mt-2">{value}</p>
+        {subtitle ? <p className="text-sm text-slate-600 dark:text-slate-400 mt-2 font-bold">{subtitle}</p> : null}
       </div>
-      <div className="p-4 rounded-2xl bg-slate-100 text-slate-500"><Icon size={24} /></div>
+      <div className="p-4 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">{React.createElement(icon, { size: 24 })}</div>
     </div>
   );
 }
@@ -24,7 +26,7 @@ function ChipToggle({ active, onClick, children }) {
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-2 rounded-xl text-xs font-black border transition-none ${active ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-200 hover:border-blue-300'}`}
+      className={`px-3 py-2 rounded-xl text-xs font-black border transition-none ${active ? 'bg-blue-600 text-white border-blue-600' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-500'}`}
     >
       {children}
     </button>
@@ -33,20 +35,20 @@ function ChipToggle({ active, onClick, children }) {
 
 function CoverageTable({ title, rows, type = 'coverage' }) {
   return (
-    <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="px-6 py-4 border-b border-slate-200 bg-slate-50">
-        <h3 className="text-lg font-black text-slate-900 uppercase">{title}</h3>
-        <p className="text-sm font-bold text-slate-500">{rows.length} linha(s)</p>
+    <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80">
+        <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">{title}</h3>
+        <p className="text-sm font-bold text-slate-500 dark:text-slate-400">{rows.length} linha(s)</p>
       </div>
       <div className="overflow-auto">
         <table className="min-w-full text-sm">
-          <thead className="bg-slate-100 text-slate-700 uppercase text-[11px] tracking-wider">
+          <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase text-[11px] tracking-wider">
             <tr>
               <th className="p-3 text-left">PN</th>
               <th className="p-3 text-left">Nomenclatura</th>
               <th className="p-3 text-left">Necessidade</th>
-              {type === 'coverage' ? <th className="p-3 text-left">Cobertura</th> : null}
-              <th className="p-3 text-left">Saldo</th>
+              {type === 'coverage' ? <th className="p-3 text-left">Disponível</th> : null}
+              <th className="p-3 text-left">Faltam</th>
               <th className="p-3 text-left">Origem</th>
               <th className="p-3 text-left">Referência</th>
               {type !== 'coverage' ? <th className="p-3 text-left">GBP</th> : null}
@@ -54,35 +56,37 @@ function CoverageTable({ title, rows, type = 'coverage' }) {
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={type === 'coverage' ? 7 : 8} className="p-6 text-center font-bold text-slate-500">Nenhuma linha nesta etapa.</td></tr>
+              <tr><td colSpan={type === 'coverage' ? 7 : 8} className="p-6 text-center font-bold text-slate-500 dark:text-slate-400">Nenhuma linha nesta etapa.</td></tr>
             ) : rows.map((row) => {
               const rowTone = row.row_tone === 'full'
-                ? 'bg-emerald-50'
+                ? 'bg-emerald-50 dark:bg-emerald-950/20'
                 : row.row_tone === 'partial'
-                  ? 'bg-white'
+                  ? 'bg-white dark:bg-slate-900'
                   : row.row_tone === 'buy'
-                    ? 'bg-amber-50/40'
-                    : 'bg-white';
+                    ? 'bg-amber-50/40 dark:bg-amber-950/20'
+                    : 'bg-white dark:bg-slate-900';
 
               return (
-                <tr key={`${title}-${row.pn}-${row.observacao}-${row.origens_texto}`} className={`border-t border-slate-100 align-top ${rowTone}`}>
-                  <td className="p-3 font-black text-slate-900">{row.pn}</td>
+                <tr key={`${title}-${row.pn}-${row.observacao}-${row.origens_texto}`} className={`border-t border-slate-100 dark:border-slate-800 align-top ${rowTone}`}>
+                  <td className="p-3 font-black text-slate-900 dark:text-slate-100">{row.pn}</td>
                   <td className="p-3">
-                    <div className="font-bold text-slate-900">{row.nomenclatura || '—'}</div>
-                    <div className="text-xs text-slate-500 font-semibold">NSN: {row.nsn || '—'}</div>
+                    <div className="font-bold text-slate-900 dark:text-slate-100">{row.nomenclatura || '—'}</div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 font-semibold">NSN: {row.nsn || '—'}</div>
                   </td>
-                  <td className="p-3 font-black text-slate-900">{numberBr(row.necessidade_total)}</td>
-                  {type === 'coverage' ? <td className="p-3 font-black text-emerald-700">{numberBr(row.cobertura_etapa)}</td> : null}
-                  <td className="p-3 font-black text-amber-700">{numberBr(row.saldo_apos_etapa)}</td>
+                  <td className="p-3 font-black text-slate-900 dark:text-slate-100">{numberBr(row.necessidade_total)}</td>
+                  {type === 'coverage' ? <td className="p-3 font-black text-emerald-700 dark:text-emerald-300">{numberBr(row.disponivel_etapa ?? row.cobertura_etapa)}</td> : null}
+                  <td className="p-3 font-black text-amber-700 dark:text-amber-300">{numberBr(row.faltam_apos_etapa ?? row.saldo_apos_etapa)}</td>
                   <td className="p-3">
-                    <div className="font-bold text-slate-800">{row.receitas_texto || row.origens_texto || '—'}</div>
-                    <div className="text-xs text-slate-500 font-semibold">{row.pims_texto || row.observacao || '—'}</div>
+                    <div className="font-bold text-slate-800 dark:text-slate-200">{row.receitas_texto || row.origens_texto || '—'}</div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 font-semibold">{row.pims_texto || row.observacao || '—'}</div>
                   </td>
-                  <td className="p-3 text-xs font-semibold text-slate-600 whitespace-pre-wrap">{row.documento_referencia || '—'}</td>
+                  <td className="p-3 text-xs font-semibold text-slate-600 dark:text-slate-400 whitespace-pre-wrap">{row.documento_referencia || '—'}</td>
                   {type !== 'coverage' ? (
-                    <td className="p-3 font-black text-slate-900">
+                    <td className="p-3 font-black text-slate-900 dark:text-slate-100">
                       <div>{row.valor_unitario_gbp != null ? moneyGbp(row.valor_unitario_gbp) : '—'}</div>
-                      <div className="text-xs text-slate-500">{row.valor_total_gbp != null ? moneyGbp(row.valor_total_gbp) : '—'}</div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400">{row.valor_total_gbp != null ? moneyGbp(row.valor_total_gbp) : '—'}</div>
+                      <div className="mt-1 text-[10px] font-semibold text-slate-400">{row.fonte_exibicao || row.fonte_valor || 'Sem referência'}</div>
+                      {row.preco_estimativa ? <div className="mt-1 text-[10px] uppercase tracking-[0.12em] font-black text-amber-600 dark:text-amber-300">Estimativa • atualizar cotação</div> : null}
                     </td>
                   ) : null}
                 </tr>
@@ -106,9 +110,12 @@ export default function GeradorNecessidades() {
   const [selectedReceitas, setSelectedReceitas] = useState([]);
   const [selectedOrigens, setSelectedOrigens] = useState([]);
   const [includePims, setIncludePims] = useState(true);
+  const [includeProgrammed, setIncludeProgrammed] = useState(false);
   const [sbMode, setSbMode] = useState('open');
   const [selectedSbs, setSelectedSbs] = useState([]);
   const [preview, setPreview] = useState(null);
+  const [quoteOpen, setQuoteOpen] = useState(false);
+  const [intelligenceOpen, setIntelligenceOpen] = useState(false);
 
   useEffect(() => {
     const cacheKey = 'sisha.needs.options.v4';
@@ -119,7 +126,9 @@ export default function GeradorNecessidades() {
         setOptions(parsed || { receitas: [], origens: [], sbs: [] });
         setLoadingOptions(false);
       }
-    } catch (_) {}
+    } catch {
+      sessionStorage.removeItem(cacheKey);
+    }
 
     const loadOptions = async () => {
       try {
@@ -143,6 +152,7 @@ export default function GeradorNecessidades() {
     receitas: mode === 'custom' ? selectedReceitas : [],
     origens: selectedOrigens,
     incluirPims: includePims,
+    incluirProgramadas: includeProgrammed,
     sbMode,
     sbs: sbMode === 'custom' ? selectedSbs : [],
   });
@@ -157,6 +167,17 @@ export default function GeradorNecessidades() {
     if (sbMode === 'all') return (options.sbs || []).filter((item) => item.possui_itens).length;
     return selectedSbs.length;
   }, [options.sbs, sbMode, selectedSbs.length]);
+
+
+  const missingQuoteItems = useMemo(() => (preview?.sections?.comprar || [])
+    .filter((row) => row.necessita_cotacao || !(Number(row.valor_unitario_gbp) > 0))
+    .map((row) => ({
+      pn: row.pn,
+      nsn: row.nsn,
+      nomenclatura: row.nomenclatura,
+      qtd: Number(row.faltam_apos_etapa ?? row.saldo_apos_etapa ?? row.necessidade_total ?? 0),
+    }))
+    .filter((row) => row.pn && row.qtd > 0), [preview]);
 
   const handlePreview = async () => {
     try {
@@ -210,11 +231,11 @@ export default function GeradorNecessidades() {
 
   return (
     <div className="space-y-8 animate-fade-in">
-      <section className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8 space-y-6">
+      <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm p-8 space-y-6">
         <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-6">
           <div>
-            <h1 className="text-2xl font-black text-slate-900 uppercase">Gerador de Necessidades</h1>
-            <p className="text-sm text-slate-600 font-bold mt-2 max-w-3xl">
+            <h1 className="text-2xl font-black text-slate-900 dark:text-slate-100 uppercase">Gerador de Necessidades</h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 font-bold mt-2 max-w-3xl">
               Agora o Gerador aceita Receitas, PIMs e SBs. A cascata operacional segue PPU → CeIMSPA → ODA → Price List → ODC → Comprar.
             </p>
           </div>
@@ -222,13 +243,16 @@ export default function GeradorNecessidades() {
             <button type="button" onClick={handlePreview} disabled={loadingOptions || loadingPreview} className="px-6 py-3 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2">
               {loadingPreview ? <LoaderCircle size={18} className="animate-spin" /> : <PackageCheck size={18} />} GERAR PRÉVIA
             </button>
-            <button type="button" onClick={handleExport} disabled={loadingOptions || exporting} className="px-6 py-3 rounded-2xl bg-emerald-600 text-white font-black hover:bg-emerald-700 disabled:opacity-50 inline-flex items-center gap-2">
+            <button type="button" onClick={handleExport} disabled={loadingOptions || exporting} className="px-6 py-3 rounded-2xl bg-slate-700 text-white font-black hover:bg-slate-600 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 inline-flex items-center gap-2">
               <Download size={18} /> {exporting ? 'EXPORTANDO...' : 'EXPORTAR EXCEL'}
+            </button>
+            <button type="button" onClick={() => setIntelligenceOpen(true)} className="px-6 py-3 rounded-2xl bg-slate-900 dark:bg-slate-800 text-white font-black hover:bg-slate-800 dark:hover:bg-slate-700 inline-flex items-center gap-2">
+              <BrainCircuit size={18} /> INTELIGÊNCIA A4
             </button>
           </div>
         </div>
 
-        {error ? <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-red-700 font-bold">{error}</div> : null}
+        {error ? <div className="rounded-2xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-4 py-3 text-red-700 dark:text-red-300 font-bold">{error}</div> : null}
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
           <div className="space-y-3">
@@ -239,23 +263,24 @@ export default function GeradorNecessidades() {
               <ChipToggle active={mode === 'custom'} onClick={() => setMode('custom')}>Seleção manual</ChipToggle>
             </div>
             {mode === 'custom' ? (
-              <div className="max-h-52 overflow-auto rounded-2xl border border-slate-200 p-3 space-y-2">
+              <div className="max-h-52 overflow-auto rounded-2xl border border-slate-200 dark:border-slate-800 p-3 space-y-2">
                 {(options.receitas || []).map((item) => (
-                  <label key={item.inspecao} className="flex items-center justify-between gap-3 text-sm font-bold text-slate-700">
+                  <label key={item.inspecao} className="flex items-center justify-between gap-3 text-sm font-bold text-slate-700 dark:text-slate-300">
                     <span>{item.inspecao}</span>
                     <input type="checkbox" checked={selectedReceitas.includes(item.inspecao)} onChange={() => toggleReceita(item.inspecao)} />
                   </label>
                 ))}
               </div>
-            ) : <p className="text-sm font-bold text-slate-500">{mode === 'prioritized' ? 'Receitas com política/priorização aplicada.' : 'Todas as receitas cadastradas.'}</p>}
+            ) : <p className="text-sm font-bold text-slate-500 dark:text-slate-400">{mode === 'prioritized' ? 'Receitas com política/priorização aplicada.' : 'Todas as receitas cadastradas.'}</p>}
           </div>
 
           <div className="space-y-3">
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400 font-black">PIMs / Origem</p>
-            <label className="inline-flex items-center gap-2 text-sm font-black text-slate-700"><input type="checkbox" checked={includePims} onChange={(e) => setIncludePims(e.target.checked)} /> Incluir PIMs</label>
-            <div className="max-h-52 overflow-auto rounded-2xl border border-slate-200 p-3 space-y-2">
+            <label className="inline-flex items-center gap-2 text-sm font-black text-slate-700 dark:text-slate-300"><input type="checkbox" checked={includePims} onChange={(e) => setIncludePims(e.target.checked)} /> Incluir PIMs</label>
+            <label className="inline-flex items-center gap-2 text-sm font-black text-slate-700 dark:text-slate-300"><input type="checkbox" checked={includeProgrammed} onChange={(e) => setIncludeProgrammed(e.target.checked)} /> Incluir manutenção programada confirmada</label>
+            <div className="max-h-52 overflow-auto rounded-2xl border border-slate-200 dark:border-slate-800 p-3 space-y-2">
               {(options.origens || []).map((item) => (
-                <label key={item.key} className="flex items-center justify-between gap-3 text-sm font-bold text-slate-700">
+                <label key={item.key} className="flex items-center justify-between gap-3 text-sm font-bold text-slate-700 dark:text-slate-300">
                   <span>{item.label}</span>
                   <input type="checkbox" checked={selectedOrigens.includes(item.key)} onChange={() => toggleOrigem(item.key)} disabled={!includePims} />
                 </label>
@@ -272,19 +297,19 @@ export default function GeradorNecessidades() {
               <ChipToggle active={sbMode === 'none'} onClick={() => setSbMode('none')}>Sem SB</ChipToggle>
             </div>
             {sbMode === 'custom' ? (
-              <div className="max-h-52 overflow-auto rounded-2xl border border-slate-200 p-3 space-y-2">
+              <div className="max-h-52 overflow-auto rounded-2xl border border-slate-200 dark:border-slate-800 p-3 space-y-2">
                 {(options.sbs || []).filter((item) => item.possui_itens).map((item) => (
-                  <label key={item.sb_numero} className="flex items-start justify-between gap-3 text-sm font-bold text-slate-700">
+                  <label key={item.sb_numero} className="flex items-start justify-between gap-3 text-sm font-bold text-slate-700 dark:text-slate-300">
                     <span>
                       <span className="block">{item.sb_numero}</span>
-                      <span className="block text-xs text-slate-500">{item.titulo}</span>
+                      <span className="block text-xs text-slate-500 dark:text-slate-400">{item.titulo}</span>
                     </span>
                     <input type="checkbox" checked={selectedSbs.includes(item.sb_numero)} onChange={() => toggleSb(item.sb_numero)} />
                   </label>
                 ))}
               </div>
             ) : (
-              <p className="text-sm font-bold text-slate-500">{sbMode === 'none' ? 'SBs fora desta simulação.' : `${selectedSbCount} SB(s) entrarão na análise.`}</p>
+              <p className="text-sm font-bold text-slate-500 dark:text-slate-400">{sbMode === 'none' ? 'SBs fora desta simulação.' : `${selectedSbCount} SB(s) entrarão na análise.`}</p>
             )}
           </div>
         </div>
@@ -294,19 +319,37 @@ export default function GeradorNecessidades() {
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
             <SummaryCard title="Necessidade total" value={numberBr(preview.summary.necessidade_total)} subtitle={`${preview.summary.linhas_base} PN(s) consolidados`} icon={ShieldAlert} />
-            <SummaryCard title="Coberto PPU + CeIMSPA" value={numberBr((preview.summary.coberto_ppu || 0) + (preview.summary.coberto_ceimspa || 0))} subtitle={`PPU ${numberBr(preview.summary.coberto_ppu)} • CeIMSPA ${numberBr(preview.summary.coberto_ceimspa)}`} icon={PackageCheck} />
-            <SummaryCard title="Coberto ODA + ODC" value={numberBr((preview.summary.coberto_oda || 0) + (preview.summary.coberto_odc || 0))} subtitle={`ODA ${numberBr(preview.summary.coberto_oda)} • ODC ${numberBr(preview.summary.coberto_odc)}`} icon={FileText} />
+            <SummaryCard title="Disponível PPU + CeIMSPA" value={numberBr((preview.summary.disponivel_ppu ?? preview.summary.coberto_ppu ?? 0) + (preview.summary.disponivel_ceimspa ?? preview.summary.coberto_ceimspa ?? 0))} subtitle={`PPU + recibos ${numberBr(preview.summary.disponivel_ppu ?? preview.summary.coberto_ppu)} • CeIMSPA ${numberBr(preview.summary.disponivel_ceimspa ?? preview.summary.coberto_ceimspa)}`} icon={PackageCheck} />
+            <SummaryCard title="Disponível ODA + ODC" value={numberBr((preview.summary.disponivel_oda ?? preview.summary.coberto_oda ?? 0) + (preview.summary.disponivel_odc ?? preview.summary.coberto_odc ?? 0))} subtitle={`ODA ${numberBr(preview.summary.disponivel_oda ?? preview.summary.coberto_oda)} • ODC ${numberBr(preview.summary.disponivel_odc ?? preview.summary.coberto_odc)}`} icon={FileText} />
             <SummaryCard title="Comprar" value={numberBr(preview.summary.comprar_qtd)} subtitle={`Estimado ${moneyGbp(preview.summary.comprar_valor_gbp || 0)}`} icon={Download} />
           </div>
+
+          {missingQuoteItems.length > 0 ? (
+            <div className="flex justify-end">
+              <button type="button" onClick={() => setQuoteOpen(true)} className="px-5 py-3 rounded-2xl bg-slate-700 hover:bg-slate-600 text-white font-black inline-flex items-center gap-2">
+                <FileQuestion size={18} /> SOLICITAR COTAÇÃO ({missingQuoteItems.length})
+              </button>
+            </div>
+          ) : null}
 
           <CoverageTable title="01 • PPU" rows={preview.sections.ppu || []} />
           <CoverageTable title="02 • CEIMSPA" rows={preview.sections.ceimspa || []} />
           <CoverageTable title="03 • ODA" rows={preview.sections.oda || []} />
-          <CoverageTable title="04 • PRICE LIST" rows={preview.sections.pricelist || []} type="price" />
+          <CoverageTable title="04 • BANCO DE PREÇOS" rows={preview.sections.pricelist || []} type="price" />
           <CoverageTable title="05 • ODC" rows={preview.sections.odc || []} />
           <CoverageTable title="06 • COMPRAR" rows={preview.sections.comprar || []} type="buy" />
         </>
       ) : null}
+
+      <LogisticsIntelligenceModal open={intelligenceOpen} onClose={() => setIntelligenceOpen(false)} />
+
+      <CotacaoRequestModal
+        open={quoteOpen}
+        onClose={() => setQuoteOpen(false)}
+        token={token}
+        source="GERADOR_NECESSIDADES"
+        items={missingQuoteItems}
+      />
     </div>
   );
 }

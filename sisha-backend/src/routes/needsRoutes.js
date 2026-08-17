@@ -2,20 +2,36 @@ const express = require('express');
 const multer = require('multer');
 const { requireRole } = require('../middlewares/authMiddleware');
 const controller = require('../controllers/needsController');
+const operationalStateController = require('../controllers/aircraftOperationalStateController');
+const maintenancePlanningController = require('../controllers/maintenancePlanningController');
+const logisticsIntelligenceController = require('../controllers/logisticsIntelligenceController');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 const adminOnly = requireRole(['admin', 'dono']);
 
+router.get('/aircraft-availability/current', controller.getAircraftAvailabilityCurrent);
+router.get('/aircraft-availability/:aircraft/indicators', controller.getAircraftMaintenanceIndicators);
+router.get('/aircraft-operational-state/current', operationalStateController.listCurrent);
+router.get('/aircraft-operational-state/:aircraft/history', adminOnly, operationalStateController.history);
+router.put('/aircraft-operational-state/:aircraft', adminOnly, operationalStateController.confirm);
+
+router.get('/maintenance-program', maintenancePlanningController.list);
+router.put('/maintenance-program/binding', adminOnly, maintenancePlanningController.confirmBinding);
+
 router.get('/generator/options', controller.getGeneratorOptions);
 router.post('/generator/preview', controller.previewGenerator);
 router.post('/generator/export/xlsx', controller.exportGeneratorXlsx);
+router.get('/intelligence/a4', logisticsIntelligenceController.analyzePn);
 
 router.post('/batch-query/preview', upload.single('file'), controller.previewBatchQuery);
 router.post('/batch-query/export/xlsx', upload.single('file'), controller.exportBatchQueryXlsx);
 
 router.get('/cost/options', controller.getOperationalCostOptions);
 router.post('/cost/preview', controller.previewOperationalCost);
+
+router.post('/quote-request/prepare', controller.prepareQuoteRequest);
+router.post('/quote-request/export/xlsx', controller.exportQuoteRequestXlsx);
 
 router.get('/sb/list', adminOnly, controller.listServiceBulletins);
 router.get('/sb/:sbNumero', adminOnly, controller.getServiceBulletinDetail);

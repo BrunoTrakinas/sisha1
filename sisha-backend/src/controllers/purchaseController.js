@@ -1,6 +1,8 @@
 const XLSX = require('xlsx');
 const supabase = require('../config/supabaseClient');
 const { registrarAuditoria } = require('../utils/auditLogger');
+const workOrderEquipmentService = require('../services/workOrderEquipmentService');
+const { listOrderBookPdGaps, reconcileExistingPdLifecycle } = require('../services/orderBookReconciliationService');
 
 const OC_STATUSES = new Set(['ELB', 'ODC', 'ODA', 'ODA_RESSALVA', 'REC', 'CAN', 'ADP']);
 const PD_STATUSES = new Set(['ELB', 'TRI', 'ANS', 'COT', 'PRO', 'LPC', 'ODC', 'ODA', 'EMB', 'REC', 'FAT', 'CAN', 'ATIVO', 'EXCLUIDO']);
@@ -90,6 +92,18 @@ async function auditCompra(req, action, entity, entityId, summary, details = {},
   });
 }
 
+async function safeSyncWorkOrderLedger(wo, req) {
+  try {
+    return await workOrderEquipmentService.syncWorkOrderToEquipment(wo, {
+      email: req.user?.email || req.user?.sub || null,
+      role: req.user?.role || null,
+    });
+  } catch (error) {
+    console.warn('[SISHA][WO][Livro] Falha não bloqueante ao sincronizar WO:', error.message || error);
+    return { status: 'ERROR', message: error.message || 'Falha ao sincronizar WO com o Livro do Equipamento.' };
+  }
+}
+
 function matchesQuery(value, query) {
   if (!query) return true;
   const raw = normalizeUpper(value);
@@ -107,9 +121,49 @@ function readRowsFromUpload(file) {
   return XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
 }
 
+const PURCHASE_HEADER_ALIASES = {
+  NUMEROCOMPLETO: ['NUMERO', 'NUMEROPD', 'PD', 'SE', 'SEPD', 'NUMEROWO', 'WO', 'WORKORDER'],
+  SE: ['PD', 'SEPD', 'NUMEROPD', 'NUMEROSE'],
+  PN: ['PARTNUMBER', 'PARTNO', 'P/N', 'CODIGOPN'],
+  NSN: ['NATIONALSTOCKNUMBER', 'NATO STOCK NUMBER'],
+  NOMENCLATURA: ['DESCRICAO', 'DESCRICAODOITEM', 'ITEMDESCRIPTION', 'TECHNAME'],
+  SERIALNUMBER: ['SN', 'S/N', 'SERIAL', 'NUMERODESERIE'],
+  STATUSSE: ['STATUSPD', 'STATUSSEPD', 'STATUSDOPD'],
+  STATUSITEM: ['STATUSDOITEM', 'SITUACAOITEM'],
+  QTDECOMPRADA: ['QUANTIDADECOMPRADA', 'QTDCOMPRADA', 'QTYBOUGHT'],
+  QTDEPEDIDA: ['QUANTIDADEPEDIDA', 'QTDPEDIDA', 'QTYREQUESTED'],
+  QTDECOTADA: ['QUANTIDADECOTADA', 'QTDCOTADA'],
+  QTDEFATURADA: ['QUANTIDADEFATURADA', 'QTDFATURADA'],
+  QTDERECEBIDA: ['QUANTIDADERECEBIDA', 'QTDRECEBIDA'],
+  PRECOUNITARIO: ['VALORUNITARIO', 'UNITPRICE', 'PRECOUNIT'],
+  PRECOTOTAL: ['VALORTOTAL', 'TOTALGBP', 'TOTAL'],
+  PRECOUSD: ['VALORUSD', 'TOTALUSD'],
+  DATADEENTREGA: ['DTENTREGA', 'DELIVERYDATE'],
+  DATAPREVISAOENTREGA: ['DTPRVENTREGA', 'PREVISAOENTREGA'],
+  DATASTATUS: ['DTSTATUS', 'DATADESTATUS'],
+  CODEMP: ['EMPRESA', 'CODIGOEMPRESA', 'FORNECEDOR'],
+  RESPONSAVEL: ['RESP', 'ENCARREGADO'],
+};
+
+function normalizeHeader(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
 function get(row, ...keys) {
   for (const key of keys) {
     if (Object.prototype.hasOwnProperty.call(row, key)) return row[key];
+  }
+
+  const entries = Object.entries(row || {}).map(([header, value]) => [normalizeHeader(header), value]);
+  for (const key of keys) {
+    const normalizedKey = normalizeHeader(key);
+    const candidates = new Set([normalizedKey, ...(PURCHASE_HEADER_ALIASES[normalizedKey] || []).map(normalizeHeader)]);
+    const found = entries.find(([header]) => candidates.has(header));
+    if (found) return found[1];
   }
   return '';
 }
@@ -287,20 +341,22 @@ function woMatches(wo, q) {
 
 function calcOrdemResumo(ordem = {}) {
   const pds = Array.isArray(ordem.compras_pds) ? ordem.compras_pds.filter((pd) => pd.ativo !== false) : [];
-  const sups = Array.isArray(ordem.compras_suplementacoes) ? ordem.compras_suplementacoes.filter((s) => s.ativo !== false) : [];
-  const totalPds = pds.reduce((acc, pd) => acc + (toNumber(pd.valor_total_gbp) || toNumber(pd.valor_total) || toNumber(pd.valor_total_usd)), 0);
-  const valorTotal = toNumber(ordem.valor_total_gbp) || toNumber(ordem.valor_total) || totalPds;
-  let valorSuplementado = sups.reduce((acc, sup) => acc + toNumber(sup.valor), 0);
-  let saldoRestante = Math.max(0, valorTotal - valorSuplementado);
-  let percentual = valorTotal > 0 ? Math.min(100, Math.round((valorSuplementado / valorTotal) * 100)) : 0;
+  const sups = Array.isArray(ordem.compras_suplementacoes) ? ordem.compras_suplementacoes.filter((sup) => sup.ativo !== false) : [];
+  const supsUsd = sups.filter((sup) => normalizeUpper(sup.moeda || 'USD') === 'USD');
+  const supsLegadas = sups.filter((sup) => normalizeUpper(sup.moeda || 'USD') !== 'USD');
 
-  // Regra SISHA 10/10: se a OC já está confirmada no Order Book, ela deve aparecer
-  // como aprovada/atendida financeiramente na visão de compras. O detalhe logístico
-  // dos itens vem dos PDs automáticos do Order Book.
+  const totalPdsUsd = pds.reduce((acc, pd) => acc + (toNumber(pd.valor_total_usd) || (normalizeUpper(pd.moeda) === 'USD' ? toNumber(pd.valor_total) : 0)), 0);
+  const valorTotalUsd = toNumber(ordem.valor_total_usd) || (normalizeUpper(ordem.moeda) === 'USD' ? toNumber(ordem.valor_total) : 0) || totalPdsUsd;
+  const valorTotalGbp = toNumber(ordem.valor_total_gbp) || (normalizeUpper(ordem.moeda) === 'GBP' ? toNumber(ordem.valor_total) : 0);
+  let valorSuplementadoUsd = supsUsd.reduce((acc, sup) => acc + toNumber(sup.valor), 0);
+  let saldoRestanteUsd = Math.max(0, valorTotalUsd - valorSuplementadoUsd);
+  let percentual = valorTotalUsd > 0 ? Math.min(100, Math.round((valorSuplementadoUsd / valorTotalUsd) * 100)) : 0;
+
+  // Order Book aprovado continua sendo uma confirmação financeira/logística já homologada.
   const confirmadaOrderBook = ordem.order_book_pd_auto === true || normalizeUpper(ordem.fonte_confirmacao) === 'ORDER_BOOK' || ordem.order_book_ref === true;
-  if (confirmadaOrderBook && normalizeUpper(ordem.status) === 'ODA' && valorTotal > 0) {
-    valorSuplementado = valorTotal;
-    saldoRestante = 0;
+  if (confirmadaOrderBook && normalizeUpper(ordem.status) === 'ODA' && valorTotalUsd > 0) {
+    valorSuplementadoUsd = valorTotalUsd;
+    saldoRestanteUsd = 0;
     percentual = 100;
   }
 
@@ -308,10 +364,16 @@ function calcOrdemResumo(ordem = {}) {
   const pdsAnexados = pds.length;
   const percentualPds = qtdeSe > 0 ? Math.min(100, Math.round((pdsAnexados / qtdeSe) * 100)) : (pdsAnexados > 0 ? 100 : 0);
   return {
-    valor_total_calculado: valorTotal,
-    valor_suplementado: valorSuplementado,
-    saldo_restante: saldoRestante,
+    valor_total_calculado: valorTotalUsd,
+    valor_total_usd: valorTotalUsd,
+    valor_total_gbp: valorTotalGbp,
+    moeda_financeira: 'USD',
+    valor_suplementado: valorSuplementadoUsd,
+    saldo_restante: saldoRestanteUsd,
     percentual_suplementado: percentual,
+    totalmente_suplementada: valorTotalUsd > 0 && saldoRestanteUsd <= 0.005,
+    suplementacoes_legadas: supsLegadas.length,
+    valor_suplementacoes_legadas: supsLegadas.reduce((acc, sup) => acc + toNumber(sup.valor), 0),
     qtde_se_informada: qtdeSe,
     pds_anexados: pdsAnexados,
     percentual_pds_anexados: percentualPds,
@@ -319,16 +381,23 @@ function calcOrdemResumo(ordem = {}) {
 }
 
 function calcWoResumo(wo = {}) {
-  const sups = Array.isArray(wo.work_order_suplementacoes) ? wo.work_order_suplementacoes.filter((s) => s.ativo !== false) : [];
-  const valorTotal = toNumber(wo.valor_total_usd) || toNumber(wo.valor_total);
-  const valorSuplementado = sups.reduce((acc, sup) => acc + toNumber(sup.valor), 0);
-  const saldoRestante = Math.max(0, valorTotal - valorSuplementado);
-  const percentual = valorTotal > 0 ? Math.min(100, Math.round((valorSuplementado / valorTotal) * 100)) : 0;
+  const sups = Array.isArray(wo.work_order_suplementacoes) ? wo.work_order_suplementacoes.filter((sup) => sup.ativo !== false) : [];
+  const supsUsd = sups.filter((sup) => normalizeUpper(sup.moeda || 'USD') === 'USD');
+  const supsLegadas = sups.filter((sup) => normalizeUpper(sup.moeda || 'USD') !== 'USD');
+  const valorTotalUsd = toNumber(wo.valor_total_usd) || toNumber(wo.valor_total);
+  const valorSuplementadoUsd = supsUsd.reduce((acc, sup) => acc + toNumber(sup.valor), 0);
+  const saldoRestanteUsd = Math.max(0, valorTotalUsd - valorSuplementadoUsd);
+  const percentual = valorTotalUsd > 0 ? Math.min(100, Math.round((valorSuplementadoUsd / valorTotalUsd) * 100)) : 0;
   return {
-    valor_total_calculado: valorTotal,
-    valor_suplementado: valorSuplementado,
-    saldo_restante: saldoRestante,
+    valor_total_calculado: valorTotalUsd,
+    valor_total_usd: valorTotalUsd,
+    moeda_financeira: 'USD',
+    valor_suplementado: valorSuplementadoUsd,
+    saldo_restante: saldoRestanteUsd,
     percentual_suplementado: percentual,
+    totalmente_suplementada: valorTotalUsd > 0 && saldoRestanteUsd <= 0.005,
+    suplementacoes_legadas: supsLegadas.length,
+    valor_suplementacoes_legadas: supsLegadas.reduce((acc, sup) => acc + toNumber(sup.valor), 0),
   };
 }
 
@@ -433,8 +502,30 @@ function buildOrderBookOrdens(rows = []) {
     });
   });
   return Array.from(grupos.values()).map((ordem) => {
-    const valorTotal = ordem.compras_pds.reduce((acc, pd) => acc + toNumber(pd.valor_total_gbp || pd.valor_total), 0);
-    return { ...ordem, valor_total: valorTotal, valor_total_gbp: valorTotal, resumo: { valor_total_calculado: valorTotal, valor_suplementado: valorTotal, saldo_restante: 0, percentual_suplementado: valorTotal > 0 ? 100 : 0, qtde_se_informada: ordem.compras_pds.length, pds_anexados: ordem.compras_pds.length, percentual_pds_anexados: 100 } };
+    const valorTotalGbp = ordem.compras_pds.reduce((acc, pd) => acc + toNumber(pd.valor_total_gbp || pd.valor_total), 0);
+    // O snapshot do Order Book não fornece, neste contrato, um valor USD confiável para esta OC sintética.
+    // Preservamos a referência GBP e não a rotulamos/convertemos como USD.
+    return {
+      ...ordem,
+      valor_total: valorTotalGbp,
+      valor_total_gbp: valorTotalGbp,
+      valor_total_usd: 0,
+      resumo: {
+        valor_total_calculado: 0,
+        valor_total_usd: 0,
+        valor_total_gbp: valorTotalGbp,
+        moeda_financeira: 'USD',
+        valor_suplementado: 0,
+        saldo_restante: 0,
+        percentual_suplementado: valorTotalGbp > 0 ? 100 : 0,
+        totalmente_suplementada: false,
+        suplementacoes_legadas: 0,
+        valor_suplementacoes_legadas: 0,
+        qtde_se_informada: ordem.compras_pds.length,
+        pds_anexados: ordem.compras_pds.length,
+        percentual_pds_anexados: 100,
+      },
+    };
   });
 }
 
@@ -446,13 +537,13 @@ function mergeOrderBookPdsIntoOrdem(ordem = {}, orderBookOrdem = null) {
   const pdsManuais = Array.isArray(ordem.compras_pds) ? ordem.compras_pds : [];
   const seen = new Set();
   pdsManuais.forEach((pd) => {
-    const key = `${normalizeComparable(pd.numero_pd || pd.documento_referencia)}|${normalizeComparable(pd.pn)}`;
-    if (key !== '|') seen.add(key);
+    const key = normalizeComparable(pd.numero_pd || pd.documento_referencia);
+    if (key) seen.add(key);
   });
 
   const pdsOrderBook = orderBookOrdem.compras_pds
     .filter((pd) => {
-      const key = `${normalizeComparable(pd.numero_pd || pd.documento_referencia)}|${normalizeComparable(pd.pn)}`;
+      const key = normalizeComparable(pd.numero_pd || pd.documento_referencia);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -502,22 +593,315 @@ async function listarWorkOrdersOrderBook(q = '', status = '') {
   return wos;
 }
 
+function positivePdQty(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+}
+
+function classifyPdPipelineStage(pd = {}) {
+  const st = normalizeUpper(pd.status_grupo || pd.status);
+  const ordered = positivePdQty(pd.qtd_comprada, pd.quantidade, pd.qtd_pedida);
+  const delivered = Math.max(0, Number(pd.qtd_recebida || 0) || 0);
+
+  if (pd.ativo === false || st === 'CAN' || st === 'EXCLUIDO') return 'cancelados';
+
+  // A entrega física é a evidência mais forte do estágio corrente do PD.
+  if (st === 'REC' || (ordered > 0 && delivered >= ordered)) return 'entregue';
+  if (delivered > 0) return 'entrega_parcial';
+
+  // Estágios pré-ODC permanecem mutuamente exclusivos na visão geral.
+  if (st === 'ELB') return 'elaboracao';
+  if (st === 'TRI' || st === 'ANS') return 'triagem_analise';
+  if (['COT', 'PRO', 'LPC', 'LIB', 'LIBERADA', 'LIBERADO', 'LIBERADA_PARA_COTACAO', 'LIBERADO_PARA_COTACAO'].includes(st)) return 'cotacao_lpc';
+
+  // FAT/EMB são estágios avançados já comprometidos e ficam no grupo ODA
+  // enquanto não houver recebimento físico. O Order Book mantém seu próprio estágio.
+  if (st === 'ODA' || st === 'ODA_RESSALVA' || st === 'FAT' || st === 'EMB') return 'oda';
+
+  // Um PD ainda sem vínculo de OC é uma condição operacional própria; não deve
+  // ser somado também em ODC. Assim cada PD aparece em exatamente um card.
+  if (!pd.ordem_id) return 'sem_oc';
+
+  // ODC/ATIVO e estados legados ativos vinculados ficam no estágio ODC.
+  return 'odc';
+}
+
 async function buildPdPipelineSummary() {
-  const { data, error } = await supabase.from('compras_pds').select('status,status_grupo,ordem_id,ativo');
-  if (error) return { elaboracao: 0, triagem_analise: 0, cotacao_lpc: 0, odc: 0, com_oc: 0, cancelados: 0, total: 0 };
-  const summary = { elaboracao: 0, triagem_analise: 0, cotacao_lpc: 0, odc: 0, com_oc: 0, cancelados: 0, total: 0 };
+  const empty = {
+    elaboracao: 0,
+    triagem_analise: 0,
+    cotacao_lpc: 0,
+    sem_oc: 0,
+    odc: 0,
+    oda: 0,
+    entrega_parcial: 0,
+    entregue: 0,
+    cancelados: 0,
+    ativos: 0,
+    total: 0,
+  };
+  const { data, error } = await supabase
+    .from('compras_pds')
+    .select('status,status_grupo,ordem_id,ativo,quantidade,qtd_pedida,qtd_comprada,qtd_recebida');
+  if (error) return empty;
+
+  const summary = { ...empty };
   (data || []).forEach((pd) => {
-    const st = normalizeUpper(pd.status_grupo || pd.status);
+    const bucket = classifyPdPipelineStage(pd);
     summary.total += 1;
-    if (pd.ativo === false || st === 'CAN') summary.cancelados += 1;
-    else if (pd.ordem_id) summary.com_oc += 1;
-    else if (st === 'ELB') summary.elaboracao += 1;
-    else if (st === 'TRI' || st === 'ANS') summary.triagem_analise += 1;
-    else if (st === 'COT' || st === 'PRO' || st === 'LPC') summary.cotacao_lpc += 1;
-    else if (st === 'ODC') summary.odc += 1;
+    if (bucket !== 'cancelados') summary.ativos += 1;
+    summary[bucket] += 1;
   });
   return summary;
 }
+
+
+async function registrarEventoPd(pdId, req, tipoEvento, statusAnterior, statusNovo, detalhe = {}) {
+  const payload = {
+    pd_id: pdId,
+    tipo_evento: tipoEvento,
+    status_anterior: statusAnterior || null,
+    status_novo: statusNovo || null,
+    numero_oc: detalhe.numero_oc || null,
+    origem: detalhe.origem || 'SISHA',
+    detalhe,
+    created_by_email: req.user?.email || req.user?.sub || null,
+  };
+  const { error } = await supabase.from('compras_pd_eventos').insert(payload);
+  if (error && !['42P01', 'PGRST205'].includes(error.code)) throw error;
+}
+
+
+exports.reconciliarCicloPdsExistentes = async (req, res) => {
+  try {
+    const confirmation = normalizeUpper(req.body?.confirmation);
+    if (confirmation !== 'RECONCILIAR PDS EXISTENTES') {
+      return res.status(400).json({ status: 'error', message: 'Confirmação inválida. Nenhum PD foi alterado.' });
+    }
+    const result = await reconcileExistingPdLifecycle({
+      email: req.user?.email || req.user?.sub || null,
+      role: req.user?.role || null,
+    });
+    await auditCompra(
+      req,
+      'PD_RECONCILIACAO_RETROATIVA',
+      'PD',
+      'PD_RECONCILIACAO_RETROATIVA',
+      `${result.alterados} PD(s) existente(s) reconciliado(s) com Order Book e Recibos ativos.`,
+      result
+    );
+    return res.status(200).json({
+      status: 'success',
+      message: result.alterados
+        ? `${result.alterados} PD(s) existente(s) foram atualizados sem criar novos registros.`
+        : 'Os PDs existentes já estavam coerentes. Nenhuma alteração foi necessária.',
+      data: result,
+    });
+  } catch (error) {
+    console.error('[SISHA][compras] reconciliarCicloPdsExistentes:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao reconciliar retroativamente os PDs existentes.' });
+  }
+};
+
+exports.listarPdsOrderBookSemOrigem = async (req, res) => {
+  try {
+    const [{ data: spares, error: sparesError }, { data: pds, error: pdsError }] = await Promise.all([
+      supabase.from('leonardo_spares').select('id,documento_referencia,pn,oc_referencia,status_categoria,qtd_pendente,qtd_aguardando_coleta,qtd_em_rota,qtd_entregue').limit(20000),
+      supabase.from('compras_pds').select('id,numero_pd,pn,status,status_grupo,ativo').limit(20000),
+    ]);
+    if (sparesError) throw sparesError;
+    if (pdsError) throw pdsError;
+    const result = listOrderBookPdGaps(spares || [], pds || []);
+    return res.status(200).json({
+      status: 'success',
+      data: result.gaps,
+      meta: { total: result.gaps.length, divergencias_pn: result.pnDivergences },
+    });
+  } catch (error) {
+    console.error('[SISHA][compras] listarPdsOrderBookSemOrigem:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao reconciliar PDs do Order Book com a base canônica do SISHA.' });
+  }
+};
+
+exports.listarPds = async (req, res) => {
+  try {
+    const q = normalizeUpper(req.query.q || '');
+    const status = normalizeUpper(req.query.status || '');
+    const incluirInativos = String(req.query.incluir_inativos || '').toLowerCase() === 'true';
+    let query = supabase.from('compras_pds').select('*').order('updated_at', { ascending: false }).limit(10000);
+    if (!incluirInativos) query = query.neq('ativo', false);
+    if (status) query = query.eq('status_grupo', status);
+    const { data, error } = await query;
+    if (error) throw error;
+    let rows = data || [];
+    if (q) rows = rows.filter((pd) => pdMatches(pd, q));
+    return res.status(200).json({ status: 'success', data: rows, meta: { total: rows.length, busca: q || null } });
+  } catch (error) {
+    console.error('[SISHA][compras] listarPds:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao consultar PD/SEPD.' });
+  }
+};
+
+exports.exportarPds = async (req, res) => {
+  try {
+    const q = normalizeUpper(req.query.q || '');
+    const { data, error } = await supabase.from('compras_pds').select('*').order('updated_at', { ascending: false }).limit(20000);
+    if (error) throw error;
+    const rows = q ? (data || []).filter((pd) => pdMatches(pd, q)) : (data || []);
+    const workbook = XLSX.utils.book_new();
+    appendJsonSheet(workbook, 'PD_SEPD', rows);
+    await auditCompra(req, 'PD_EXPORTADO_LOTE', 'PD', 'PD_SEPD', `${rows.length} PD/SEPD exportados.`, { busca: q || null, total: rows.length });
+    return sendExcelWorkbook(res, workbook, exportFileName('PD_SEPD', q || 'TODOS'));
+  } catch (error) {
+    console.error('[SISHA][compras] exportarPds:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao exportar PD/SEPD.' });
+  }
+};
+
+exports.criarPd = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const numeroPd = normalizeUpper(req.body.numero_pd);
+    const pn = normalizeUpper(req.body.pn);
+    const status = normalizeUpper(req.body.status || 'ELB');
+    if (!numeroPd || !pn) return res.status(400).json({ status: 'error', message: 'Número do PD e PN são obrigatórios.' });
+    if (!PD_STATUSES.has(status)) return res.status(400).json({ status: 'error', message: 'Status inválido para PD.' });
+    const quantidade = Math.max(1, toNumber(req.body.qtd_comprada ?? req.body.quantidade) || 1);
+    const valorUnitario = toNumber(req.body.valor_unitario);
+    const numeroOcOriginal = normalizeUpper(req.body.numero_oc);
+    const numeroOc = normalizeOcRaiz(numeroOcOriginal);
+    let linkedOrderId = null;
+    if (numeroOc) {
+      const { data: linkedOrder, error: linkedOrderError } = await supabase
+        .from('compras_ordens')
+        .select('id')
+        .eq('numero_oc', numeroOc)
+        .maybeSingle();
+      if (linkedOrderError) throw linkedOrderError;
+      linkedOrderId = linkedOrder?.id || null;
+    }
+    const payload = {
+      numero_pd: numeroPd,
+      numero_oc: numeroOc || null,
+      numero_oc_original: numeroOcOriginal || null,
+      ordem_id: linkedOrderId,
+      pn,
+      nsn: normalizeUpper(req.body.nsn) || null,
+      nomenclatura: cleanText(req.body.nomenclatura),
+      fabricante: normalizeUpper(req.body.fabricante) || null,
+      quantidade,
+      qtd_pedida: toNumber(req.body.qtd_pedida) || quantidade,
+      qtd_comprada: toNumber(req.body.qtd_comprada) || quantidade,
+      qtd_faturada: toNumber(req.body.qtd_faturada),
+      qtd_recebida: toNumber(req.body.qtd_recebida),
+      valor_unitario: valorUnitario,
+      valor_total: toNumber(req.body.valor_total) || valorUnitario * quantidade,
+      valor_total_usd: req.body.valor_total_usd !== undefined ? toNumber(req.body.valor_total_usd) : null,
+      valor_total_gbp: req.body.valor_total_gbp !== undefined ? toNumber(req.body.valor_total_gbp) : null,
+      moeda: normalizeUpper(req.body.moeda || 'USD'),
+      status,
+      status_grupo: mapProcessStatus(status),
+      status_item: cleanText(req.body.status_item),
+      responsavel: cleanText(req.body.responsavel),
+      data_previsao_entrega: parseDate(req.body.data_previsao_entrega),
+      data_entrega: parseDate(req.body.data_entrega),
+      observacao: cleanText(req.body.observacao),
+      origem_importacao: normalizeUpper(req.body.origem_importacao || 'MANUAL'),
+      ativo: !['CAN', 'EXCLUIDO'].includes(status),
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabase.from('compras_pds').upsert(payload, { onConflict: 'numero_pd' }).select('*').single();
+    if (error) throw error;
+    await registrarEventoPd(data.id, req, 'PD_CRIADO_ATUALIZADO', null, data.status_grupo || data.status, { numero_pd: data.numero_pd, pn: data.pn, origem: payload.origem_importacao });
+    await auditCompra(req, 'PD_CRIADO_ATUALIZADO', 'PD', data.numero_pd, `PD ${data.numero_pd} cadastrado/atualizado.`, { pn: data.pn, status: data.status, quantidade: data.quantidade });
+    return res.status(201).json({ status: 'success', message: 'PD cadastrado/atualizado com sucesso.', data });
+  } catch (error) {
+    console.error('[SISHA][compras] criarPd:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao cadastrar PD.' });
+  }
+};
+
+exports.atualizarPd = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { id } = req.params;
+    if (String(id).startsWith('orderbook-pd-')) return res.status(400).json({ status: 'error', message: 'PD sintético do Order Book é somente leitura. O PD local reconciliado pode ser editado pelo botão GERENCIAR PDs da respectiva OC.' });
+    const { data: current, error: currentError } = await supabase.from('compras_pds').select('*').eq('id', id).single();
+    if (currentError) throw currentError;
+    const status = req.body.status !== undefined ? normalizeUpper(req.body.status) : normalizeUpper(current.status);
+    if (status && !PD_STATUSES.has(status)) return res.status(400).json({ status: 'error', message: 'Status inválido para PD.' });
+
+    const payload = { updated_at: new Date().toISOString() };
+    if (req.body.numero_pd !== undefined) payload.numero_pd = normalizeUpper(req.body.numero_pd);
+    if (req.body.pn !== undefined) payload.pn = normalizeUpper(req.body.pn);
+    if (req.body.nsn !== undefined) payload.nsn = normalizeUpper(req.body.nsn) || null;
+    ['nomenclatura', 'status_item', 'responsavel', 'observacao', 'uf_pedida', 'uf_cotada'].forEach((field) => {
+      if (req.body[field] !== undefined) payload[field] = cleanText(req.body[field]);
+    });
+    if (req.body.fabricante !== undefined) payload.fabricante = normalizeUpper(req.body.fabricante) || null;
+    ['quantidade', 'qtd_pedida', 'qtd_cotada', 'qtd_comprada', 'qtd_faturada', 'qtd_recebida', 'valor_unitario', 'valor_total', 'valor_total_usd', 'valor_total_gbp', 'dias_entrega'].forEach((field) => {
+      if (req.body[field] !== undefined) payload[field] = toNumber(req.body[field]);
+    });
+    if (req.body.moeda !== undefined) payload.moeda = normalizeUpper(req.body.moeda || current.moeda || 'USD');
+    if (req.body.data_entrega !== undefined) payload.data_entrega = parseDate(req.body.data_entrega);
+    if (req.body.data_previsao_entrega !== undefined) payload.data_previsao_entrega = parseDate(req.body.data_previsao_entrega);
+    if (req.body.numero_oc !== undefined) {
+      payload.numero_oc = normalizeOcRaiz(req.body.numero_oc) || null;
+      payload.numero_oc_original = normalizeUpper(req.body.numero_oc) || null;
+      payload.ordem_id = null;
+      if (payload.numero_oc) {
+        const { data: linkedOrder, error: linkedOrderError } = await supabase
+          .from('compras_ordens')
+          .select('id')
+          .eq('numero_oc', payload.numero_oc)
+          .maybeSingle();
+        if (linkedOrderError) throw linkedOrderError;
+        payload.ordem_id = linkedOrder?.id || null;
+      }
+    } else if (req.body.ordem_id !== undefined) {
+      payload.ordem_id = req.body.ordem_id || null;
+    }
+    payload.status = status;
+    payload.status_grupo = mapProcessStatus(status);
+    payload.ativo = !['CAN', 'EXCLUIDO'].includes(status);
+    if (status === 'CAN') {
+      payload.cancelado_em = new Date().toISOString();
+      payload.motivo_cancelamento = req.body.motivo_cancelamento || req.body.observacao || 'PD cancelado pelo ADMIN.';
+    }
+
+    const { data, error } = await supabase.from('compras_pds').update(payload).eq('id', id).select('*').single();
+    if (error) throw error;
+    await registrarEventoPd(data.id, req, 'PD_EDITADO', current.status_grupo || current.status, data.status_grupo || data.status, {
+      numero_pd: data.numero_pd,
+      pn: data.pn,
+      numero_oc: data.numero_oc,
+      alteracoes: Object.keys(payload),
+    });
+    await auditCompra(req, 'PD_EDITADO', 'PD', data.numero_pd, `PD ${data.numero_pd} editado/evoluído.`, { pn: data.pn, status_anterior: current.status, status_novo: data.status, numero_oc: data.numero_oc });
+    return res.status(200).json({ status: 'success', message: 'PD atualizado e evolução registrada no histórico.', data });
+  } catch (error) {
+    console.error('[SISHA][compras] atualizarPd:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao atualizar PD.' });
+  }
+};
+
+exports.excluirPd = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { data: current, error: currentError } = await supabase.from('compras_pds').select('*').eq('id', req.params.id).single();
+    if (currentError) throw currentError;
+    const { data, error } = await supabase.from('compras_pds').update({ ativo: false, status: 'EXCLUIDO', status_grupo: 'CAN', updated_at: new Date().toISOString() }).eq('id', req.params.id).select('*').single();
+    if (error) throw error;
+    await registrarEventoPd(data.id, req, 'PD_EXCLUIDO_LOGICAMENTE', current.status_grupo || current.status, 'EXCLUIDO', { numero_pd: data.numero_pd, pn: data.pn });
+    await auditCompra(req, 'PD_EXCLUIDO_LOGICAMENTE', 'PD', data.numero_pd, `PD ${data.numero_pd} excluído logicamente.`, { pn: data.pn }, 'GOD');
+    return res.status(200).json({ status: 'success', message: 'PD excluído logicamente. Histórico preservado.' });
+  } catch (error) {
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao excluir PD.' });
+  }
+};
 
 exports.listarOrdens = async (req, res) => {
   try {
@@ -676,13 +1060,14 @@ exports.criarOrdem = async (req, res) => {
     if (!OC_STATUSES.has(status)) return res.status(400).json({ status: 'error', message: 'Status inválido para OC.' });
     const pds = Array.isArray(req.body.pds) ? req.body.pds : [];
     if (pds.length > 20) return res.status(400).json({ status: 'error', message: 'Uma OC pode possuir no máximo 20 PD/SEPD.' });
-    const { data: ordem, error } = await supabase.from('compras_ordens').upsert({ numero_oc: numeroOc, numero_oc_original: numeroOriginal || numeroOc, status, moeda: normalizeUpper(req.body.moeda || 'USD'), sigla_moeda: normalizeUpper(req.body.moeda || 'USD'), valor_total: toNumber(req.body.valor_total), observacao: req.body.observacao || null, ativo: status !== 'CAN', updated_at: new Date().toISOString() }, { onConflict: 'numero_oc' }).select('*').single();
+    const valorTotalUsd = toNumber(req.body.valor_total_usd ?? req.body.valor_total);
+    const { data: ordem, error } = await supabase.from('compras_ordens').upsert({ numero_oc: numeroOc, numero_oc_original: numeroOriginal || numeroOc, status, moeda: 'USD', sigla_moeda: 'USD', valor_total: valorTotalUsd, valor_total_usd: valorTotalUsd, observacao: req.body.observacao || null, ativo: status !== 'CAN', updated_at: new Date().toISOString() }, { onConflict: 'numero_oc' }).select('*').single();
     if (error) throw error;
     const pdsPayload = pds.filter((pd) => normalizeUpper(pd.numero_pd) && normalizeUpper(pd.pn)).slice(0, 20).map((pd) => {
       const quantidade = Math.max(1, toNumber(pd.quantidade) || 1);
       const valorUnitario = toNumber(pd.valor_unitario);
       const valorTotal = toNumber(pd.valor_total) || (valorUnitario * quantidade);
-      return { ordem_id: ordem.id, numero_oc: numeroOc, numero_oc_original: numeroOriginal || numeroOc, numero_pd: normalizeUpper(pd.numero_pd), pn: normalizeUpper(pd.pn), nomenclatura: pd.nomenclatura || null, quantidade, qtd_pedida: quantidade, qtd_comprada: quantidade, valor_unitario: valorUnitario, valor_total: valorTotal, moeda: normalizeUpper(pd.moeda || req.body.moeda || 'USD'), status: status === 'CAN' ? 'CAN' : 'ATIVO', status_grupo: status === 'CAN' ? 'CAN' : 'ODC', ativo: status !== 'CAN', updated_at: new Date().toISOString() };
+      return { ordem_id: ordem.id, numero_oc: numeroOc, numero_oc_original: numeroOriginal || numeroOc, numero_pd: normalizeUpper(pd.numero_pd), pn: normalizeUpper(pd.pn), nomenclatura: pd.nomenclatura || null, quantidade, qtd_pedida: quantidade, qtd_comprada: quantidade, valor_unitario: valorUnitario, valor_total: valorTotal, valor_total_usd: valorTotal, moeda: 'USD', status: status === 'CAN' ? 'CAN' : 'ATIVO', status_grupo: status === 'CAN' ? 'CAN' : 'ODC', ativo: status !== 'CAN', updated_at: new Date().toISOString() };
     });
     if (pdsPayload.length > 0) {
       const { error: pdError } = await supabase.from('compras_pds').upsert(pdsPayload, { onConflict: 'numero_pd' });
@@ -707,6 +1092,8 @@ exports.atualizarOrdem = async (req, res) => {
     if (status) payload.status = status;
     if (req.body.moeda !== undefined) { payload.moeda = normalizeUpper(req.body.moeda || 'USD'); payload.sigla_moeda = payload.moeda; }
     if (req.body.valor_total !== undefined) payload.valor_total = toNumber(req.body.valor_total);
+    if (req.body.valor_total_usd !== undefined) payload.valor_total_usd = toNumber(req.body.valor_total_usd);
+    if (req.body.valor_total_gbp !== undefined) payload.valor_total_gbp = toNumber(req.body.valor_total_gbp);
     if (req.body.observacao !== undefined) payload.observacao = req.body.observacao || null;
     if (status === 'CAN') { payload.ativo = false; payload.cancelada_em = new Date().toISOString(); payload.cancelada_por = req.user?.email || req.user?.sub || null; payload.motivo_cancelamento = req.body.motivo_cancelamento || req.body.observacao || 'Cancelada pelo ADMIN.'; }
     const { data: ordem, error } = await supabase.from('compras_ordens').update(payload).eq('id', id).select('*').single();
@@ -747,16 +1134,86 @@ exports.adicionarSuplementacaoOrdem = async (req, res) => {
     if (String(id).startsWith('orderbook-')) return res.status(400).json({ status: 'error', message: 'OC importada do Order Book não recebe suplementação manual.' });
     const valor = toNumber(req.body.valor);
     if (valor <= 0) return res.status(400).json({ status: 'error', message: 'Valor de suplementação deve ser maior que zero.' });
-    const { data: ordem, error: ordemError } = await supabase.from('compras_ordens').select('id, status').eq('id', id).single();
+    const { data: ordem, error: ordemError } = await supabase.from('compras_ordens').select('id, numero_oc, status').eq('id', id).single();
     if (ordemError) throw ordemError;
     if (ordem.status === 'CAN') return res.status(400).json({ status: 'error', message: 'OC cancelada não pode receber suplementação.' });
-    const { data, error } = await supabase.from('compras_suplementacoes').insert({ ordem_id: id, valor, moeda: normalizeUpper(req.body.moeda || 'USD'), msg_referencia: req.body.msg_referencia || null, data_msg: req.body.data_msg || null, observacao: req.body.observacao || null, ativo: true }).select('*').single();
+    const { data, error } = await supabase.from('compras_suplementacoes').insert({ ordem_id: id, valor, moeda: 'USD', msg_referencia: req.body.msg_referencia || null, data_msg: req.body.data_msg || null, observacao: req.body.observacao || null, ativo: true }).select('*').single();
     if (error) throw error;
-    await auditCompra(req, 'OC_SUPLEMENTADA', 'OC', id, `Suplementação registrada na OC ${id}.`, { valor, moeda: req.body.moeda || 'USD', msg_referencia: req.body.msg_referencia });
-    return res.status(201).json({ status: 'success', message: 'Suplementação registrada na OC.', data });
+    await auditCompra(req, 'OC_SUPLEMENTADA', 'OC', ordem.numero_oc || id, `Suplementação USD registrada na OC ${ordem.numero_oc || id}.`, { valor, moeda: 'USD', msg_referencia: req.body.msg_referencia, data_msg: req.body.data_msg || null });
+    return res.status(201).json({ status: 'success', message: 'Suplementação USD registrada na OC.', data });
   } catch (error) {
     console.error('[SISHA][compras] adicionarSuplementacaoOrdem:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao registrar suplementação da OC.' });
+  }
+};
+
+exports.retificarSuplementacaoOrdem = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { id, suplementacaoId } = req.params;
+  let oldRow = null;
+  try {
+    const valor = toNumber(req.body.valor);
+    const motivo = cleanText(req.body.motivo_retificacao || req.body.motivo);
+    if (valor <= 0) return res.status(400).json({ status: 'error', message: 'O novo valor deve ser maior que zero.' });
+    if (!motivo) return res.status(400).json({ status: 'error', message: 'Motivo da retificação é obrigatório para auditoria.' });
+    const { data: ordem, error: ordemError } = await supabase.from('compras_ordens').select('id, numero_oc, status').eq('id', id).single();
+    if (ordemError) throw ordemError;
+    if (ordem.status === 'CAN') return res.status(400).json({ status: 'error', message: 'OC cancelada não pode ter suplementação retificada.' });
+    const { data: current, error: currentError } = await supabase.from('compras_suplementacoes').select('*').eq('id', suplementacaoId).eq('ordem_id', id).single();
+    if (currentError) throw currentError;
+    oldRow = current;
+    if (current.ativo === false) return res.status(409).json({ status: 'error', message: 'Esta suplementação já foi substituída/inativada.' });
+    const { error: deactivateError } = await supabase.from('compras_suplementacoes').update({ ativo: false }).eq('id', suplementacaoId);
+    if (deactivateError) throw deactivateError;
+    const { data: replacement, error: insertError } = await supabase.from('compras_suplementacoes').insert({
+      ordem_id: id,
+      valor,
+      moeda: 'USD',
+      msg_referencia: req.body.msg_referencia ?? current.msg_referencia ?? null,
+      data_msg: req.body.data_msg ?? current.data_msg ?? null,
+      observacao: cleanText(req.body.observacao) || `Retificação da suplementação #${current.id}. Motivo: ${motivo}`,
+      ativo: true,
+    }).select('*').single();
+    if (insertError) {
+      await supabase.from('compras_suplementacoes').update({ ativo: true }).eq('id', suplementacaoId);
+      throw insertError;
+    }
+    await auditCompra(req, 'OC_SUPLEMENTACAO_RETIFICADA', 'OC', ordem.numero_oc || id, `Suplementação da OC ${ordem.numero_oc || id} retificada sem apagar o registro anterior.`, { motivo, anterior: current, atual: replacement }, 'GOD');
+    return res.status(200).json({ status: 'success', message: 'Suplementação retificada. O registro anterior foi preservado como inativo para auditoria.', data: replacement, anterior: current });
+  } catch (error) {
+    console.error('[SISHA][compras] retificarSuplementacaoOrdem:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao retificar suplementação da OC.' });
+  }
+};
+
+exports.atualizarControleSuplementacaoOrdem = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { id } = req.params;
+    if (String(id).startsWith('orderbook-')) return res.status(400).json({ status: 'error', message: 'OC do Order Book é somente leitura.' });
+    const motivo = cleanText(req.body.motivo);
+    const marcarTotal = req.body.marcar_total === true;
+    const { data: ordem, error: ordemError } = await supabase.from('compras_ordens').select('id, numero_oc, status, valor_total_usd, valor_total_gbp, valor_total, moeda').eq('id', id).single();
+    if (ordemError) throw ordemError;
+    if (ordem.status === 'CAN') return res.status(400).json({ status: 'error', message: 'OC cancelada não pode ter controle financeiro alterado.' });
+    const { data: sups, error: supsError } = await supabase.from('compras_suplementacoes').select('valor,moeda,ativo').eq('ordem_id', id).eq('ativo', true);
+    if (supsError) throw supsError;
+    const suplementadoUsd = (sups || []).filter((sup) => normalizeUpper(sup.moeda || 'USD') === 'USD').reduce((acc, sup) => acc + toNumber(sup.valor), 0);
+    const anterior = toNumber(ordem.valor_total_usd) || (normalizeUpper(ordem.moeda) === 'USD' ? toNumber(ordem.valor_total) : 0);
+    let novoAlvo = req.body.valor_alvo_usd !== undefined ? toNumber(req.body.valor_alvo_usd) : anterior;
+    if (marcarTotal) {
+      if (suplementadoUsd <= 0) return res.status(400).json({ status: 'error', message: 'Não há suplementação USD ativa para encerrar como totalmente suplementada.' });
+      novoAlvo = suplementadoUsd;
+    }
+    if (novoAlvo < 0) return res.status(400).json({ status: 'error', message: 'Valor alvo USD inválido.' });
+    if (Math.abs(novoAlvo - anterior) > 0.005 && !motivo) return res.status(400).json({ status: 'error', message: 'Informe o motivo da alteração do valor alvo USD.' });
+    const { data, error } = await supabase.from('compras_ordens').update({ valor_total_usd: novoAlvo, updated_at: new Date().toISOString() }).eq('id', id).select('*').single();
+    if (error) throw error;
+    await auditCompra(req, marcarTotal ? 'OC_SUPLEMENTACAO_ENCERRADA' : 'OC_VALOR_ALVO_USD_AJUSTADO', 'OC', ordem.numero_oc || id, marcarTotal ? `OC ${ordem.numero_oc || id} marcada como totalmente suplementada por ajuste auditável do alvo USD.` : `Valor alvo USD da OC ${ordem.numero_oc || id} ajustado.`, { valor_alvo_usd_anterior: anterior, valor_alvo_usd_novo: novoAlvo, suplementado_usd: suplementadoUsd, motivo, valor_total_gbp_preservado: ordem.valor_total_gbp });
+    return res.status(200).json({ status: 'success', message: marcarTotal ? 'OC marcada como totalmente suplementada. Valores GBP e histórico foram preservados.' : 'Valor alvo USD atualizado com auditoria.', data, suplementado_usd: suplementadoUsd });
+  } catch (error) {
+    console.error('[SISHA][compras] atualizarControleSuplementacaoOrdem:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao atualizar controle de suplementação da OC.' });
   }
 };
 
@@ -835,16 +1292,16 @@ exports.importarPipelinePds = async (req, res) => {
       const cancelado = isCancelledStatus(statusOriginal);
       const qtd = toNumber(get(row, 'Qtde')) || 1;
       const valorUnitUsd = toNumber(get(row, 'Preço Unit. (USD)'));
-      payload.push({ numero_pd: numeroPd, pn, nsn: normalizeUpper(get(row, 'NSN')) || null, codemp: normalizeUpper(get(row, 'CODEMP')) || null, quantidade: qtd, qtd_pedida: qtd, uf_pedida: get(row, 'UF') || null, valor_unitario: valorUnitUsd, valor_total: toNumber(get(row, 'Total (USD)')) || valorUnitUsd * qtd, moeda: 'USD', valor_total_usd: toNumber(get(row, 'Total (USD)')) || valorUnitUsd * qtd, valor_contratado: toNumber(get(row, 'Valor Contratado')), status: statusOriginal, status_grupo: statusGrupo, data_status: parseDate(get(row, 'Data Status')), org_obt: get(row, 'Org. Obt') || null, ext: get(row, 'Ext') || null, sub: get(row, 'Sub') || null, critica: get(row, 'Crítica') || null, prioridade: get(row, 'Pri') || null, tl: get(row, 'T.L.') || null, co: get(row, 'C.O.') || null, sj: get(row, 'SJ') || null, lote_envio: get(row, 'Lote Envio') || null, omd: get(row, 'OMD') || null, omc: get(row, 'OMC') || null, cam: get(row, 'CAM') || null, equipamento_codigo: get(row, 'Equipamento') || null, modelo: get(row, 'Modelo') || null, serial_number_relatorio: get(row, 'Serial Number') || null, responsavel: get(row, 'Responsável') || null, data_previsao_entrega: parseDate(get(row, 'Dt.Prv. Entrega')), origem_importacao: 'EXPORT_PD_ODC_MB', ativo: !cancelado, cancelado_em: cancelado ? now : null, motivo_cancelamento: cancelado ? 'PD cancelado no pipeline ODC.' : null, updated_at: now });
+      payload.push({ numero_pd: numeroPd, pn, nsn: normalizeUpper(get(row, 'NSN')) || null, codemp: normalizeUpper(get(row, 'CODEMP')) || null, quantidade: qtd, qtd_pedida: qtd, uf_pedida: get(row, 'UF') || null, valor_unitario: valorUnitUsd, valor_total: toNumber(get(row, 'Total (USD)')) || valorUnitUsd * qtd, moeda: 'USD', valor_total_usd: toNumber(get(row, 'Total (USD)')) || valorUnitUsd * qtd, valor_contratado: toNumber(get(row, 'Valor Contratado')), status: statusOriginal, status_grupo: statusGrupo, data_status: parseDate(get(row, 'Data Status')), org_obt: get(row, 'Org. Obt') || null, ext: get(row, 'Ext') || null, sub: get(row, 'Sub') || null, critica: get(row, 'Crítica') || null, prioridade: get(row, 'Pri') || null, tl: get(row, 'T.L.') || null, co: get(row, 'C.O.') || null, sj: get(row, 'SJ') || null, lote_envio: get(row, 'Lote Envio') || null, omd: get(row, 'OMD') || null, omc: get(row, 'OMC') || null, cam: get(row, 'CAM') || null, equipamento_codigo: get(row, 'Equipamento') || null, modelo: get(row, 'Modelo') || null, serial_number_relatorio: get(row, 'Serial Number') || null, responsavel: get(row, 'Responsável') || null, data_previsao_entrega: parseDate(get(row, 'Dt.Prv. Entrega')), origem_importacao: 'EXPORT_PD_ODC_MB', ativo: !cancelado, cancelado_em: cancelado ? now : null, motivo_cancelamento: cancelado ? 'PD sem OC cancelado no arquivo de origem.' : null, updated_at: now });
     });
     if (payload.length === 0) return res.status(400).json({ status: 'error', message: 'Nenhum PD de pipeline válido encontrado no arquivo.' });
     const { error } = await supabase.from('compras_pds').upsert(payload, { onConflict: 'numero_pd' });
     if (error) throw error;
-    await auditCompra(req, 'PD_PIPELINE_IMPORTADO', 'PD', 'PD_ODC', `${payload.length} PD(s) de pipeline importados/atualizados.`, { linhas_lidas: rows.length, importadas: payload.length });
-    return res.status(200).json({ status: 'success', message: `${payload.length} PD(s) de pipeline importados/atualizados.`, data: { linhas_lidas: rows.length, importadas: payload.length } });
+    await auditCompra(req, 'PD_SEM_OC_IMPORTADO', 'PD', 'PD_SEM_OC', `${payload.length} PD(s) sem OC importados/atualizados.`, { linhas_lidas: rows.length, importadas: payload.length });
+    return res.status(200).json({ status: 'success', message: `${payload.length} PD(s) sem OC importados/atualizados.`, data: { linhas_lidas: rows.length, importadas: payload.length } });
   } catch (error) {
     console.error('[SISHA][compras] importarPipelinePds:', error);
-    return res.status(500).json({ status: 'error', message: 'Falha ao importar pipeline de PD/ODC.' });
+    return res.status(500).json({ status: 'error', message: 'Falha ao importar PDs sem OC.' });
   }
 };
 
@@ -860,7 +1317,7 @@ exports.listarWorkOrders = async (req, res) => {
     if (q) wosManuais = wosManuais.filter((wo) => woMatches(wo, q));
     const chavesManuais = new Set(wosManuais.map((wo) => `${normalizeComparable(wo.numero_wo)}|${normalizeComparable(wo.pn)}|${normalizeComparable(wo.sn)}`));
     const wosBookSemDuplicar = (wosOrderBook || []).filter((wo) => !chavesManuais.has(`${normalizeComparable(wo.numero_wo)}|${normalizeComparable(wo.pn)}|${normalizeComparable(wo.sn)}`));
-    const wos = [...wosManuais, ...wosBookSemDuplicar];
+    const wos = await workOrderEquipmentService.decorateWorkOrdersWithEquipmentTrace([...wosManuais, ...wosBookSemDuplicar]);
     return res.status(200).json({ status: 'success', data: wos, meta: { sisha: wosManuais.length, order_book_repairs: wosBookSemDuplicar.length, busca: q || null } });
   } catch (error) {
     console.error('[SISHA][compras] listarWorkOrders:', error);
@@ -883,10 +1340,46 @@ exports.criarWorkOrder = async (req, res) => {
     const nomenclaturaAuto = nomenclaturaManual ? null : (await buscarNomenclaturasPorPns([pn])).get(pn);
     const nomenclaturaFinal = nomenclaturaManual || nomenclaturaAuto?.nomenclatura || null;
     const fonteNomenclatura = nomenclaturaManual ? 'MANUAL' : (nomenclaturaAuto?.fonte || 'PENDENTE');
-    const { data, error } = await supabase.from('work_orders').upsert({ numero_wo: numeroWo, pn, nomenclatura: nomenclaturaFinal, fonte_nomenclatura: fonteNomenclatura, nomenclatura_informada_manualmente: !!nomenclaturaManual, nomenclatura_atualizada_em: nomenclaturaManual ? new Date().toISOString() : null, nomenclatura_atualizada_por: nomenclaturaManual ? (req.user?.email || req.user?.sub || null) : null, sn: sn || null, sn_pendente: !sn, quantidade: 1, empresa: req.body.empresa || req.body.codemp || null, codemp: normalizeUpper(req.body.codemp || req.body.empresa) || null, origem: normalizeUpper(req.body.origem || 'MANUAL'), status, status_original: status, status_grupo: mapProcessStatus(status), tipo_wo: WO_TIPOS.has(tipoWo) ? tipoWo : 'OUTRO', resultado_tecnico: WO_RESULTADOS.has(resultadoTecnico) ? resultadoTecnico : 'PENDENTE', valor_total: toNumber(req.body.valor_total), valor_total_usd: toNumber(req.body.valor_total), moeda: normalizeUpper(req.body.moeda || 'USD'), data_abertura: req.body.data_abertura || null, data_envio: req.body.data_envio || null, data_previsao: req.body.data_previsao || null, data_previsao_entrega: req.body.data_previsao || null, data_retorno: req.body.data_retorno || null, observacao: req.body.observacao || null, ativo: status !== 'CAN' && status !== 'CANCELADO', updated_at: new Date().toISOString() }, { onConflict: 'numero_wo' }).select('*').single();
+    const { data, error } = await supabase.from('work_orders').upsert({
+      numero_wo: numeroWo,
+      pn,
+      nomenclatura: nomenclaturaFinal,
+      fonte_nomenclatura: fonteNomenclatura,
+      nomenclatura_informada_manualmente: !!nomenclaturaManual,
+      nomenclatura_atualizada_em: nomenclaturaManual ? new Date().toISOString() : null,
+      nomenclatura_atualizada_por: nomenclaturaManual ? (req.user?.email || req.user?.sub || null) : null,
+      sn: sn || null,
+      sn_pendente: !sn,
+      quantidade: 1,
+      empresa: req.body.empresa || req.body.codemp || null,
+      codemp: normalizeUpper(req.body.codemp || req.body.empresa) || null,
+      origem: normalizeUpper(req.body.origem || 'MANUAL'),
+      status,
+      status_original: status,
+      status_grupo: mapProcessStatus(status),
+      tipo_wo: WO_TIPOS.has(tipoWo) ? tipoWo : 'OUTRO',
+      resultado_tecnico: WO_RESULTADOS.has(resultadoTecnico) ? resultadoTecnico : 'PENDENTE',
+      valor_total: toNumber(req.body.valor_total),
+      valor_total_usd: toNumber(req.body.valor_total),
+      moeda: normalizeUpper(req.body.moeda || 'USD'),
+      data_abertura: req.body.data_abertura || null,
+      data_envio: req.body.data_envio || null,
+      data_previsao: req.body.data_previsao || null,
+      data_previsao_entrega: req.body.data_previsao || null,
+      data_retorno: req.body.data_retorno || null,
+      aeronave: cleanText(req.body.aeronave),
+      pn_saida: normalizeUpper(req.body.pn_saida) || null,
+      equipamento_codigo: cleanText(req.body.equipamento_codigo),
+      modelo: cleanText(req.body.modelo),
+      responsavel: cleanText(req.body.responsavel),
+      observacao: req.body.observacao || null,
+      ativo: status !== 'CAN' && status !== 'CANCELADO',
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'numero_wo' }).select('*').single();
     if (error) throw error;
-    await auditCompra(req, 'WO_CRIADA_ATUALIZADA', 'WO', data.numero_wo, `WO ${data.numero_wo} cadastrada/atualizada.`, { pn: data.pn, sn: data.sn, status: data.status });
-    return res.status(201).json({ status: 'success', message: 'WO cadastrada/atualizada com sucesso.', data });
+    const equipmentTrace = await safeSyncWorkOrderLedger(data, req);
+    await auditCompra(req, 'WO_CRIADA_ATUALIZADA', 'WO', data.numero_wo, `WO ${data.numero_wo} cadastrada/atualizada.`, { pn: data.pn, sn: data.sn, status: data.status, equipment_trace: equipmentTrace.status });
+    return res.status(201).json({ status: 'success', message: 'WO cadastrada/atualizada com sucesso.', data: { ...data, equipment_trace: equipmentTrace }, equipment_trace: equipmentTrace });
   } catch (error) {
     console.error('[SISHA][compras] criarWorkOrder:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao cadastrar WO.' });
@@ -901,7 +1394,26 @@ exports.atualizarWorkOrder = async (req, res) => {
     const status = req.body.status ? normalizeUpper(req.body.status) : null;
     if (status && !WO_STATUSES.has(status)) return res.status(400).json({ status: 'error', message: 'Status inválido para WO.' });
     const payload = { updated_at: new Date().toISOString() };
-    ['empresa', 'data_abertura', 'data_envio', 'data_previsao', 'data_retorno', 'observacao', 'data_previsao_entrega', 'responsavel'].forEach((field) => { if (req.body[field] !== undefined) payload[field] = req.body[field] || null; });
+    if (req.body.numero_wo !== undefined) payload.numero_wo = normalizeUpper(req.body.numero_wo);
+    if (req.body.pn !== undefined) payload.pn = normalizeUpper(req.body.pn);
+    if (req.body.nsn !== undefined) payload.nsn = normalizeUpper(req.body.nsn) || null;
+    if (req.body.quantidade !== undefined && toNumber(req.body.quantidade) !== 1) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Cada WO representa um único equipamento/serial e deve manter quantidade igual a 1.',
+      });
+    }
+    payload.quantidade = 1;
+    if (req.body.empresa !== undefined || req.body.codemp !== undefined) {
+      payload.empresa = cleanText(req.body.empresa || req.body.codemp);
+      payload.codemp = normalizeUpper(req.body.codemp || req.body.empresa) || null;
+    }
+    ['observacao', 'responsavel', 'aeronave', 'pn_saida', 'modelo', 'equipamento_codigo'].forEach((field) => {
+      if (req.body[field] !== undefined) payload[field] = cleanText(req.body[field]);
+    });
+    ['data_abertura', 'data_envio', 'data_previsao', 'data_retorno', 'data_previsao_entrega', 'data_status'].forEach((field) => {
+      if (req.body[field] !== undefined) payload[field] = parseDate(req.body[field]);
+    });
     if (req.body.tipo_wo !== undefined) {
       const tipoWo = normalizeUpper(req.body.tipo_wo || 'PENDENTE');
       payload.tipo_wo = WO_TIPOS.has(tipoWo) ? tipoWo : 'OUTRO';
@@ -915,19 +1427,26 @@ exports.atualizarWorkOrder = async (req, res) => {
       payload.nomenclatura_atualizada_em = new Date().toISOString();
       payload.nomenclatura_atualizada_por = req.user?.email || req.user?.sub || null;
     }
-    if (status) { payload.status = status; payload.status_grupo = mapProcessStatus(status); }
+    if (status) {
+      payload.status = status;
+      payload.status_original = status;
+      payload.status_grupo = mapProcessStatus(status);
+      payload.ativo = !['CAN', 'CANCELADO'].includes(status);
+    }
     if (req.body.origem !== undefined) payload.origem = normalizeUpper(req.body.origem || 'MANUAL');
     if (req.body.resultado_tecnico !== undefined || req.body.resultado !== undefined) {
       const resultado = normalizeUpper(req.body.resultado_tecnico || req.body.resultado || 'PENDENTE');
       payload.resultado_tecnico = WO_RESULTADOS.has(resultado) ? resultado : 'PENDENTE';
     }
+    if (req.body.valor_unitario_usd !== undefined) payload.valor_unitario_usd = toNumber(req.body.valor_unitario_usd);
     if (req.body.valor_total !== undefined) { payload.valor_total = toNumber(req.body.valor_total); payload.valor_total_usd = toNumber(req.body.valor_total); }
+    if (req.body.valor_contratado !== undefined) payload.valor_contratado = toNumber(req.body.valor_contratado);
     if (req.body.moeda !== undefined) payload.moeda = normalizeUpper(req.body.moeda || 'USD');
-    if (status === 'CAN' || status === 'CANCELADO') payload.ativo = false;
     const { data, error } = await supabase.from('work_orders').update(payload).eq('id', id).select('*').single();
     if (error) throw error;
-    await auditCompra(req, 'WO_EDITADA', 'WO', data.numero_wo, `WO ${data.numero_wo} editada.`, { pn: data.pn, sn: data.sn, status: data.status, tipo_wo: data.tipo_wo, resultado_tecnico: data.resultado_tecnico });
-    return res.status(200).json({ status: 'success', message: 'WO atualizada com sucesso.', data });
+    const equipmentTrace = await safeSyncWorkOrderLedger(data, req);
+    await auditCompra(req, 'WO_EDITADA', 'WO', data.numero_wo, `WO ${data.numero_wo} editada.`, { pn: data.pn, sn: data.sn, status: data.status, tipo_wo: data.tipo_wo, resultado_tecnico: data.resultado_tecnico, equipment_trace: equipmentTrace.status });
+    return res.status(200).json({ status: 'success', message: 'WO atualizada com sucesso.', data: { ...data, equipment_trace: equipmentTrace }, equipment_trace: equipmentTrace });
   } catch (error) {
     console.error('[SISHA][compras] atualizarWorkOrder:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao atualizar WO.' });
@@ -939,10 +1458,11 @@ exports.excluirWorkOrder = async (req, res) => {
   try {
     const { id } = req.params;
     if (String(id).startsWith('orderbook-repair-')) return res.status(400).json({ status: 'error', message: 'WO importada do Order Book é somente leitura.' });
-    const { error } = await supabase.from('work_orders').update({ ativo: false, status: 'CAN', updated_at: new Date().toISOString() }).eq('id', id);
+    const { data: cancelledWo, error } = await supabase.from('work_orders').update({ ativo: false, status: 'CAN', updated_at: new Date().toISOString() }).eq('id', id).select('*').single();
     if (error) throw error;
-    await auditCompra(req, 'WO_EXCLUIDA_LOGICAMENTE', 'WO', id, `WO ${id} excluída logicamente.`, { id }, 'GOD');
-    return res.status(200).json({ status: 'success', message: 'WO excluída logicamente. Histórico preservado.' });
+    const equipmentTrace = cancelledWo ? await safeSyncWorkOrderLedger(cancelledWo, req) : null;
+    await auditCompra(req, 'WO_EXCLUIDA_LOGICAMENTE', 'WO', id, `WO ${id} excluída logicamente.`, { id, equipment_trace: equipmentTrace?.status || null }, 'GOD');
+    return res.status(200).json({ status: 'success', message: 'WO excluída logicamente. Histórico preservado.', equipment_trace: equipmentTrace });
   } catch (error) {
     console.error('[SISHA][compras] excluirWorkOrder:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao excluir WO.' });
@@ -956,13 +1476,82 @@ exports.adicionarSuplementacaoWorkOrder = async (req, res) => {
     if (String(id).startsWith('orderbook-repair-')) return res.status(400).json({ status: 'error', message: 'WO importada do Order Book não recebe suplementação manual.' });
     const valor = toNumber(req.body.valor);
     if (valor <= 0) return res.status(400).json({ status: 'error', message: 'Valor de suplementação deve ser maior que zero.' });
-    const { data, error } = await supabase.from('work_order_suplementacoes').insert({ work_order_id: id, valor, moeda: normalizeUpper(req.body.moeda || 'USD'), msg_referencia: req.body.msg_referencia || null, data_msg: req.body.data_msg || null, observacao: req.body.observacao || null, ativo: true }).select('*').single();
+    const { data, error } = await supabase.from('work_order_suplementacoes').insert({ work_order_id: id, valor, moeda: 'USD', msg_referencia: req.body.msg_referencia || null, data_msg: req.body.data_msg || null, observacao: req.body.observacao || null, ativo: true }).select('*').single();
     if (error) throw error;
-    await auditCompra(req, 'WO_SUPLEMENTADA', 'WO', id, `Suplementação registrada na WO ${id}.`, { valor, moeda: req.body.moeda || 'USD', msg_referencia: req.body.msg_referencia });
-    return res.status(201).json({ status: 'success', message: 'Suplementação registrada na WO.', data });
+    const { data: woAtualizada } = await supabase.from('work_orders').select('*, work_order_suplementacoes(*)').eq('id', id).maybeSingle();
+    const equipmentTrace = woAtualizada ? await safeSyncWorkOrderLedger(woAtualizada, req) : null;
+    await auditCompra(req, 'WO_SUPLEMENTADA', 'WO', woAtualizada?.numero_wo || id, `Suplementação USD registrada na WO ${woAtualizada?.numero_wo || id}.`, { valor, moeda: 'USD', msg_referencia: req.body.msg_referencia, equipment_trace: equipmentTrace?.status || null });
+    return res.status(201).json({ status: 'success', message: 'Suplementação USD registrada na WO.', data, equipment_trace: equipmentTrace });
   } catch (error) {
     console.error('[SISHA][compras] adicionarSuplementacaoWorkOrder:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao registrar suplementação da WO.' });
+  }
+};
+
+exports.retificarSuplementacaoWorkOrder = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { id, suplementacaoId } = req.params;
+  try {
+    const valor = toNumber(req.body.valor);
+    const motivo = cleanText(req.body.motivo_retificacao || req.body.motivo);
+    if (valor <= 0) return res.status(400).json({ status: 'error', message: 'O novo valor deve ser maior que zero.' });
+    if (!motivo) return res.status(400).json({ status: 'error', message: 'Motivo da retificação é obrigatório para auditoria.' });
+    const { data: current, error: currentError } = await supabase.from('work_order_suplementacoes').select('*').eq('id', suplementacaoId).eq('work_order_id', id).single();
+    if (currentError) throw currentError;
+    if (current.ativo === false) return res.status(409).json({ status: 'error', message: 'Esta suplementação já foi substituída/inativada.' });
+    const { error: deactivateError } = await supabase.from('work_order_suplementacoes').update({ ativo: false }).eq('id', suplementacaoId);
+    if (deactivateError) throw deactivateError;
+    const { data: replacement, error: insertError } = await supabase.from('work_order_suplementacoes').insert({
+      work_order_id: id,
+      valor,
+      moeda: 'USD',
+      msg_referencia: req.body.msg_referencia ?? current.msg_referencia ?? null,
+      data_msg: req.body.data_msg ?? current.data_msg ?? null,
+      observacao: cleanText(req.body.observacao) || `Retificação da suplementação #${current.id}. Motivo: ${motivo}`,
+      ativo: true,
+    }).select('*').single();
+    if (insertError) {
+      await supabase.from('work_order_suplementacoes').update({ ativo: true }).eq('id', suplementacaoId);
+      throw insertError;
+    }
+    const { data: woAtualizada } = await supabase.from('work_orders').select('*, work_order_suplementacoes(*)').eq('id', id).maybeSingle();
+    const equipmentTrace = woAtualizada ? await safeSyncWorkOrderLedger(woAtualizada, req) : null;
+    await auditCompra(req, 'WO_SUPLEMENTACAO_RETIFICADA', 'WO', woAtualizada?.numero_wo || id, `Suplementação da WO ${woAtualizada?.numero_wo || id} retificada sem apagar o registro anterior.`, { motivo, anterior: current, atual: replacement, equipment_trace: equipmentTrace?.status || null }, 'GOD');
+    return res.status(200).json({ status: 'success', message: 'Suplementação da WO retificada. Registro anterior preservado para auditoria.', data: replacement, anterior: current, equipment_trace: equipmentTrace });
+  } catch (error) {
+    console.error('[SISHA][compras] retificarSuplementacaoWorkOrder:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao retificar suplementação da WO.' });
+  }
+};
+
+exports.atualizarControleSuplementacaoWorkOrder = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { id } = req.params;
+    if (String(id).startsWith('orderbook-repair-')) return res.status(400).json({ status: 'error', message: 'WO do Order Book é somente leitura.' });
+    const motivo = cleanText(req.body.motivo);
+    const marcarTotal = req.body.marcar_total === true;
+    const { data: wo, error: woError } = await supabase.from('work_orders').select('*').eq('id', id).single();
+    if (woError) throw woError;
+    const { data: sups, error: supsError } = await supabase.from('work_order_suplementacoes').select('valor,moeda,ativo').eq('work_order_id', id).eq('ativo', true);
+    if (supsError) throw supsError;
+    const suplementadoUsd = (sups || []).filter((sup) => normalizeUpper(sup.moeda || 'USD') === 'USD').reduce((acc, sup) => acc + toNumber(sup.valor), 0);
+    const anterior = toNumber(wo.valor_total_usd) || toNumber(wo.valor_total);
+    let novoAlvo = req.body.valor_alvo_usd !== undefined ? toNumber(req.body.valor_alvo_usd) : anterior;
+    if (marcarTotal) {
+      if (suplementadoUsd <= 0) return res.status(400).json({ status: 'error', message: 'Não há suplementação USD ativa para encerrar como totalmente suplementada.' });
+      novoAlvo = suplementadoUsd;
+    }
+    if (novoAlvo < 0) return res.status(400).json({ status: 'error', message: 'Valor alvo USD inválido.' });
+    if (Math.abs(novoAlvo - anterior) > 0.005 && !motivo) return res.status(400).json({ status: 'error', message: 'Informe o motivo da alteração do valor alvo USD.' });
+    const { data, error } = await supabase.from('work_orders').update({ valor_total_usd: novoAlvo, valor_total: novoAlvo, moeda: 'USD', updated_at: new Date().toISOString() }).eq('id', id).select('*, work_order_suplementacoes(*)').single();
+    if (error) throw error;
+    const equipmentTrace = await safeSyncWorkOrderLedger(data, req);
+    await auditCompra(req, marcarTotal ? 'WO_SUPLEMENTACAO_ENCERRADA' : 'WO_VALOR_ALVO_USD_AJUSTADO', 'WO', wo.numero_wo || id, marcarTotal ? `WO ${wo.numero_wo || id} marcada como totalmente suplementada por ajuste auditável do alvo USD.` : `Valor alvo USD da WO ${wo.numero_wo || id} ajustado.`, { valor_alvo_usd_anterior: anterior, valor_alvo_usd_novo: novoAlvo, suplementado_usd: suplementadoUsd, motivo, equipment_trace: equipmentTrace?.status || null });
+    return res.status(200).json({ status: 'success', message: marcarTotal ? 'WO marcada como totalmente suplementada.' : 'Valor alvo USD da WO atualizado com auditoria.', data, suplementado_usd: suplementadoUsd, equipment_trace: equipmentTrace });
+  } catch (error) {
+    console.error('[SISHA][compras] atualizarControleSuplementacaoWorkOrder:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao atualizar controle de suplementação da WO.' });
   }
 };
 
@@ -994,10 +1583,40 @@ exports.importarWorkOrders = async (req, res) => {
     if (payload.length === 0) return res.status(400).json({ status: 'error', message: 'Nenhuma WO válida encontrada no arquivo.' });
     const { error } = await supabase.from('work_orders').upsert(payload, { onConflict: 'numero_wo' });
     if (error) throw error;
-    await auditCompra(req, 'WO_IMPORTADA_LOTE', 'WO', 'EXPORT_WO', `${payload.length} WO(s) importadas/atualizadas.`, { linhas_lidas: rows.length, importadas: payload.length });
-    return res.status(200).json({ status: 'success', message: `${payload.length} WO(s) importadas/atualizadas. SN manual preservado quando o relatório vier vazio.`, data: { linhas_lidas: rows.length, importadas: payload.length } });
+    const numerosWo = payload.map((item) => item.numero_wo).filter(Boolean);
+    const persisted = [];
+    for (let i = 0; i < numerosWo.length; i += 200) {
+      const { data: page, error: pageError } = await supabase
+        .from('work_orders')
+        .select('*, work_order_suplementacoes(*)')
+        .in('numero_wo', numerosWo.slice(i, i + 200));
+      if (pageError) throw pageError;
+      persisted.push(...(page || []));
+    }
+    const ledger = await workOrderEquipmentService.syncWorkOrdersBatch(persisted, { email: req.user?.email || req.user?.sub || null, role: req.user?.role || null }, { concurrency: 8 });
+    await auditCompra(req, 'WO_IMPORTADA_LOTE', 'WO', 'EXPORT_WO', `${payload.length} WO(s) importadas/atualizadas.`, { linhas_lidas: rows.length, importadas: payload.length, livro_equipamentos: ledger.summary });
+    return res.status(200).json({ status: 'success', message: `${payload.length} WO(s) importadas/atualizadas. SN manual preservado quando o relatório vier vazio.`, data: { linhas_lidas: rows.length, importadas: payload.length, livro_equipamentos: ledger.summary }, equipment_trace: ledger });
   } catch (error) {
     console.error('[SISHA][compras] importarWorkOrders:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao importar relatório de WO.' });
+  }
+};
+
+exports.sincronizarWorkOrdersComEquipamentos = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const result = await workOrderEquipmentService.syncExistingWorkOrdersToEquipment({
+      email: req.user?.email || req.user?.sub || null,
+      role: req.user?.role || null,
+    });
+    await auditCompra(req, 'WO_LIVRO_EQUIPAMENTOS_SINCRONIZADO', 'WO', 'ALL', 'WOs locais sincronizadas com o Livro de Eventos dos Equipamentos.', { summary: result.summary, total: result.total });
+    return res.status(200).json({
+      status: 'success',
+      message: 'Sincronização WO → Livro de Equipamentos concluída. Registros sem SN ou sem PN+SN no Cadastro Mestre foram preservados como pendências, sem inventar vínculos.',
+      data: result,
+    });
+  } catch (error) {
+    console.error('[SISHA][compras] sincronizarWorkOrdersComEquipamentos:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao sincronizar WOs com o Livro de Equipamentos.' });
   }
 };

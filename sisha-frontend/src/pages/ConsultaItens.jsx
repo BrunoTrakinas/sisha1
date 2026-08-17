@@ -1,12 +1,16 @@
-import React, { useState } from 'react';
-import { Truck, Package, Check, Upload, Download, LoaderCircle, X } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Truck, Package, Check, Upload, Download, LoaderCircle, X, FileQuestion } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { apiFetch } from '../lib/api';
+import CotacaoRequestModal from '../components/CotacaoRequestModal';
 
 const SOURCE_LABELS = {
     ITEMS: 'Cadastro base',
     DICIONARIO_MESTRE: 'Manual',
     ESTOQUE_PPU: 'Inventário PPU',
+    INVENTARIO_PPU_RASTREIO: 'Inventário PPU — rastreio físico',
+    SN_ESTOQUE_PPU: 'SN do inventário PPU',
+    PPU_CUSTODIA_EXTERNA: 'PPU — custódia externa em caixa no CEIMSPA',
     LISDE: 'LISDE',
     PRICE_LIST: 'Price List',
     RFQ_COTACOES: 'RFQ',
@@ -14,10 +18,52 @@ const SOURCE_LABELS = {
     CEIMSPA_VIA_DICIONARIO: 'CeIMSPA via manual',
     CEIMSPA_SEM_PN_CONFIRMADO: 'CeIMSPA sem PN confirmado',
     ESTOQUE_CEIMSPA: 'Estoque CeIMSPA',
+    RECIBO_CEIMSPA: 'Recibo destinado ao CeIMSPA',
     SERVICE_BULLETIN: 'Service Bulletin',
+    MANUAL_TECNICO_WTP: 'WTP / Manual técnico',
 };
 
 const formatSource = (value) => SOURCE_LABELS[value] || value || 'N/A';
+const formatQuantity = (value) => Number(value || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+
+const simplifyReceiptLocation = (location, receiptNumber) => {
+    let text = String(location || '').trim();
+    const receipt = String(receiptNumber || '').trim();
+    if (!text) return 'Local não informado';
+
+    if (receipt) {
+        const escaped = receipt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        text = text.replace(new RegExp(`\\bRECIBO\\s*${escaped}\\b`, 'gi'), ' ');
+    }
+
+    text = text
+        .replace(/\bRECIBO\b/gi, ' ')
+        .replace(/\s*[—–-]+\s*/g, ' — ')
+        .replace(/(?:\s*—\s*){2,}/g, ' — ')
+        .replace(/^\s*—\s*|\s*—\s*$/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
+    return text || 'Local não informado';
+};
+
+const LOCATION_DESTINATION_LABELS = {
+    PPU: 'PPU',
+    CEIMSPA: 'CEIMSPA',
+    FORA_LINHA: 'Fora da linha de voo',
+};
+
+const OPERATIONAL_SITUATION_LABELS = {
+    DISPONIVEL: 'Disponível',
+    A_CONFIRMAR: 'A confirmar',
+    AGUARDANDO_REPARO: 'Aguardando reparo',
+    EM_REPARO: 'Em reparo',
+    EM_WO: 'Em WO',
+    CONDENADO_LIXO: 'Condenado / lixo',
+    ARMAZENADO_EXTERNAMENTE: 'Armazenado externamente',
+    QUARENTENA: 'Quarentena',
+    OUTRO: 'Outro',
+};
 
 export default function ConsultaItens() {
     const { token } = useAuth();
@@ -27,7 +73,11 @@ export default function ConsultaItens() {
     const [buscaRealizada, setBuscaRealizada] = useState(false);
 
     const [modalAplicacoes, setModalAplicacoes] = useState(false);
+    const [modalIndisponiveis, setModalIndisponiveis] = useState(false);
+    const [alvoIndisponiveis, setAlvoIndisponiveis] = useState(null);
     const [alvoAplicacoes, setAlvoAplicacoes] = useState([]);
+    const [alvoManuaisTecnicos, setAlvoManuaisTecnicos] = useState([]);
+    const [alvoWtpReferencias, setAlvoWtpReferencias] = useState([]);
     const [fontesMapa, setFontesMapa] = useState([]);
     const [modalLote, setModalLote] = useState(false);
     const [arquivoLote, setArquivoLote] = useState(null);
@@ -35,6 +85,18 @@ export default function ConsultaItens() {
     const [loteExportando, setLoteExportando] = useState(false);
     const [loteErro, setLoteErro] = useState('');
     const [lotePreview, setLotePreview] = useState(null);
+    const [quoteOpen, setQuoteOpen] = useState(false);
+
+
+    const loteMissingQuoteItems = useMemo(() => (lotePreview?.sections?.comprar || [])
+        .filter((row) => !(Number(row.valor_unitario_gbp) > 0))
+        .map((row) => ({
+            pn: row.pn,
+            nsn: row.nsn,
+            nomenclatura: row.nomenclatura,
+            qtd: Number(row.faltam_apos_etapa ?? row.saldo_apos_etapa ?? row.necessidade_total ?? 0),
+        }))
+        .filter((row) => row.pn && row.qtd > 0), [lotePreview]);
 
     const fecharModalLote = () => {
         setModalLote(false);
@@ -119,7 +181,7 @@ export default function ConsultaItens() {
             } else {
                 setResultados([]);
             }
-        } catch (error) {
+        } catch {
             setResultados([]);
         }
         setCarregando(false);
@@ -236,11 +298,38 @@ export default function ConsultaItens() {
                                 <span className={`py-2.5 px-5 sm:px-6 rounded-xl text-lg sm:text-xl font-black shadow-sm text-center ${item.ppu_qtd > 0 ? 'bg-blue-600 text-white' : 'bg-slate-800 text-white'}`}>
                                     PPU: {item.ppu_qtd || 0} un
                                 </span>
-                                {item.ppu_qtd > 0 && (
-                                    <span className="text-[10px] sm:text-[11px] font-black text-slate-500 mt-2 bg-slate-50 px-2 py-1 rounded border border-slate-200 uppercase text-center md:text-left">
-                                        📍 Local: {item.ppu_locais}
-                                    </span>
+                                {(item.ppu_qtd > 0 || (item.recibos_incorporados || []).some((row) => row.destino_estoque === 'PPU')) && (
+                                    <div className="mt-2 w-full md:w-[23rem] space-y-1.5">
+                                        {(item.ppu_detalhes || []).map((saldo, saldoIndex) => (
+                                            <div key={`${saldo.origem_saldo}-${saldo.recebimento_item_id || saldoIndex}`} className={`text-[10px] sm:text-[11px] font-black px-2.5 py-2 rounded-lg border ${saldo.origem_saldo === 'RECIBO_PENDENTE' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>
+                                                <span>{formatQuantity(saldo.quantidade)} un • {saldo.origem_saldo === 'RECIBO_PENDENTE' ? simplifyReceiptLocation(saldo.localizacao, saldo.numero_recibo) : saldo.localizacao}</span>
+                                                {saldo.origem_saldo === 'RECIBO_PENDENTE'
+                                                    ? <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} — aguardando incorporação ao inventário oficial</span>
+                                                    : saldo.origem_saldo === 'PPU_CUSTODIA_EXTERNA'
+                                                        ? <span className="block mt-0.5">Custódia PPU • localização física em caixa no CEIMSPA</span>
+                                                        : <span className="block mt-0.5">Inventário oficial do PPU</span>}
+                                                {saldo.sn ? <span className="block mt-0.5">SN: {saldo.sn}</span> : null}
+                                            </div>
+                                        ))}
+                                        {(item.recibos_incorporados || []).filter((row) => row.destino_estoque === 'PPU').map((row) => (
+                                            <div key={`ppu-incorporado-${row.recebimento_item_id}`} className="text-[10px] sm:text-[11px] font-black px-2.5 py-2 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800">
+                                                {row.incorporado_totalmente
+                                                    ? <>Item do Recibo {row.numero_recibo || 'sem número'} já incluído no estoque do PPU</>
+                                                    : <>Item do Recibo {row.numero_recibo || 'sem número'} parcialmente incluído no estoque do PPU</>}
+                                                {!row.incorporado_totalmente ? <span className="block mt-0.5">Incorporado: {formatQuantity(row.quantidade_incorporada)} de {formatQuantity(row.quantidade_recebida)} un • saldo: {formatQuantity(row.saldo_pendente)} un</span> : null}
+                                            </div>
+                                        ))}
+                                    </div>
                                 )}
+                                {Number(item.itens_fora_linha_qtd || 0) > 0 ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => { setAlvoIndisponiveis(item); setModalIndisponiveis(true); }}
+                                        className="mt-2 w-full md:w-[23rem] rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900 hover:bg-amber-100 transition-colors"
+                                    >
+                                        ITENS FORA DA LINHA DE VOO — {formatQuantity(item.itens_fora_linha_qtd)} UN
+                                    </button>
+                                ) : null}
                             </div>
                         </div>
 
@@ -252,8 +341,19 @@ export default function ConsultaItens() {
                                         <p className="text-2xl font-black text-purple-900">{item.ceimspa_qtd} <span className="text-sm">un</span></p>
                                         <div className="mt-2 space-y-1">
                                             {item.ceimspa_detalhes && item.ceimspa_detalhes.map((c, i) => (
-                                                <p key={i} className="text-sm font-bold text-purple-800 bg-purple-100/50 px-2 py-1 rounded-lg border border-purple-200/50">
-                                                    PI: {c.pi} | {c.sj} : <span className="font-black text-purple-900">{c.quantidade}</span>
+                                                <p key={c.id || i} className="text-sm font-bold text-purple-800 bg-purple-100/50 px-2 py-1 rounded-lg border border-purple-200/50">
+                                                    {c.origem_saldo === 'RECIBO_PENDENTE_CEIMSPA'
+                                                        ? <>Recibo {c.numero_recibo || 'sem número'} • {c.uf || 'local não informado'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
+                                                        : c.origem_saldo === 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'
+                                                            ? <>LOC {c.localizacao_fisica || c.uf || 'não informada'}{c.sn ? <> • SN {c.sn}</> : null}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
+                                                            : <>PI: {c.pi || 'N/I'} | {c.sj || 'N/I'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>}
+                                                </p>
+                                            ))}
+                                            {(item.recibos_incorporados || []).filter((row) => row.destino_estoque === 'CEIMSPA').map((row) => (
+                                                <p key={`ceimspa-incorporado-${row.recebimento_item_id}`} className="text-[11px] font-black text-emerald-800 bg-emerald-50 px-2 py-1.5 rounded-lg border border-emerald-200">
+                                                    {row.incorporado_totalmente
+                                                        ? <>Item do Recibo {row.numero_recibo || 'sem número'} já incluído no estoque do CEIMSPA</>
+                                                        : <>Item do Recibo {row.numero_recibo || 'sem número'} parcialmente incluído no estoque do CEIMSPA • {formatQuantity(row.quantidade_incorporada)}/{formatQuantity(row.quantidade_recebida)} incorporado(s)</>}
                                                 </p>
                                             ))}
                                         </div>
@@ -300,13 +400,20 @@ export default function ConsultaItens() {
                             </div>
 
                             <div className="bg-slate-50/80 rounded-xl p-4 border border-slate-200 flex flex-col shadow-sm">
-                                <span className="text-sm font-black text-slate-500 uppercase mb-3">5. Price List</span>
+                                <span className="text-sm font-black text-slate-500 uppercase mb-3">5. Banco de Preços</span>
                                 {item.price_list && item.price_list.length > 0 ? item.price_list.map((p, i) => (
                                     <div key={i} className="flex flex-col border-b border-slate-200/50 pb-3 last:border-0 last:pb-0">
                                         <span className="text-xl font-black text-emerald-700 break-words">
                                             £ {(Number(p.valor_unitario) || 0).toLocaleString('en-GB', {minimumFractionDigits: 2})} <span className="text-xs text-slate-500 font-bold uppercase tracking-wider ml-1">GBP</span>
                                         </span>
                                         <div className="mt-2 flex flex-col gap-1.5">
+                                            <div className="flex flex-wrap gap-1.5">
+                                                <span className="text-[10px] font-black uppercase tracking-wide bg-white border border-slate-200 rounded px-2 py-0.5 text-slate-600">{p.origem || 'PRICE_LIST'}</span>
+                                                {p.resolvido ? <span className="text-[10px] font-black uppercase tracking-wide bg-emerald-100 border border-emerald-200 rounded px-2 py-0.5 text-emerald-800">Referência usada</span> : null}
+                                            </div>
+                                            {p.documento_fonte ? <span className="text-xs font-bold text-slate-600">Fonte: {p.documento_fonte}</span> : null}{p.fornecedor ? <span className="text-xs font-bold text-slate-600">Fornecedor: {p.fornecedor}</span> : null}{p.origem === 'RFQ' && p.vigente === false ? <span className="text-[10px] font-black text-amber-700">PREÇO HISTÓRICO/VENCIDO — NÃO USADO COMO PREÇO ATUAL</span> : null}
+                                            {p.data_referencia ? <span className="text-xs font-semibold text-slate-500">Data: {p.data_referencia}</span> : null}
+                                            {p.pn_relacionado ? <span className="text-xs font-black text-blue-700">PN relacionado: {p.pn_relacionado}{p.tipo_relacao_pn ? ` • ${p.tipo_relacao_pn}` : ''}</span> : null}
                                             {p.lead_time > 0 ? (
                                                 <span className="text-sm font-bold text-slate-700 bg-slate-200/50 px-2 py-0.5 rounded border border-slate-300 w-fit">
                                                     Lead Time: {p.lead_time} dias
@@ -339,6 +446,9 @@ export default function ConsultaItens() {
                                                 {(r.documento_referencia || r.numero_wo) && <p className="text-[11px] font-black text-amber-800 uppercase">Doc/WO: {r.documento_referencia || r.numero_wo}</p>}
                                                 {r.nomenclatura && <p className="text-[11px] font-bold text-amber-800">Nome: {r.nomenclatura}</p>}
                                                 {r.status && <p className="text-[11px] font-bold text-amber-700">Status: {r.status}</p>}
+                                                {Number(r.valor_orcamento) > 0 && <p className="text-[11px] font-black text-emerald-700">Orçamento/ref.: {(r.moeda_orcamento || 'GBP').toUpperCase() === 'GBP' ? '£ ' : `${r.moeda_orcamento || ''} `}{Number(r.valor_orcamento).toLocaleString('en-GB', { minimumFractionDigits: 2 })} {r.origem_orcamento ? `• ${r.origem_orcamento}` : ''}</p>}
+                                                {r.fornecedor && <p className="text-[11px] font-bold text-amber-700">Fornecedor: {r.fornecedor}</p>}
+                                                {r.validade && <p className="text-[11px] font-bold text-amber-700">Validade: {r.validade}</p>}
                                                 {r.aeronave && <p className="text-[11px] font-bold text-amber-700">ANV: {r.aeronave}</p>}
                                                 {r.notification && <p className="text-[11px] font-bold text-amber-700">Notification: {r.notification}</p>}
                                                 {r.po_number && <p className="text-[11px] font-bold text-amber-700">PO: {r.po_number}</p>}
@@ -355,7 +465,7 @@ export default function ConsultaItens() {
                             </div>
                         </div>
 
-                        {((item.dicionario && item.dicionario.length > 0) || (item.alternativos && item.alternativos.length > 0) || (item.sb_referencias && item.sb_referencias.length > 0)) && (
+                        {((item.dicionario && item.dicionario.length > 0) || (item.manual_tecnico_aplicacoes && item.manual_tecnico_aplicacoes.length > 0) || (item.wtp_referencias && item.wtp_referencias.length > 0) || (item.alternativos && item.alternativos.length > 0) || (item.sb_referencias && item.sb_referencias.length > 0) || (item.rfq_evolucoes && item.rfq_evolucoes.length > 0)) && (
                             <div className="bg-slate-50/80 rounded-xl p-4 sm:p-5 border border-slate-200 mt-5 shadow-inner space-y-5">
                                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 flex-wrap border-b border-slate-200 pb-3">
                                     <span className="text-xs font-black text-slate-700 uppercase tracking-widest flex items-center gap-2">
@@ -365,36 +475,129 @@ export default function ConsultaItens() {
                                     <button
                                         onClick={() => {
                                             setAlvoAplicacoes(item.dicionario || []);
+                                            setAlvoManuaisTecnicos(item.manual_tecnico_aplicacoes || []);
+                                            setAlvoWtpReferencias(item.wtp_referencias || []);
                                             setFontesMapa(item.fontes_alternativos || []);
                                             setModalAplicacoes(true);
                                         }}
                                         className="w-full sm:w-auto bg-blue-600 text-white text-[10px] font-black px-4 py-2 rounded-lg hover:bg-blue-700 transition-all"
                                     >
-                                        VER MAPA ({item.dicionario?.length || 0})
+                                        VER MAPA ({(item.dicionario?.length || 0) + (item.manual_tecnico_aplicacoes?.length || 0) + (item.wtp_referencias?.length || 0)})
                                     </button>
                                 </div>
 
-                                {((item.dicionario && item.dicionario.length > 0) || (item.alternativos && item.alternativos.length > 0)) ? (
-                                    <div className="space-y-3">
-                                        <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Manual & equivalências</p>
+                                {item.rfq_evolucoes && item.rfq_evolucoes.length > 0 ? (
+                                    <div className="space-y-2">
+                                        <p className="text-[10px] font-black text-blue-700 uppercase tracking-wider">Evolução / fornecimento atual informado por RFQ</p>
+                                        {item.rfq_evolucoes.map((evo, evoIndex) => (
+                                            <div key={`${evo.pn_anterior}-${evo.pn_atual_fornecimento}-${evo.cotacao_numero || evoIndex}`} className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                                    <div className="font-black text-blue-950"><span className="font-mono">{evo.pn_anterior}</span> <span className="mx-2">→</span> <span className="font-mono">{evo.pn_atual_fornecimento}</span></div>
+                                                    <span className="text-[10px] font-black px-2 py-1 rounded border bg-white text-blue-700 border-blue-200">RFQ {evo.cotacao_numero || 'N/I'}</span>
+                                                </div>
+                                                <p className="text-xs font-bold text-blue-800 mt-1">PN atual de fornecimento informado por {evo.fornecedor || 'fornecedor'}. Isto não invalida automaticamente o uso técnico do PN anterior.</p>
+                                                {evo.relacao_pn_texto ? <p className="text-xs text-slate-600 mt-1 italic">{evo.relacao_pn_texto}</p> : null}
+                                                <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black">
+                                                    {Number(evo.valor_unitario) > 0 ? <span className={`px-2 py-1 rounded border ${evo.preco_vigente === false ? 'bg-slate-100 text-slate-600 border-slate-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>Preço RFQ: £ {Number(evo.valor_unitario).toLocaleString('en-GB', { minimumFractionDigits: 2 })} {evo.preco_vigente === false ? '• VENCIDO' : ''}</span> : null}
+                                                    {evo.validade ? <span className="px-2 py-1 rounded border bg-white text-slate-600 border-slate-200">Validade preço: {evo.validade}</span> : null}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : null}
+
+                                {((item.dicionario && item.dicionario.length > 0) || (item.alternativos && item.alternativos.length > 0) || (item.manual_tecnico_aplicacoes && item.manual_tecnico_aplicacoes.length > 0) || (item.wtp_referencias && item.wtp_referencias.length > 0)) ? (
+                                    <div className="space-y-4">
+                                        <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Manual, equivalências & referências WTP</p>
+
                                         {item.alternativos && item.alternativos.length > 0 ? (
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                                {item.alternativos.map((alt, idx) => (
-                                                    <div key={idx} className="bg-white border border-slate-200 p-3 rounded-xl shadow-sm hover:border-amber-300 transition-all">
-                                                        <div className="flex justify-between items-center mb-1 gap-2">
-                                                            <span className="font-mono text-sm font-black text-slate-800 break-all">{alt.pn}</span>
-                                                            <span className={`text-[10px] font-black px-2 py-0.5 rounded border whitespace-nowrap ${alt.ppu_qtd > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-50 text-slate-500'}`}>
-                                                                PPU: {alt.ppu_qtd}
+                                            <div className="space-y-2">
+                                                <p className="text-[10px] font-black text-emerald-700 uppercase tracking-wider">Alternativos / equivalências confirmados pelas regras do SISHA</p>
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                                                    {item.alternativos.map((alt, idx) => (
+                                                        <div key={idx} className="bg-white border border-slate-200 p-3 rounded-xl shadow-sm hover:border-amber-300 transition-all">
+                                                            <div className="flex justify-between items-center mb-1 gap-2">
+                                                                <span className="font-mono text-sm font-black text-slate-800 break-all">{alt.pn}</span>
+                                                                <span className={`text-[10px] font-black px-2 py-0.5 rounded border whitespace-nowrap ${alt.ppu_qtd > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-50 text-slate-500'}`}>
+                                                                    PPU: {alt.ppu_qtd}
+                                                                </span>
+                                                            </div>
+                                                            <span className="block text-[10px] font-bold text-slate-500">NSN: {alt.nsn || 'N/A'}</span>
+                                                            <span className="block text-[10px] font-bold text-slate-500 mt-2">
+                                                                Fonte: {(alt.fonte && alt.fonte.length > 0) ? alt.fonte.join(' | ') : 'MANUAL TÉCNICO'}
                                                             </span>
                                                         </div>
-                                                        <span className="block text-[10px] font-bold text-slate-500">NSN: {alt.nsn || 'N/A'}</span>
-                                                        <span className="block text-[10px] font-bold text-slate-500 mt-2">
-                                                            Fonte: {(alt.fonte && alt.fonte.length > 0) ? alt.fonte.join(' | ') : 'MANUAL TÉCNICO'}
-                                                        </span>
-                                                    </div>
-                                                ))}
+                                                    ))}
+                                                </div>
                                             </div>
-                                        ) : <p className="text-xs font-bold text-slate-400 italic">Nenhum alternativo listado.</p>}
+                                        ) : (
+                                            <p className="text-xs font-bold text-slate-400 italic">Nenhum alternativo confirmado pelas regras atuais.</p>
+                                        )}
+
+                                        {item.wtp_referencias && item.wtp_referencias.length > 0 ? (
+                                            <div className="space-y-2">
+                                                <p className="text-[10px] font-black text-amber-700 uppercase tracking-wider">Possíveis relações identificadas na WTP — validação obrigatória do CQ</p>
+                                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                                    {item.wtp_referencias.map((ref, idx) => (
+                                                        <div key={`${ref.manual_id}-${ref.pn_relacionado}-${ref.item_relacionado || idx}`} className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                                            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                                                                <div>
+                                                                    <p className="text-xs font-black text-amber-950 uppercase">
+                                                                        {ref.tipo_relacao === 'WTP_ITEM_VARIANT' ? 'Possível equivalência / variante WTP' : ref.tipo_relacao === 'WTP_TEXT_REFERENCE' ? 'Referência textual WTP' : 'Referência técnica WTP'}
+                                                                    </p>
+                                                                    <p className="text-sm font-black text-slate-900 mt-1">
+                                                                        PN relacionado: <span className="font-mono">{ref.pn_relacionado}</span>
+                                                                    </p>
+                                                                </div>
+                                                                <span className="text-[10px] font-black px-2 py-1 rounded border bg-white text-amber-800 border-amber-200 whitespace-nowrap">
+                                                                    {ref.manual_codigo || ref.tipo_manual || 'WTP'}
+                                                                </span>
+                                                            </div>
+
+                                                            {ref.tipo_relacao === 'WTP_ITEM_VARIANT' ? (
+                                                                <p className="text-xs font-bold text-amber-900 mt-2">
+                                                                    ITEM {ref.item_consultado || 'N/I'} ↔ {ref.item_relacionado || 'N/I'}{ref.fig ? ` • FIG ${ref.fig}` : ''}
+                                                                    {(ref.usage_code_consultado || ref.usage_code_relacionado) ? ` • Usage ${ref.usage_code_consultado || 'N/I'} ↔ ${ref.usage_code_relacionado || 'N/I'}` : ''}.
+                                                                    {' '}A WTP relaciona os itens como variantes da mesma posição técnica, porém isto não confirma automaticamente intercambialidade.
+                                                                </p>
+                                                            ) : (
+                                                                <p className="text-xs font-bold text-amber-900 mt-2">
+                                                                    O referido item é citado na WTP como referência ao PN {ref.pn_relacionado}, mas isso não significa que seja alternativo ou intercambiável.
+                                                                </p>
+                                                            )}
+                                                            <p className="text-xs font-black text-red-700 mt-2 uppercase">Consulte o CQ antes de qualquer substituição.</p>
+                                                            {ref.page_ref ? <p className="text-[10px] font-bold text-slate-500 mt-1">Ref.: {ref.page_ref}</p> : null}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : null}
+
+                                        {item.manual_tecnico_aplicacoes && item.manual_tecnico_aplicacoes.length > 0 ? (
+                                            <div className="space-y-2">
+                                                <p className="text-[10px] font-black text-purple-700 uppercase tracking-wider">Aplicação documentada em WTP / Manual técnico</p>
+                                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                                    {item.manual_tecnico_aplicacoes.map((app, idx) => (
+                                                        <div key={`${app.manual_id}-${app.fig}-${app.item}-${idx}`} className="rounded-xl border border-purple-200 bg-purple-50 p-3">
+                                                            <div className="flex items-start justify-between gap-2">
+                                                                <div>
+                                                                    <p className="font-black text-purple-950">{app.manual_codigo || app.tipo_manual || 'Manual técnico'}</p>
+                                                                    <p className="text-xs font-bold text-purple-800">FIG {app.fig || '1'} • ITEM {app.item || 'N/I'}</p>
+                                                                </div>
+                                                                <span className="text-[10px] font-black px-2 py-1 rounded border bg-white text-purple-700 border-purple-200">{app.tipo_manual || 'MANUAL'}</span>
+                                                            </div>
+                                                            <p className="text-xs font-bold text-slate-700 mt-2">{app.nomenclatura || 'Descrição não informada'}</p>
+                                                            {app.usage_code ? <p className="text-[11px] font-black text-slate-600 mt-1">Usage Code: {app.usage_code}</p> : null}
+                                                            {app.units_per_assy ? <p className="text-[11px] font-black text-slate-600 mt-1">Units/Assy: {app.units_per_assy}</p> : null}
+                                                            {app.ata_dmc ? <p className="text-[11px] font-bold text-slate-500">ATA/DMC: {app.ata_dmc}</p> : null}
+                                                            {app.revisao ? <p className="text-[11px] font-bold text-slate-500">Revisão: {app.revisao}</p> : null}
+                                                            {app.page_ref ? <p className="text-[11px] font-bold text-slate-500">Ref.: {app.page_ref}</p> : null}
+                                                            <p className="text-[10px] font-black text-purple-700 mt-2 uppercase">Referência técnica — não representa estoque</p>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : null}
                                     </div>
                                 ) : null}
 
@@ -447,7 +650,7 @@ export default function ConsultaItens() {
                     <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden border-2 border-blue-600">
                         <div className="bg-slate-800 p-4 sm:p-5 flex justify-between items-center border-b-4 border-blue-600 gap-4">
                             <h3 className="text-sm sm:text-lg font-black text-white uppercase tracking-wider flex items-center gap-3">
-                                Mapa de Instalação (DMC)
+                                Mapa de Instalação / Referências Técnicas
                             </h3>
                             <button onClick={() => setModalAplicacoes(false)} className="text-slate-400 hover:text-red-400 transition-colors shrink-0">
                                 <svg className="w-7 h-7 sm:w-8 sm:h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -457,29 +660,79 @@ export default function ConsultaItens() {
                         </div>
 
                         <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-slate-50 space-y-4">
-                            {alvoAplicacoes.length > 0 ? alvoAplicacoes.map((app, i) => (
-                                <div key={i} className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 hover:border-blue-300 transition-all">
-                                    <div className="flex-1 min-w-0">
-                                        <p className="text-sm sm:text-base font-black text-slate-800 uppercase break-words">📍 {app.techname || 'APLICAÇÃO GERAL'}</p>
-                                        <p className="text-xs sm:text-sm font-bold text-slate-500 mt-1 uppercase">{app.nomenclatura}</p>
-                                    </div>
+                            {alvoAplicacoes.length > 0 ? (
+                                <div className="space-y-3">
+                                    <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Manual / DMC</p>
+                                    {alvoAplicacoes.map((app, i) => (
+                                        <div key={`dmc-${i}`} className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 hover:border-blue-300 transition-all">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm sm:text-base font-black text-slate-800 uppercase break-words">📍 {app.techname || 'APLICAÇÃO GERAL'}</p>
+                                                <p className="text-xs sm:text-sm font-bold text-slate-500 mt-1 uppercase">{app.nomenclatura}</p>
+                                            </div>
 
-                                    <div className="grid grid-cols-3 gap-2 w-full md:w-auto md:flex md:gap-2">
-                                        <span className="bg-blue-50 text-blue-800 px-3 py-2 rounded-lg text-[10px] font-black border border-blue-200 flex flex-col items-center">
-                                            DMC<span className="font-mono text-sm sm:text-base mt-0.5">{app.dmc}</span>
-                                        </span>
-                                        <span className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg text-[10px] font-black border border-slate-200 flex flex-col items-center">
-                                            ITEM<span className="font-mono text-sm sm:text-base mt-0.5">{app.item_num}</span>
-                                        </span>
-                                        <span className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg text-[10px] font-black border border-slate-200 flex flex-col items-center">
-                                            SUB<span className="font-mono text-sm sm:text-base mt-0.5">{app.sub_item}</span>
-                                        </span>
-                                    </div>
+                                            <div className="grid grid-cols-3 gap-2 w-full md:w-auto md:flex md:gap-2">
+                                                <span className="bg-blue-50 text-blue-800 px-3 py-2 rounded-lg text-[10px] font-black border border-blue-200 flex flex-col items-center">
+                                                    DMC<span className="font-mono text-sm sm:text-base mt-0.5">{app.dmc}</span>
+                                                </span>
+                                                <span className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg text-[10px] font-black border border-slate-200 flex flex-col items-center">
+                                                    ITEM<span className="font-mono text-sm sm:text-base mt-0.5">{app.item_num}</span>
+                                                </span>
+                                                <span className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg text-[10px] font-black border border-slate-200 flex flex-col items-center">
+                                                    SUB<span className="font-mono text-sm sm:text-base mt-0.5">{app.sub_item}</span>
+                                                </span>
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
-                            )) : (
+                            ) : null}
+
+                            {alvoManuaisTecnicos.length > 0 ? (
+                                <div className="space-y-3">
+                                    <p className="text-[11px] font-black text-purple-700 uppercase tracking-widest">WTP / Manual técnico</p>
+                                    {alvoManuaisTecnicos.map((app, i) => (
+                                        <div key={`wtp-${app.manual_id}-${app.item}-${i}`} className="bg-white p-4 sm:p-5 rounded-xl border border-purple-200 shadow-sm">
+                                            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="text-sm sm:text-base font-black text-purple-950 uppercase break-words">{app.manual_codigo || app.tipo_manual || 'MANUAL TÉCNICO'}</p>
+                                                    <p className="text-xs sm:text-sm font-bold text-slate-600 mt-1">{app.nomenclatura || 'Descrição não informada'}</p>
+                                                    {app.page_ref ? <p className="text-[11px] font-bold text-slate-500 mt-1">Ref.: {app.page_ref}</p> : null}
+                                                </div>
+                                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                                    <span className="bg-purple-50 text-purple-800 px-3 py-2 rounded-lg text-[10px] font-black border border-purple-200 flex flex-col items-center">FIG<span className="font-mono text-sm mt-0.5">{app.fig || '1'}</span></span>
+                                                    <span className="bg-purple-50 text-purple-800 px-3 py-2 rounded-lg text-[10px] font-black border border-purple-200 flex flex-col items-center">ITEM<span className="font-mono text-sm mt-0.5">{app.item || 'N/I'}</span></span>
+                                                    <span className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg text-[10px] font-black border border-slate-200 flex flex-col items-center">USAGE<span className="font-mono text-sm mt-0.5">{app.usage_code || 'N/I'}</span></span>
+                                                    <span className="bg-slate-100 text-slate-700 px-3 py-2 rounded-lg text-[10px] font-black border border-slate-200 flex flex-col items-center">QTY<span className="font-mono text-sm mt-0.5">{app.units_per_assy || 'N/I'}</span></span>
+                                                </div>
+                                            </div>
+                                            <p className="text-[10px] font-black text-purple-700 mt-3 uppercase">Fonte técnica — não representa estoque nem confirma alternativo</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : null}
+
+                            {alvoWtpReferencias.length > 0 ? (
+                                <div className="space-y-3">
+                                    <p className="text-[11px] font-black text-amber-700 uppercase tracking-widest">Relações WTP pendentes de validação do CQ</p>
+                                    {alvoWtpReferencias.map((ref, i) => (
+                                        <div key={`wtp-ref-${ref.manual_id}-${ref.pn_relacionado}-${i}`} className="bg-amber-50 p-4 rounded-xl border border-amber-200 shadow-sm">
+                                            <p className="text-sm font-black text-amber-950">
+                                                PN relacionado: <span className="font-mono">{ref.pn_relacionado}</span>
+                                            </p>
+                                            {ref.tipo_relacao === 'WTP_ITEM_VARIANT' ? (
+                                                <p className="text-xs font-bold text-amber-900 mt-1">{ref.manual_codigo || 'WTP'} • FIG {ref.fig || '1'} • ITEM {ref.item_consultado || 'N/I'} ↔ {ref.item_relacionado || 'N/I'} • possível variante/equivalência documental.</p>
+                                            ) : (
+                                                <p className="text-xs font-bold text-amber-900 mt-1">O referido item é citado na {ref.manual_codigo || 'WTP'} como referência ao PN {ref.pn_relacionado}, mas isso não significa que seja alternativo ou intercambiável.</p>
+                                            )}
+                                            <p className="text-xs font-black text-red-700 mt-2 uppercase">Consulte o CQ antes de qualquer substituição.</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : null}
+
+                            {alvoAplicacoes.length === 0 && alvoManuaisTecnicos.length === 0 ? (
                                 <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
-                                    <p className="text-sm sm:text-base font-black text-slate-800 uppercase">Sem mapa técnico no manual</p>
-                                    <p className="text-sm font-bold text-slate-500">Este item foi encontrado apenas na biblioteca complementar de PN alternativos.</p>
+                                    <p className="text-sm sm:text-base font-black text-slate-800 uppercase">Sem mapa técnico documental</p>
+                                    <p className="text-sm font-bold text-slate-500">Este item foi encontrado apenas em fontes complementares de relacionamento.</p>
                                     <div className="flex flex-wrap gap-2 pt-2">
                                         {(fontesMapa || []).length > 0 ? fontesMapa.map((fonte, i) => (
                                             <span key={i} className="bg-amber-50 text-amber-800 px-3 py-2 rounded-lg text-[10px] font-black border border-amber-200 uppercase">{fonte}</span>
@@ -488,12 +741,89 @@ export default function ConsultaItens() {
                                         )}
                                     </div>
                                 </div>
-                            )}
+                            ) : null}
                         </div>
 
                         <div className="bg-slate-100 p-4 sm:p-5 border-t border-slate-200 flex justify-end">
                             <button onClick={() => setModalAplicacoes(false)} className="w-full sm:w-auto bg-slate-800 text-white px-8 py-3 rounded-xl text-sm font-black hover:bg-slate-900 transition-all shadow-sm">
                                 FECHAR MAPA
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {modalIndisponiveis && alvoIndisponiveis && (
+                <div className="fixed inset-0 z-[125] flex items-center justify-center p-3 sm:p-4 bg-slate-900/80 backdrop-blur-sm animate-fade-in">
+                    <div className="w-full max-w-4xl bg-white rounded-3xl border border-slate-200 shadow-2xl overflow-hidden">
+                        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-start sm:items-center justify-between gap-4">
+                            <div>
+                                <h3 className="text-lg sm:text-xl font-black text-slate-900 uppercase">Itens fora da linha de voo</h3>
+                                <p className="text-xs sm:text-sm font-bold text-slate-500">
+                                    {alvoIndisponiveis.pn} • localização física preservada • não contabilizados no card PPU.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { setModalIndisponiveis(false); setAlvoIndisponiveis(null); }}
+                                className="p-2 rounded-xl text-slate-500 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        <div className="p-4 sm:p-6 max-h-[75vh] overflow-auto custom-scrollbar space-y-3">
+                            {(alvoIndisponiveis.itens_fora_linha || []).map((row, index) => (
+                                <div key={row.id || `${row.pn}-${row.sn || index}`} className="rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
+                                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                                        <div>
+                                            <p className="text-sm font-black text-slate-900">{row.nomenclatura || alvoIndisponiveis.nomenclatura || 'Nomenclatura não informada'}</p>
+                                            <p className="mt-1 text-xs font-bold text-slate-600">PN <span className="font-mono text-slate-900">{row.pn}</span>{row.sn ? <> • SN <span className="font-mono text-slate-900">{row.sn}</span></> : ' • SN não informado'}</p>
+                                            <p className="mt-1 text-xs font-black text-amber-900">Localização física: {row.localizacao_fisica || 'NÃO DEFINIDO'}</p>
+                                        </div>
+                                        <span className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-black text-white shrink-0">{formatQuantity(row.quantidade)} un</span>
+                                    </div>
+
+                                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                                            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Contabiliza em</p>
+                                            <p className="text-xs font-black text-slate-800">{LOCATION_DESTINATION_LABELS[row.contabiliza_em] || row.contabiliza_em || 'Fora da linha de voo'}</p>
+                                        </div>
+                                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                                            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Situação operacional</p>
+                                            <p className="text-xs font-black text-slate-800">{OPERATIONAL_SITUATION_LABELS[row.situacao_operacional] || row.situacao_operacional || 'A confirmar'}</p>
+                                        </div>
+                                    </div>
+
+                                    {row.observacao_classificacao ? (
+                                        <div className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700">
+                                            <span className="font-black">Observação:</span> {row.observacao_classificacao}
+                                        </div>
+                                    ) : null}
+
+                                    {(row.evidencias || []).length > 0 ? (
+                                        <div className="mt-2 space-y-1.5">
+                                            <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Evidências vinculadas pelo SN</p>
+                                            {row.evidencias.map((evidencia, evidenceIndex) => (
+                                                <div key={`${evidencia.documento || 'evidencia'}-${evidenceIndex}`} className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-900">
+                                                    {evidencia.documento || evidencia.origem || 'Registro técnico'}
+                                                    {evidencia.status ? ` • ${evidencia.status}` : ''}
+                                                    {evidencia.tipo ? ` • ${evidencia.tipo}` : ''}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="bg-slate-100 p-4 sm:p-5 border-t border-slate-200 flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => { setModalIndisponiveis(false); setAlvoIndisponiveis(null); }}
+                                className="w-full sm:w-auto bg-slate-800 text-white px-8 py-3 rounded-xl text-sm font-black hover:bg-slate-900 transition-all shadow-sm"
+                            >
+                                FECHAR
                             </button>
                         </div>
                     </div>
@@ -518,7 +848,7 @@ export default function ConsultaItens() {
                         </div>
 
                         <div className="p-4 sm:p-6 space-y-5 max-h-[80vh] overflow-auto">
-                            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto_auto] gap-3 items-end">
+                            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto_auto_auto] gap-3 items-end">
                                 <label className="space-y-2">
                                     <span className="text-xs uppercase tracking-[0.2em] text-slate-400 font-black">Planilha</span>
                                     <input
@@ -546,6 +876,26 @@ export default function ConsultaItens() {
                                 >
                                     {loteExportando ? <LoaderCircle size={16} className="animate-spin" /> : <Download size={16} />} EXPORTAR EXCEL
                                 </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setQuoteOpen(true)}
+                                    disabled={!lotePreview || loteMissingQuoteItems.length === 0}
+                                    className="px-5 py-3 rounded-xl bg-amber-500 text-slate-950 font-black hover:bg-amber-600 disabled:opacity-50 inline-flex items-center justify-center gap-2"
+                                >
+                                    <FileQuestion size={16} /> COTAÇÃO {loteMissingQuoteItems.length > 0 ? `(${loteMissingQuoteItems.length})` : ''}
+                                </button>
+                            </div>
+
+                            <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
+                                <p className="font-black uppercase tracking-wide">Como deve estar a planilha</p>
+                                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 font-bold">
+                                    <p><b>PN obrigatório:</b> PN, P/N, PART NUMBER, PART NO, NÚMERO DA PEÇA ou CÓDIGO.</p>
+                                    <p><b>Quantidade opcional:</b> QTD, QTDE, QTE, QTY, QUANTITY, NECESSIDADE ou DEMANDA. Sem essa coluna, o sistema considera 1 unidade por linha.</p>
+                                    <p><b>NSN opcional:</b> NSN, NATO STOCK NUMBER ou NIIN.</p>
+                                    <p><b>Nomenclatura opcional:</b> NOMENCLATURA, NOME, DESCRIÇÃO, DESCRIPTION, ITEM ou MATERIAL.</p>
+                                </div>
+                                <p className="mt-2 text-xs font-black">A ordem das colunas não importa e colunas adicionais são permitidas. Formatos aceitos: XLSX, XLS, CSV e ODS.</p>
                             </div>
 
                             {arquivoLote ? <p className="text-sm font-bold text-slate-500 break-all">Arquivo atual: {arquivoLote.name}</p> : null}
@@ -559,12 +909,12 @@ export default function ConsultaItens() {
                                             <p className="text-2xl font-black text-slate-900 mt-2">{lotePreview.summary.linhas_base}</p>
                                         </div>
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                                            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">PPU + CeIMSPA</p>
-                                            <p className="text-2xl font-black text-slate-900 mt-2">{(lotePreview.summary.coberto_ppu || 0) + (lotePreview.summary.coberto_ceimspa || 0)}</p>
+                                            <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">PPU + Recibos + CeIMSPA</p>
+                                            <p className="text-2xl font-black text-slate-900 mt-2">{(lotePreview.summary.disponivel_ppu ?? lotePreview.summary.coberto_ppu ?? 0) + (lotePreview.summary.disponivel_ceimspa ?? lotePreview.summary.coberto_ceimspa ?? 0)}</p>
                                         </div>
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                                             <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">ODA + ODC</p>
-                                            <p className="text-2xl font-black text-slate-900 mt-2">{(lotePreview.summary.coberto_oda || 0) + (lotePreview.summary.coberto_odc || 0)}</p>
+                                            <p className="text-2xl font-black text-slate-900 mt-2">{(lotePreview.summary.disponivel_oda ?? lotePreview.summary.coberto_oda ?? 0) + (lotePreview.summary.disponivel_odc ?? lotePreview.summary.coberto_odc ?? 0)}</p>
                                         </div>
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                                             <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Comprar</p>
@@ -599,7 +949,7 @@ export default function ConsultaItens() {
                                     </div>
 
                                     <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                                        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-black text-slate-900 uppercase text-sm">Resumo da cobertura</div>
+                                        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 font-black text-slate-900 uppercase text-sm">Resumo por fonte</div>
                                         <div className="overflow-auto">
                                             <table className="min-w-full text-sm">
                                                 <thead className="bg-slate-100 text-slate-700 uppercase text-[11px] tracking-wider">
@@ -614,7 +964,7 @@ export default function ConsultaItens() {
                                                         ['01 • PPU', lotePreview.sections.ppu?.length || 0],
                                                         ['02 • CEIMSPA', lotePreview.sections.ceimspa?.length || 0],
                                                         ['03 • ODA', lotePreview.sections.oda?.length || 0],
-                                                        ['04 • PRICE LIST', lotePreview.sections.pricelist?.length || 0],
+                                                        ['04 • BANCO DE PREÇOS', lotePreview.sections.pricelist?.length || 0],
                                                         ['05 • ODC', lotePreview.sections.odc?.length || 0],
                                                         ['06 • COMPRAR', lotePreview.sections.comprar?.length || 0],
                                                     ].map(([etapa, total]) => (
@@ -633,7 +983,7 @@ export default function ConsultaItens() {
                                       ['01 • PPU', lotePreview.sections.ppu || [], 'coverage'],
                                       ['02 • CEIMSPA', lotePreview.sections.ceimspa || [], 'coverage'],
                                       ['03 • ODA', lotePreview.sections.oda || [], 'coverage'],
-                                      ['04 • PRICE LIST', lotePreview.sections.pricelist || [], 'value'],
+                                      ['04 • BANCO DE PREÇOS', lotePreview.sections.pricelist || [], 'value'],
                                       ['05 • ODC', lotePreview.sections.odc || [], 'coverage'],
                                       ['06 • COMPRAR', lotePreview.sections.comprar || [], 'value'],
                                     ].map(([title, rows, type]) => (
@@ -670,8 +1020,8 @@ export default function ConsultaItens() {
                                                   <th className="p-3 text-left">PN</th>
                                                   <th className="p-3 text-left">Nomenclatura</th>
                                                   <th className="p-3 text-left">Necessidade</th>
-                                                  {type === 'coverage' ? <th className="p-3 text-left">Cobertura</th> : null}
-                                                  <th className="p-3 text-left">Saldo</th>
+                                                  {type === 'coverage' ? <th className="p-3 text-left">Disponível</th> : null}
+                                                  <th className="p-3 text-left">Faltam</th>
                                                   <th className="p-3 text-left">Referência</th>
                                                   {type === 'value' ? <th className="p-3 text-left">GBP</th> : null}
                                                 </tr>
@@ -687,8 +1037,8 @@ export default function ConsultaItens() {
                                                       <div className="text-xs text-slate-500 font-semibold">NSN: {row.nsn || '—'}</div>
                                                     </td>
                                                     <td className="p-3 font-black text-slate-900">{row.necessidade_total}</td>
-                                                    {type === 'coverage' ? <td className="p-3 font-black text-emerald-700">{row.cobertura_etapa}</td> : null}
-                                                    <td className="p-3 font-black text-amber-700">{row.saldo_apos_etapa}</td>
+                                                    {type === 'coverage' ? <td className="p-3 font-black text-emerald-700">{row.disponivel_etapa ?? row.cobertura_etapa}</td> : null}
+                                                    <td className="p-3 font-black text-amber-700">{row.faltam_apos_etapa ?? row.saldo_apos_etapa}</td>
                                                     <td className="p-3 text-xs font-semibold text-slate-600 whitespace-pre-wrap">{row.documento_referencia || row.observacao || '—'}</td>
                                                     {type === 'value' ? <td className="p-3 font-black text-slate-900"><div>{row.valor_unitario_gbp != null ? `£ ${Number(row.valor_unitario_gbp).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` : '—'}</div><div className="text-xs text-slate-500">{row.valor_total_gbp != null ? `£ ${Number(row.valor_total_gbp).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` : '—'}</div></td> : null}
                                                   </tr>
@@ -705,6 +1055,14 @@ export default function ConsultaItens() {
                     </div>
                 </div>
             )}
+
+            <CotacaoRequestModal
+                open={quoteOpen}
+                onClose={() => setQuoteOpen(false)}
+                token={token}
+                source="PESQUISA_EM_LOTE"
+                items={loteMissingQuoteItems}
+            />
         </div>
     );
 }

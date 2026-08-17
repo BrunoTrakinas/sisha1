@@ -1,6 +1,6 @@
 const supabase = require('../config/supabaseClient');
 
-async function startImportLog({ tipoArquivo, nomeArquivo, uploadedByEmail, uploadedByRole, rota }) {
+async function startImportLog({ tipoArquivo, nomeArquivo, uploadedByEmail, uploadedByRole, rota, requestId, arquivo = null }) {
   const payload = {
     tipo_arquivo: tipoArquivo || 'desconhecido',
     nome_arquivo: nomeArquivo || null,
@@ -10,7 +10,11 @@ async function startImportLog({ tipoArquivo, nomeArquivo, uploadedByEmail, uploa
     linhas_importadas: 0,
     linhas_ignoradas: 0,
     mensagem: 'Processando importação...',
-    detalhes: rota ? { rota } : {},
+    detalhes: {
+      ...(rota ? { rota } : {}),
+      ...(requestId ? { request_id: String(requestId) } : {}),
+      ...(arquivo ? { arquivo } : {}),
+    },
     uploaded_by_email: uploadedByEmail || null,
     uploaded_by_role: uploadedByRole || null,
   };
@@ -76,7 +80,18 @@ function recordAuditIssue(req, issue) {
 
 function setAuditSummary(req, summary = {}) {
   const state = ensureAuditState(req);
-  state.summary = { ...state.summary, ...summary };
+  const previousDetails = state.summary?.detalhes && typeof state.summary.detalhes === 'object'
+    ? state.summary.detalhes
+    : {};
+  const nextDetails = summary?.detalhes && typeof summary.detalhes === 'object'
+    ? summary.detalhes
+    : null;
+
+  state.summary = {
+    ...state.summary,
+    ...summary,
+    ...(nextDetails ? { detalhes: { ...previousDetails, ...nextDetails } } : {}),
+  };
 }
 
 module.exports = {

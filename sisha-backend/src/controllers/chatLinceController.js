@@ -5,6 +5,7 @@ const {
   analyzeDocumentWithAi,
   answerConsultQuestion,
   saveDocumentAnalysis,
+  getDocumentAnalysisById,
   confirmDocumentAnalysis,
   rejectDocumentAnalysis,
   listHelpdeskTickets,
@@ -12,10 +13,22 @@ const {
   confirmarApelidoSugerido,
   extractTextFromImagesWithAi,
   compactText,
+  hasStrongReceiptSignature,
+  extractReceiptNumber,
+  normalizeReceiptNumber,
 } = require('../services/chatLinceService');
 const { buildActionPlan, executeActionPlan } = require('../services/chatLinceActionService');
-const { reindexChatLinceDocuments } = require('../services/chatLinceRagService');
+const { inspectUserPrompt } = require('../services/chatLinceSafetyGateway');
+const {
+  inspectReauth,
+  recordReauthFailure,
+  clearReauthFailures,
+} = require('../services/chatLinceAbuseGuardService');
+const { reindexChatLinceKnowledgeBase } = require('../services/chatLinceRagService');
 const { registrarAuditoria } = require('../utils/auditLogger');
+const { extractLegacyDocText } = require('../services/receiptDocumentParser');
+const { extractOfficeDocument } = require('../utils/officeDocumentText');
+const { publicChatLinceSecurityReadiness } = require('../services/chatLinceSecurityReadinessService');
 
 function extractJpegImagesFromPdfBuffer(buffer, maxImages = 8) {
   const images = [];
@@ -60,6 +73,36 @@ async function extractTextFromFile(file, tipoDocumento = '') {
   const name = String(file.originalname || '').toLowerCase();
   const mime = String(file.mimetype || '').toLowerCase();
 
+  if (mime.startsWith('image/') || /\.(jpg|jpeg|png|webp)$/i.test(name)) {
+    const imageMime = mime.startsWith('image/')
+      ? mime
+      : name.endsWith('.png')
+        ? 'image/png'
+        : name.endsWith('.webp')
+          ? 'image/webp'
+          : 'image/jpeg';
+    const visual = await extractTextFromImagesWithAi({
+      images: [{
+        mime: imageMime,
+        base64: file.buffer.toString('base64'),
+        bytes: file.buffer.length,
+      }],
+      fileName: file.originalname || 'recibo-imagem',
+      tipoDocumento,
+    });
+
+    if (!visual.ok) {
+      throw publicError(`A leitura visual da imagem não conseguiu concluir: ${visual.reason || 'sem detalhe'}.`);
+    }
+
+    return [
+      '[EXTRAÇÃO VISUAL POR IA - IMAGEM]',
+      `Modelo: ${visual.model || 'não informado'}`,
+      '',
+      visual.text,
+    ].join('\n');
+  }
+
   if (mime.includes('pdf') || name.endsWith('.pdf')) {
     const parsed = await pdfParse(file.buffer).catch(() => ({ text: '' }));
     const parsedText = compactText(parsed.text || '', 50000);
@@ -88,26 +131,111 @@ async function extractTextFromFile(file, tipoDocumento = '') {
     ].join('\n');
   }
 
+
+
+  if (/\.(docx|odt)$/i.test(name)) {
+    const office = extractOfficeDocument(file.buffer, file.originalname || name);
+    const officeText = compactText(office.text || '', 50000);
+    if (officeText && officeText.length >= 30) {
+      return [
+        `[EXTRAÇÃO ESTRUTURAL ${office.format}]`,
+        '',
+        officeText,
+      ].join('\n');
+    }
+
+    if (office.images?.length) {
+      const visual = await extractTextFromImagesWithAi({
+        images: office.images,
+        fileName: file.originalname || `documento.${office.format.toLowerCase()}`,
+        tipoDocumento,
+      });
+      if (visual.ok) {
+        return [
+          `[EXTRAÇÃO VISUAL POR IA - ${office.format} SEM TEXTO SUFICIENTE]`,
+          `Modelo: ${visual.model || 'não informado'}`,
+          '',
+          visual.text,
+        ].join('\n');
+      }
+    }
+
+    throw publicError(`${office.format} sem texto legível suficiente. Se o documento for uma digitalização, exporte-o como PDF ou imagem nítida e tente novamente.`);
+  }
+
+  if (name.endsWith('.doc')) {
+    try {
+      return extractLegacyDocText(file.buffer);
+    } catch (error) {
+      throw publicError(`Não foi possível ler o DOC legado: ${error.message || 'estrutura incompatível'}.`);
+    }
+  }
+
   if (/\.(xlsx|xls|csv|ods)$/i.test(name) || mime.includes('spreadsheet') || mime.includes('excel') || mime.includes('csv')) {
     const workbook = xlsx.read(file.buffer, { type: 'buffer', cellDates: false, raw: false });
+    const maxRowsPerSheet = Math.min(Math.max(Number(process.env.CHAT_LINCE_MAX_ROWS_PER_SHEET || 1200), 100), 5000);
     return workbook.SheetNames.map((sheetName) => {
       const sheet = workbook.Sheets[sheetName];
       const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
-      const renderedRows = rows.slice(0, 250).map((row) => row.map((cell) => String(cell || '').trim()).join(' | '));
-      return `ABA: ${sheetName}\n${renderedRows.join('\n')}`;
+      const selected = rows.length <= maxRowsPerSheet
+        ? rows
+        : [...rows.slice(0, maxRowsPerSheet - 100), ...rows.slice(-100)];
+      const renderedRows = selected.map((row) => row.map((cell) => String(cell || '').trim()).join(' | '));
+      const warning = rows.length > selected.length
+        ? `\n[ATENÇÃO: aba com ${rows.length} linhas; ${selected.length} linhas representativas foram enviadas à IA. A importação operacional deve usar o arquivo original.]`
+        : '';
+      return `ABA: ${sheetName} | LINHAS: ${rows.length}\n${renderedRows.join('\n')}${warning}`;
     }).join('\n\n');
   }
 
-  return file.buffer.toString('utf8');
+  if (/\.(txt|json)$/i.test(name) || mime.startsWith('text/') || mime.includes('json')) {
+    return compactText(file.buffer.toString('utf8'), 50000);
+  }
+
+  throw publicError('Formato não reconhecido para leitura documental. Use PDF, JPG/JPEG, PNG, WEBP, XLSX, XLS, CSV, ODS, DOC, DOCX, ODT, TXT ou JSON.');
 }
+
+
+exports.securityReadiness = async (_req, res) => {
+  try {
+    return res.status(200).json({
+      status: 'success',
+      data: publicChatLinceSecurityReadiness(),
+    });
+  } catch (error) {
+    console.error('[Chat Lince] Falha no security readiness:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Falha ao avaliar o readiness de segurança do Chat Lince.',
+    });
+  }
+};
 
 exports.perguntar = async (req, res) => {
   try {
-    const pergunta = String(req.body?.pergunta || '').trim();
-    if (!pergunta) {
-      return res.status(400).json({ status: 'error', message: 'Informe uma pergunta para o Chat Lince.' });
+    const perguntaRecebida = String(req.body?.pergunta || '');
+    const safety = inspectUserPrompt(perguntaRecebida);
+
+    if (!safety.allowed) {
+      await registrarAuditoria({
+        req,
+        action: 'CHAT_LINCE_SAFETY_GATE_BLOCK',
+        entity: 'CHAT_LINCE',
+        entityId: safety.code,
+        summary: `${req.user?.email || 'Usuário'} teve uma entrada bloqueada pelo gateway de segurança do Chat Lince.`,
+        details: { safety_code: safety.code, prompt_length: perguntaRecebida.length },
+        level: 'WARN',
+        visibility: 'GOD',
+      }).catch(() => null);
+
+      return res.status(400).json({
+        status: 'error',
+        code: `CHAT_LINCE_${safety.code}`,
+        message: safety.publicMessage,
+      });
     }
 
+    const pergunta = safety.normalized;
     const actionPlan = await buildActionPlan({ pergunta, user: req.user });
     if (actionPlan) {
       await registrarAuditoria({
@@ -235,20 +363,186 @@ exports.analisarDocumento = async (req, res) => {
   }
 };
 
+
+function normalizeReceiptFileName(value = '') {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\(\d+\)(?=\.[A-Z0-9]+$)/, '')
+    .replace(/\s+/g, ' ');
+}
+
+function receiptNumberVariants(value = '') {
+  const canonical = normalizeReceiptNumber(value);
+  if (!canonical) return [];
+  const [sequence, year] = canonical.split('/');
+  const padded = String(sequence).padStart(3, '0');
+  return [...new Set([
+    `${sequence}/${year}`,
+    `${padded}/${year}`,
+    `${sequence}-${year}`,
+    `${padded}-${year}`,
+  ])];
+}
+
+function receiptIdentityFromChatDocument(row = {}) {
+  const source = [
+    row.nome_arquivo,
+    row.resumo,
+    row.texto_extraido,
+  ].filter(Boolean).join('\n');
+
+  const isReceipt = hasStrongReceiptSignature({
+    tipoDocumento: row.tipo_documento,
+    fileName: row.nome_arquivo,
+    resumo: row.resumo,
+    text: row.texto_extraido,
+  });
+
+  return {
+    isReceipt,
+    numero: isReceipt ? extractReceiptNumber(source) : '',
+    arquivo: isReceipt ? normalizeReceiptFileName(row.nome_arquivo) : '',
+  };
+}
+
+async function reconcileChatReceiptDocuments(rows = []) {
+  const docs = Array.isArray(rows) ? rows : [];
+  const candidates = docs
+    .map((row) => ({ row, identity: receiptIdentityFromChatDocument(row) }))
+    .filter(({ identity }) => identity.isReceipt);
+
+  if (!candidates.length) return docs.map((row) => ({ ...row, central_resolved: false }));
+
+  const documentIds = [...new Set(candidates.map(({ row }) => String(row.id || '').trim()).filter(Boolean))];
+  const numberVariants = [...new Set(candidates.flatMap(({ identity }) => receiptNumberVariants(identity.numero)))];
+  const fileVariants = [...new Set(candidates.flatMap(({ row }) => {
+    const original = String(row.nome_arquivo || '').trim();
+    const withoutCopySuffix = original.replace(/\(\d+\)(?=\.[^.]+$)/, '');
+    return [original, withoutCopySuffix].filter(Boolean);
+  }))];
+
+  const receiptRows = [];
+  const selectFields = 'id,numero_recibo,tipo_recebimento,arquivo_nome,arquivo_hash,chat_lince_documento_id,is_foc,ativo';
+
+  async function collect(query) {
+    if (!query) return;
+    const { data, error } = await query;
+    // A reconciliação é somente um filtro de pendência. Se a consulta auxiliar
+    // falhar, mantemos a pendência visível em vez de esconder algo sem prova.
+    if (!error && Array.isArray(data)) receiptRows.push(...data);
+  }
+
+  if (documentIds.length) {
+    await collect(
+      supabase.from('recebimentos').select(selectFields).neq('ativo', false).in('chat_lince_documento_id', documentIds)
+    );
+  }
+  if (numberVariants.length) {
+    await collect(
+      supabase.from('recebimentos').select(selectFields).neq('ativo', false).in('numero_recibo', numberVariants)
+    );
+  }
+  if (fileVariants.length) {
+    await collect(
+      supabase.from('recebimentos').select(selectFields).neq('ativo', false).in('arquivo_nome', fileVariants)
+    );
+  }
+
+  const uniqueReceipts = [...new Map(receiptRows.map((row) => [String(row.id), row])).values()];
+  const byDocumentId = new Map();
+  const byNumber = new Map();
+  const byFile = new Map();
+
+  uniqueReceipts.forEach((receipt) => {
+    const linkedId = String(receipt.chat_lince_documento_id || '').trim();
+    if (linkedId) byDocumentId.set(linkedId, receipt);
+
+    const number = normalizeReceiptNumber(receipt.numero_recibo);
+    if (number) {
+      const current = byNumber.get(number) || [];
+      current.push(receipt);
+      byNumber.set(number, current);
+    }
+
+    const file = normalizeReceiptFileName(receipt.arquivo_nome);
+    if (file) {
+      const current = byFile.get(file) || [];
+      current.push(receipt);
+      byFile.set(file, current);
+    }
+  });
+
+  return docs.map((row) => {
+    const identity = receiptIdentityFromChatDocument(row);
+    if (!identity.isReceipt) return { ...row, central_resolved: false };
+
+    const direct = byDocumentId.get(String(row.id || '').trim()) || null;
+    const numberMatches = identity.numero ? (byNumber.get(normalizeReceiptNumber(identity.numero)) || []) : [];
+    const fileMatches = identity.arquivo ? (byFile.get(identity.arquivo) || []) : [];
+
+    const matches = [...new Map(
+      [direct, ...numberMatches, ...fileMatches]
+        .filter(Boolean)
+        .map((receipt) => [String(receipt.id), receipt])
+    ).values()];
+
+    // Um vínculo direto é prova inequívoca. Sem vínculo direto, só reconciliamos
+    // automaticamente quando número/arquivo apontam para um único recibo ativo.
+    const resolvedReceipt = direct || (matches.length === 1 ? matches[0] : null);
+    const originalClassification = row.classificacao || null;
+    const originalDestination = row.destino_sugerido || null;
+
+    return {
+      ...row,
+      central_resolved: Boolean(resolvedReceipt),
+      central_domain: 'RECEIPT',
+      central_action: resolvedReceipt ? 'ALREADY_SAVED_IN_RECEIPTS' : 'REVIEW_IN_RECEIPTS',
+      central_receipt_number: identity.numero || resolvedReceipt?.numero_recibo || null,
+      central_operational_receipt_id: resolvedReceipt?.id || null,
+      classificacao_ia_original: originalClassification,
+      destino_ia_original: originalDestination,
+      classificacao: 'RECIBO_MATERIAL',
+      destino_sugerido: 'recebimentos',
+      destinos_possiveis: [
+        { tabela: 'recebimentos', finalidade: 'Revisão e gravação pelo módulo dono de Recibos.' },
+        { tabela: 'recebimento_itens', finalidade: 'Itens do recibo, gravados somente pelo fluxo de Recibos.' },
+      ],
+    };
+  });
+}
+
 exports.listarDocumentos = async (req, res) => {
   try {
     const status = String(req.query?.status || 'PENDENTE_CONFIRMACAO').trim().toUpperCase();
     const { data, error } = await supabase
       .from('chat_lince_documentos')
-      .select('id,tipo_documento,nome_arquivo,resumo,classificacao,destino_sugerido,destinos_possiveis,confianca,status,created_by_email,created_at,confirmado_por,confirmado_em,observacao_admin')
+      .select('id,tipo_documento,nome_arquivo,texto_extraido,resumo,classificacao,destino_sugerido,destinos_possiveis,confianca,status,created_by_email,created_at,confirmado_por,confirmado_em,observacao_admin')
       .eq('status', status)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(250);
 
     if (error) throw error;
-    return res.status(200).json({ status: 'success', data: data || [] });
+
+    const reconciled = await reconcileChatReceiptDocuments(data || []);
+    const visible = reconciled
+      .filter((row) => row.central_resolved !== true)
+      .map(({ texto_extraido, ...row }) => row);
+
+    return res.status(200).json({ status: 'success', data: visible });
   } catch (error) {
     return res.status(500).json({ status: 'error', message: 'Falha ao listar documentos do Chat Lince.' });
+  }
+};
+
+exports.obterDocumento = async (req, res) => {
+  try {
+    const data = await getDocumentAnalysisById(req.params.id);
+    const [reconciled] = await reconcileChatReceiptDocuments([data]);
+    return res.status(200).json({ status: 'success', data: reconciled || data });
+  } catch (error) {
+    console.error('[Chat Lince] Falha ao abrir documento:', error);
+    return res.status(404).json({ status: 'error', message: error.message || 'Documento não encontrado.' });
   }
 };
 
@@ -256,14 +550,15 @@ exports.confirmarDocumento = async (req, res) => {
   try {
     const observacaoAdmin = String(req.body?.observacaoAdmin || req.body?.observacao_admin || '').trim();
     const destinoAdmin = String(req.body?.destinoAdmin || req.body?.destino_admin || '').trim();
-    const result = await confirmDocumentAnalysis({ id: req.params.id, user: req.user, observacaoAdmin, destinoAdmin });
+    const correcoesAdmin = req.body?.correcoesAdmin || req.body?.correcoes_admin || null;
+    const result = await confirmDocumentAnalysis({ id: req.params.id, user: req.user, observacaoAdmin, destinoAdmin, correcoesAdmin });
     await registrarAuditoria({
       req,
       action: 'DOCUMENTO_CONFIRMADO',
       entity: 'CHAT_LINCE_DOCUMENTOS',
       entityId: req.params.id,
       summary: `${req.user?.email || 'Admin'} confirmou documento do Chat Lince.`,
-      details: { documento_id: req.params.id, destinoAdmin, observacaoAdmin },
+      details: { documento_id: req.params.id, destinoAdmin, observacaoAdmin, correcoesAdmin: correcoesAdmin || null },
       level: 'INFO',
       visibility: 'GOD',
     });
@@ -271,7 +566,7 @@ exports.confirmarDocumento = async (req, res) => {
       status: 'success',
       message: result.alreadyConfirmed
         ? 'Documento já estava confirmado.'
-        : 'Documento confirmado pelo Admin e gravado no banco como registro documental validado.',
+        : `Documento confirmado e normalizado em staging (${result.importStaging?.inserted || 0} registro(s)); nenhuma tabela operacional foi alterada automaticamente.`,
       data: result,
     });
   } catch (error) {
@@ -297,6 +592,67 @@ exports.rejeitarDocumento = async (req, res) => {
     return res.status(200).json({ status: 'success', message: 'Documento rejeitado pelo Admin.', data });
   } catch (error) {
     return res.status(500).json({ status: 'error', message: error.message || 'Falha ao rejeitar documento.' });
+  }
+};
+
+
+exports.exportarDocumentoNormalizado = async (req, res) => {
+  try {
+    const { data: documento, error: documentError } = await supabase
+      .from('chat_lince_documentos')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (documentError || !documento) throw documentError || new Error('Documento não encontrado.');
+
+    const { data: staged, error: stagingError } = await supabase
+      .from('chat_lince_import_staging')
+      .select('*')
+      .eq('documento_id', req.params.id)
+      .order('registro_index', { ascending: true });
+
+    const stagingUnavailable = stagingError && ['42P01', 'PGRST205'].includes(stagingError.code);
+    if (stagingError && !stagingUnavailable) throw stagingError;
+
+    const sourceRows = Array.isArray(staged) && staged.length
+      ? staged.map((row) => ({
+        registro_index: row.registro_index,
+        destino_confirmado: row.destino_confirmado,
+        tipo_registro: row.tipo_registro,
+        identificador: row.identificador,
+        validacao: row.validation_status,
+        erros_validacao: Array.isArray(row.validation_errors) ? row.validation_errors.join(' | ') : '',
+        status_importacao: row.status,
+        ...(row.payload && typeof row.payload === 'object' ? row.payload : { payload: row.payload }),
+      }))
+      : (Array.isArray(documento.registros_sugeridos) ? documento.registros_sugeridos : []).map((payload, index) => ({
+        registro_index: index + 1,
+        destino_confirmado: documento.destino_confirmado || documento.destino_sugerido || '',
+        validacao: 'NAO_VALIDADO_EM_STAGING',
+        ...(payload && typeof payload === 'object' ? payload : { payload }),
+      }));
+
+    const workbook = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet([{
+      documento_id: documento.id,
+      arquivo: documento.nome_arquivo,
+      classificacao: documento.classificacao,
+      destino_sugerido: documento.destino_sugerido,
+      destino_confirmado: documento.destino_confirmado,
+      confianca: documento.confianca,
+      status: documento.status,
+      observacao_admin: documento.observacao_admin,
+    }]), 'Documento');
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(sourceRows.length ? sourceRows : [{ aviso: 'Nenhum registro estruturado foi extraído.' }]), 'Registros normalizados');
+
+    const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const safeName = String(documento.nome_arquivo || 'documento').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="SISHA_IA_Normalizado_${safeName}.xlsx"`);
+    return res.status(200).send(buffer);
+  } catch (error) {
+    console.error('[Chat Lince] Falha ao exportar normalizado:', error);
+    return res.status(500).json({ status: 'error', message: error.message || 'Falha ao exportar documento normalizado.' });
   }
 };
 
@@ -364,29 +720,99 @@ exports.responderHelpdesk = async (req, res) => {
 
 exports.reindexarRag = async (req, res) => {
   try {
-    const limit = Number(req.body?.limit || req.query?.limit || 250);
-    const result = await reindexChatLinceDocuments({ limit });
+    const limit = Number(req.body?.limit || req.query?.limit || 1000);
+    const limitPerSource = Number(req.body?.limitPerSource || req.query?.limitPerSource || 1000);
+    const includeChatDocuments = req.body?.includeChatDocuments !== false;
+    const includeStructuredSources = req.body?.includeStructuredSources !== false;
+
+    const result = await reindexChatLinceKnowledgeBase({
+      limit,
+      limitPerSource,
+      includeChatDocuments,
+      includeStructuredSources,
+    });
+
     await registrarAuditoria({
       req,
       action: 'CHAT_LINCE_RAG_REINDEXADO',
       entity: 'CHAT_LINCE_RAG',
-      entityId: 'REINDEX',
-      summary: `${req.user?.email || 'Admin'} reindexou documentos do Chat Lince para RAG.`,
-      details: { limit, result },
+      entityId: 'REINDEX_BASE_LOGISTICA',
+      summary: `${req.user?.email || 'Admin'} reindexou a base de conhecimento logística do Chat Lince.`,
+      details: { limit, limitPerSource, includeChatDocuments, includeStructuredSources, result },
       level: result.ok ? 'INFO' : 'WARN',
       visibility: 'GOD',
     });
-    return res.status(result.ok ? 200 : 500).json({ status: result.ok ? 'success' : 'error', message: result.ok ? 'RAG reindexado com sucesso.' : result.reason, data: result });
+
+    return res.status(result.ok ? 200 : 500).json({
+      status: result.ok ? 'success' : 'error',
+      message: result.ok ? 'Base logística do RAG reindexada com sucesso.' : result.reason,
+      data: result,
+    });
   } catch (error) {
     console.error('[Chat Lince] Falha ao reindexar RAG:', error);
-    return res.status(500).json({ status: 'error', message: 'Falha ao reindexar documentos do Chat Lince.' });
+    return res.status(500).json({ status: 'error', message: 'Falha ao reindexar a base logística do Chat Lince.' });
   }
 };
 
 exports.confirmarAcaoExecutor = async (req, res) => {
   try {
+    const reauthSubject = String(req.user?.auth_user_id || req.user?.id || req.user?.email || '').trim().toLowerCase();
+    const reauthGate = inspectReauth(reauthSubject);
+    if (!reauthGate.allowed) {
+      res.setHeader('Retry-After', String(reauthGate.retryAfterSeconds || 1));
+      await registrarAuditoria({
+        req,
+        action: 'CHAT_LINCE_REAUTH_RATE_BLOCK',
+        entity: 'CHAT_LINCE_ACTION_PLANS',
+        entityId: req.params.id,
+        summary: `${req.user?.email || 'Usuário'} teve reautenticação temporariamente bloqueada por excesso de falhas.`,
+        details: {
+          code: reauthGate.code,
+          retry_after_seconds: reauthGate.retryAfterSeconds,
+        },
+        level: 'WARN',
+        visibility: 'GOD',
+      }).catch(() => null);
+      return res.status(429).json({
+        status: 'error',
+        code: 'CHAT_LINCE_REAUTH_TEMPORARILY_LOCKED',
+        message: 'Muitas tentativas de reautenticação sem sucesso. Aguarde antes de tentar novamente.',
+        retry_after_seconds: reauthGate.retryAfterSeconds,
+      });
+    }
+
     const senha = String(req.body?.senha || '');
     const result = await executeActionPlan({ actionId: req.params.id, senha, user: req.user });
+
+    if (!result.ok && result.code === 'ACTION_REAUTH_FAILED') {
+      const failure = recordReauthFailure(reauthSubject);
+      await registrarAuditoria({
+        req,
+        action: 'CHAT_LINCE_REAUTH_FAILURE',
+        entity: 'CHAT_LINCE_ACTION_PLANS',
+        entityId: req.params.id,
+        summary: `${req.user?.email || 'Usuário'} falhou na reautenticação de uma ação do Chat Lince.`,
+        details: {
+          failures_in_window: failure.failuresInWindow,
+          temporarily_locked: failure.locked,
+          retry_after_seconds: failure.retryAfterSeconds || 0,
+        },
+        level: 'WARN',
+        visibility: 'GOD',
+      }).catch(() => null);
+
+      if (failure.locked) {
+        res.setHeader('Retry-After', String(failure.retryAfterSeconds || 1));
+        return res.status(429).json({
+          status: 'error',
+          code: 'CHAT_LINCE_REAUTH_TEMPORARILY_LOCKED',
+          message: 'Muitas tentativas de reautenticação sem sucesso. O Chat Lince bloqueou novas tentativas temporariamente.',
+          retry_after_seconds: failure.retryAfterSeconds,
+        });
+      }
+    } else if (result.ok) {
+      clearReauthFailures(reauthSubject);
+    }
 
     await registrarAuditoria({
       req,
@@ -396,13 +822,24 @@ exports.confirmarAcaoExecutor = async (req, res) => {
       summary: result.ok
         ? `${req.user?.email || 'Admin'} executou ação pelo Chat Lince.`
         : `${req.user?.email || 'Usuário'} tentou confirmar ação pelo Chat Lince sem sucesso.`,
-      details: { actionId: req.params.id, ok: result.ok, message: result.message, data: result.ok ? result.data : null },
+      details: {
+        actionId: req.params.id,
+        ok: result.ok,
+        code: result.code || null,
+        message: result.message,
+        mutation_committed: Boolean(result.mutationCommitted),
+        data: result.data || null,
+      },
       level: result.ok ? 'INFO' : 'WARN',
       visibility: 'GOD',
     });
 
     if (!result.ok) {
-      return res.status(result.statusCode || 400).json({ status: 'error', message: result.message });
+      return res.status(result.statusCode || 400).json({
+        status: 'error',
+        code: result.code || 'CHAT_LINCE_ACTION_DENIED',
+        message: result.message,
+      });
     }
 
     return res.status(200).json({ status: 'success', message: result.message, data: result.data });

@@ -1,5 +1,7 @@
-const { verifyToken } = require('../config/authToken');
+const { getSupabaseAdmin } = require('../config/supabaseAdminClient');
 const { isGodUser } = require('../utils/auditLogger');
+const { getAuthUserFromToken } = require('../services/supabaseAuthService');
+const { resolveAuthorizedUserForAuthUser } = require('../services/authIdentityBindingService');
 
 function extractToken(req) {
   const header = req.headers.authorization || '';
@@ -7,14 +9,52 @@ function extractToken(req) {
   return header.slice(7).trim();
 }
 
-function requireAuth(req, res, next) {
+async function loadAuthorizedUserById(id) {
+  const { data, error } = await getSupabaseAdmin()
+    .from('authorized_users')
+    .select('id,email,role,active')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+function ensureActiveAuthorizedUser(row) {
+  if (!row) {
+    const error = new Error('Usuário não autorizado no SISHA.');
+    error.code = 'SISHA_USER_NOT_AUTHORIZED';
+    throw error;
+  }
+  if (row.active === false) {
+    const error = new Error('Usuário desativado no SISHA.');
+    error.code = 'SISHA_USER_INACTIVE';
+    throw error;
+  }
+  return row;
+}
+
+async function resolveSupabaseUser(token) {
+  const authUser = await getAuthUserFromToken(token);
+  const row = ensureActiveAuthorizedUser(await resolveAuthorizedUserForAuthUser(authUser));
+  return {
+    sub: row.id,
+    email: row.email,
+    role: row.role,
+    auth_provider: 'supabase',
+    auth_user_id: authUser.id,
+  };
+}
+
+async function requireAuth(req, res, next) {
   try {
     const token = extractToken(req);
     if (!token) {
       return res.status(401).json({ status: 'error', message: 'Acesso não autorizado.' });
     }
 
-    req.user = verifyToken(token);
+    // H4C6: somente sessoes emitidas pelo Supabase Auth sao aceitas.
+    // Tokens HMAC legados do SISHA deixam de ser reconhecidos imediatamente.
+    req.user = await resolveSupabaseUser(token);
     return next();
   } catch (error) {
     return res.status(401).json({ status: 'error', message: error.message || 'Sessão inválida.' });

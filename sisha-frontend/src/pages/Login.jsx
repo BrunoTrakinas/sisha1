@@ -9,6 +9,7 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [senha, setSenha] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [erro, setErro] = useState('');
 
   useEffect(() => {
@@ -48,6 +49,30 @@ export default function Login() {
       setErro('Erro de conexão com o servidor.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleEsqueciSenha = async () => {
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
+      setErro('Informe seu email antes de solicitar o link de acesso.');
+      return;
+    }
+
+    setErro('');
+    setResetLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/password/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: normalizedEmail }),
+      });
+      const result = await response.json();
+      setErro(result.message || 'Se o email estiver autorizado, o link será enviado.');
+    } catch {
+      setErro('Não foi possível solicitar o link agora. Tente novamente.');
+    } finally {
+      setResetLoading(false);
     }
   };
 
@@ -93,10 +118,19 @@ export default function Login() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || resetLoading}
             className="w-full rounded-xl bg-blue-600 hover:bg-blue-700 transition-all py-3.5 sm:py-3 font-black uppercase tracking-wide disabled:opacity-60 text-sm sm:text-base"
           >
             {loading ? 'Verificando...' : 'Entrar'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleEsqueciSenha}
+            disabled={loading || resetLoading}
+            className="w-full text-center text-sm font-bold text-blue-300 hover:text-blue-200 disabled:opacity-60"
+          >
+            {resetLoading ? 'Enviando link...' : 'Esqueci minha senha'}
           </button>
 
           <p className="text-amber-300 text-sm min-h-[1.5rem] text-center leading-relaxed px-1">

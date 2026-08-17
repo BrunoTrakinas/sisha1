@@ -8,3 +8,25 @@ sisha-frontend/.env
 !.env.example
 !sisha-backend/.env.example
 !sisha-frontend/.env.example
+
+# Dependencias e artefatos locais
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+coverage/
+**/coverage/
+
+# Logs, temporarios e backups locais
+*.log
+*.tmp
+*.temp
+*.bak
+.patch_backups/
+**/.patch_backups/
+
+# Artefatos transitórios de auditoria/readiness
+*_schema_contract.generated.json
+sisha-backend/sql/schema_snapshots/

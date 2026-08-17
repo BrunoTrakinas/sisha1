@@ -15,3 +15,14 @@
     @apply bg-gray-50 text-gray-900 transition-colors duration-300;
   }
 }
+@layer utilities {
+  .sisha-scrollbar-hidden {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .sisha-scrollbar-hidden::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}

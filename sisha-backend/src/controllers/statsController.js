@@ -1,12 +1,20 @@
 // src/controllers/statsController.js
-const supabase = require('../config/supabaseClient');
+const { getSupabaseAdmin } = require('../config/supabaseAdminClient');
 const { isGodUser } = require('../utils/auditLogger');
+const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
+const { computeStockValuationFallback } = require('../utils/stockValuation');
 
 const PAGE_SIZE = 1000;
 const LOW_STOCK_CANDIDATES = ['estoque_minimo', 'qtd_minima', 'quantidade_minima', 'minimo', 'estoque_seguranca'];
 const POLICY_PN_CANDIDATES = ['pn', 'part_number'];
 const ODC_QTY_CANDIDATES = ['quantidade', 'qtd', 'qtd_pendente', 'qtd_solicitada', 'qty'];
 const ODC_PD_CANDIDATES = ['pd', 'documento_referencia'];
+
+// H4C3: todo o módulo de estatísticas roda no backend autenticado.
+// Não depende mais da chave pública do Supabase para ler dados operacionais.
+function getStatsDb() {
+    return getSupabaseAdmin();
+}
 
 const normalizeKey = (value) => String(value || '').trim().toUpperCase();
 
@@ -27,36 +35,71 @@ function normalizeStatus(value = '') {
     return normalizeKey(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+function positivePdQty(...values) {
+    for (const value of values) {
+        const number = Number(value);
+        if (Number.isFinite(number) && number > 0) return number;
+    }
+    return 0;
+}
+
 function classifyPdStatus(row = {}) {
-    const status = normalizeStatus(row.status || row.status_grupo || row.status_item);
+    const status = normalizeStatus(row.status_grupo || row.status || row.status_item);
+    const ordered = positivePdQty(row.qtd_comprada, row.quantidade, row.qtd_pedida);
+    const delivered = Math.max(0, Number(row.qtd_recebida || 0) || 0);
+
     if (['CAN', 'CANCELADO', 'EXCLUIDO'].includes(status) || row.ativo === false) return 'cancelados';
+
+    // A entrega física é a evidência mais forte do estágio corrente do PD.
+    if (status === 'REC' || (ordered > 0 && delivered >= ordered)) return 'entregue';
+    if (delivered > 0) return 'entregaParcial';
+
     if (status === 'ELB') return 'elaboracao';
     if (['TRI', 'ANS'].includes(status)) return 'triagemAnalise';
-    if (['COT', 'PRO'].includes(status)) return 'cotacao';
-    if (['LPC', 'LIB', 'LIBERADA', 'LIBERADO', 'LIBERADA_PARA_COTACAO', 'LIBERADO_PARA_COTACAO'].includes(status)) return 'liberadaCotacao';
-    if (status === 'ODC') return 'odc';
-    if (['ODA', 'EMB'].includes(status)) return 'odaEmAndamento';
-    if (['REC', 'FAT'].includes(status)) return 'recebidosFaturados';
-    return 'outros';
+    if ([
+        'COT', 'PRO', 'LPC', 'LIB', 'LIBERADA', 'LIBERADO',
+        'LIBERADA_PARA_COTACAO', 'LIBERADO_PARA_COTACAO',
+    ].includes(status)) return 'cotacaoLpc';
+
+    if (['ODA', 'ODA_RESSALVA'].includes(status)) return 'oda';
+    if (status === 'FAT') return 'faturado';
+    if (status === 'EMB') return 'embarcado';
+    if (!row.ordem_id) return 'semOc';
+
+    return 'odc';
 }
 
 async function computePdPipelineStats() {
     const empty = {
         elaboracao: 0,
         triagemAnalise: 0,
+        cotacaoLpc: 0,
+        semOc: 0,
+        odc: 0,
+        oda: 0,
+        faturado: 0,
+        embarcado: 0,
+        entregaParcial: 0,
+        entregue: 0,
+        cancelados: 0,
+        totalAtivos: 0,
+        totalAcompanhamento: 0,
+        total: 0,
+
+        // Compatibilidade do endpoint com clientes antigos.
+        aguardandoRecursos: 0,
         cotacao: 0,
         liberadaCotacao: 0,
-        odc: 0,
-        aguardandoRecursos: 0,
         odaEmAndamento: 0,
         recebidosFaturados: 0,
-        cancelados: 0,
         outros: 0,
-        totalAtivos: 0,
     };
 
     try {
-        const rows = await fetchAllRows('compras_pds', 'numero_pd,status,status_grupo,status_item,ativo,quantidade,qtd_comprada,qtd_pedida');
+        const rows = await fetchAllRows(
+            'compras_pds',
+            'numero_pd,status,status_grupo,status_item,ordem_id,ativo,quantidade,qtd_comprada,qtd_pedida,qtd_recebida'
+        );
         const seen = new Set();
         const resumo = { ...empty };
 
@@ -66,15 +109,31 @@ async function computePdPipelineStats() {
             if (numeroPd) seen.add(numeroPd);
 
             const bucket = classifyPdStatus(row);
+            resumo.total += 1;
             resumo[bucket] = (resumo[bucket] || 0) + 1;
-
-            // PD AGU REC = pedidos aguardando recursos/processamento antes de ODA/embarque/recebimento.
-            // Não mistura ODA/EMB com o card ODA Leonardo, evitando dupla contagem no dashboard.
-            if (['elaboracao', 'triagemAnalise', 'cotacao', 'liberadaCotacao', 'odc'].includes(bucket)) {
-                resumo.aguardandoRecursos += 1;
-                resumo.totalAtivos += 1;
-            }
+            if (bucket !== 'cancelados') resumo.totalAtivos += 1;
+            if ([
+                'elaboracao',
+                'triagemAnalise',
+                'cotacaoLpc',
+                'semOc',
+                'odc',
+                'oda',
+                'entregaParcial',
+            ].includes(bucket)) resumo.totalAcompanhamento += 1;
         });
+
+        // Mantém campos legados disponíveis sem controlar a nova UI.
+        resumo.aguardandoRecursos =
+            resumo.elaboracao +
+            resumo.triagemAnalise +
+            resumo.cotacaoLpc +
+            resumo.semOc +
+            resumo.odc;
+        resumo.cotacao = resumo.cotacaoLpc;
+        resumo.liberadaCotacao = 0;
+        resumo.odaEmAndamento = resumo.oda;
+        resumo.recebidosFaturados = resumo.faturado + resumo.embarcado + resumo.entregue;
 
         return resumo;
     } catch (error) {
@@ -89,7 +148,7 @@ async function fetchAllRows(table, columns = '*', pageSize = PAGE_SIZE) {
 
     while (true) {
         const to = from + pageSize - 1;
-        const { data, error } = await supabase
+        const { data, error } = await getStatsDb()
             .from(table)
             .select(columns)
             .range(from, to);
@@ -130,7 +189,7 @@ async function fetchValuationRows() {
 }
 
 async function getDashboardStatsViaRpc() {
-    const { data, error } = await supabase.rpc('rpc_dashboard_stats');
+    const { data, error } = await getStatsDb().rpc('rpc_dashboard_stats');
 
     if (error) {
         throw error;
@@ -160,11 +219,11 @@ async function getDashboardStatsViaRpc() {
 }
 
 async function getDashboardStatsViaFallback() {
-    const [ppuData, odaData, odcData, valuationData] = await Promise.all([
-        fetchAllRows('estoque_ppu', 'pn, quantidade'),
+    const [ppuData, odaData, odcData, valuationSummary] = await Promise.all([
+        loadAllEffectivePpuRows(),
         fetchAllRows('leonardo_spares', 'qtd_pendente, documento_referencia'),
         fetchOdcRows(),
-        fetchValuationRows(),
+        computeStockValuationFallback(),
     ]);
 
     const totalPPU = ppuData.reduce((acc, item) => acc + (Number(item.quantidade) || 0), 0);
@@ -182,8 +241,8 @@ async function getDashboardStatsViaFallback() {
         totalODC_PDs = new Set(odcData.map(item => normalizeKey(item[pdKey])).filter(Boolean)).size;
     }
 
-    const valorEstoqueGBP = valuationData.reduce((acc, item) => acc + (Number(item.valor_total_estimado) || 0), 0);
-    const pnsPrecificados = valuationData.filter(item => item.valor_unitario_referencia != null).length;
+    const valorEstoqueGBP = Number(valuationSummary?.estoqueValorizado || 0);
+    const pnsPrecificados = Number(valuationSummary?.pnsValorizados || 0);
 
     return {
         totalPPU,
@@ -204,7 +263,7 @@ async function computeLowStockAlerts(limit = 8) {
         const policyRows = await fetchAllRows('politica_estoque', '*');
         if (!policyRows.length) return [];
 
-        const ppuRows = await fetchAllRows('estoque_ppu', 'pn, quantidade, localizacao');
+        const ppuRows = await loadAllEffectivePpuRows();
         const ppuMap = new Map();
         ppuRows.forEach((row) => {
             const pn = normalizeKey(row.pn);
@@ -274,31 +333,75 @@ async function computeSbAlerts(limit = 6) {
 
 async function computeWarrantyAlerts(limit = 6) {
     try {
-        const rows = await fetchAllRows('estoque_ppu', 'pn, sn, data_garantia, localizacao');
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const inSixtyDays = new Date(today);
         inSixtyDays.setDate(today.getDate() + 60);
 
-        return rows
-            .filter((row) => row.sn && row.sn !== 'N/A' && row.data_garantia)
-            .map((row) => {
-                const dt = new Date(row.data_garantia);
-                return { row, dt };
-            })
-            .filter(({ dt }) => !Number.isNaN(dt.getTime()) && dt <= inSixtyDays)
-            .sort((a, b) => a.dt - b.dt)
-            .slice(0, limit)
-            .map(({ row, dt }) => ({
-                tipo: 'GARANTIA_PROXIMA',
-                severidade: dt < today ? 'ALTA' : 'MEDIA',
-                pn: row.pn,
-                titulo: 'Garantia próxima do fim',
-                detalhe: `${row.sn} • ${dt.toLocaleDateString('pt-BR')}`,
-                local: row.localizacao || 'PPU',
-                saldo: null,
-                minimo: null,
-            }));
+        const alerts = [];
+        const seen = new Set();
+
+        // Fonte principal para equipamentos serializados: vencimento individual configurado no dossiê.
+        try {
+            const equipmentRows = await fetchAllRows(
+                'equipamentos_serializados',
+                'pn,sn,nomenclatura,local_atual,categoria_local_atual,garantia_vencimento,garantia_alerta_ativo,ativo'
+            );
+
+            equipmentRows
+                .filter((row) => row.ativo !== false && row.garantia_alerta_ativo !== false && row.garantia_vencimento)
+                .map((row) => ({ row, dt: new Date(row.garantia_vencimento) }))
+                .filter(({ dt }) => !Number.isNaN(dt.getTime()) && dt <= inSixtyDays)
+                .forEach(({ row, dt }) => {
+                    const key = `${normalizeKey(row.pn)}|${normalizeKey(row.sn)}`;
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    alerts.push({
+                        tipo: 'GARANTIA_EQUIPAMENTO',
+                        severidade: dt < today ? 'ALTA' : 'MEDIA',
+                        pn: row.pn,
+                        titulo: 'Garantia de equipamento próxima do fim',
+                        detalhe: `${row.sn || 'SN não informado'} • ${dt.toLocaleDateString('pt-BR')}`,
+                        local: row.local_atual || row.categoria_local_atual || 'Local não informado',
+                        saldo: null,
+                        minimo: null,
+                        data_garantia: row.garantia_vencimento,
+                    });
+                });
+        } catch (equipmentError) {
+            console.warn('[SISHA-1][stats] Garantia individual de equipamentos indisponível:', equipmentError.message);
+        }
+
+        // Compatibilidade com garantias antigas registradas na disponibilidade PPU.
+        try {
+            const rows = await fetchAllRows('v_sisha_ppu_disponibilidade', 'pn, sn, data_garantia, localizacao');
+            rows
+                .filter((row) => row.sn && row.sn !== 'N/A' && row.data_garantia)
+                .map((row) => ({ row, dt: new Date(row.data_garantia) }))
+                .filter(({ dt }) => !Number.isNaN(dt.getTime()) && dt <= inSixtyDays)
+                .forEach(({ row, dt }) => {
+                    const key = `${normalizeKey(row.pn)}|${normalizeKey(row.sn)}`;
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    alerts.push({
+                        tipo: 'GARANTIA_PROXIMA',
+                        severidade: dt < today ? 'ALTA' : 'MEDIA',
+                        pn: row.pn,
+                        titulo: 'Garantia próxima do fim',
+                        detalhe: `${row.sn} • ${dt.toLocaleDateString('pt-BR')}`,
+                        local: row.localizacao || 'PPU',
+                        saldo: null,
+                        minimo: null,
+                        data_garantia: row.data_garantia,
+                    });
+                });
+        } catch (legacyError) {
+            console.warn('[SISHA-1][stats] Garantia legada do PPU indisponível:', legacyError.message);
+        }
+
+        return alerts
+            .sort((a, b) => new Date(a.data_garantia || 0) - new Date(b.data_garantia || 0))
+            .slice(0, limit);
     } catch (error) {
         console.warn('[SISHA-1][stats] Falha ao calcular alertas de garantia:', error.message);
         return [];
@@ -319,6 +422,8 @@ exports.getDashboardStats = async (req, res) => {
         }
 
         const odcPipeline = await computePdPipelineStats();
+        // Compatibilidade do contrato existente: estes campos continuam representando
+        // a esteira pré-ODA antiga; a nova UI usa odcPipeline diretamente.
         stats.totalODC = odcPipeline.aguardandoRecursos;
         stats.totalODC_PDs = odcPipeline.odc;
 
@@ -366,13 +471,29 @@ exports.getRadarCriticidade = async (req, res) => {
     }
 };
 
+function buildImportDisplayStatus(op = {}) {
+    const raw = String(op.status || '').trim().toUpperCase();
+    const certificate = op?.detalhes?.certificado_conclusao || null;
+    if (raw === 'PROCESSANDO') {
+        const created = new Date(op.created_at || 0).getTime();
+        const stale = Number.isFinite(created) && created > 0 && (Date.now() - created) > (15 * 60 * 1000);
+        return stale ? 'SEM CONFIRMAÇÃO' : 'PROCESSANDO';
+    }
+    if (raw === 'ERRO') return 'FALHOU';
+    if (certificate?.resultado === 'CONCLUIDO_COM_PENDENCIAS') return 'CONCLUÍDO COM PENDÊNCIAS';
+    if (certificate?.resultado === 'CONCLUIDO') return 'CONCLUÍDO';
+    if (certificate?.resultado === 'INTERROMPIDO_SEM_CONFIRMACAO') return 'SEM CONFIRMAÇÃO';
+    if (raw === 'SUCESSO') return 'CONCLUÍDO';
+    return raw || 'N/A';
+}
+
 exports.getRecentOperations = async (req, res) => {
     try {
         const isGod = isGodUser(req.user);
 
-        const { data: imports, error: importError } = await supabase
+        const { data: imports, error: importError } = await getStatsDb()
             .from('import_logs')
-            .select('tipo_arquivo, nome_arquivo, status, mensagem, uploaded_by_email, uploaded_by_role, created_at, finished_at')
+            .select('id, tipo_arquivo, nome_arquivo, status, tabela_alvo, linhas_lidas, linhas_importadas, linhas_ignoradas, mensagem, detalhes, uploaded_by_email, uploaded_by_role, created_at, finished_at')
             .order('created_at', { ascending: false })
             .limit(12);
 
@@ -384,11 +505,13 @@ exports.getRecentOperations = async (req, res) => {
             tipo_arquivo: op.tipo_arquivo || 'IMPORTAÇÃO',
             nome_arquivo: op.nome_arquivo || 'Documento',
             uploaded_by_email: op.uploaded_by_email || 'Sistema',
+            status_exibicao: buildImportDisplayStatus(op),
         }));
 
         let auditItems = [];
         try {
-            let query = supabase
+            const auditDb = getStatsDb();
+            let query = auditDb
                 .from('system_audit_logs')
                 .select('action, entity, entity_id, summary, actor_email, actor_role, level, visibility, created_at')
                 .order('created_at', { ascending: false })

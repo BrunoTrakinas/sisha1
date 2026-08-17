@@ -1,5 +1,10 @@
 // src/controllers/searchController.js
 const supabase = require('../config/supabaseClient');
+const { parseRfqValidityEnd, resolveRfqValidityEnd, loadReferencePriceRows } = require('../services/pricingService');
+const { getSubItemPriority } = require('../services/pnRelationsService');
+const { buildWtpReferences, buildWtpTextReferences } = require('../services/wtpReferenceService');
+const { loadTrackingRowsByPns } = require('../services/ppuLocationPolicyService');
+const { loadEffectivePpuRowsByPns } = require('../services/ppuEffectiveAvailabilityService');
 
 function addUndirectedEdge(graph, a, b) {
     if (!a || !b || a === b) return;
@@ -50,26 +55,23 @@ function normalizeUpper(value) {
     return String(value || '').trim().toUpperCase();
 }
 
+function isRfqPriceCurrent(validade, row = {}) {
+    const end = resolveRfqValidityEnd({ ...row, validade }) || parseRfqValidityEnd(validade);
+    if (!end) return null;
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    return end >= today;
+}
+
 function looksLikePn(value = '') {
     const pn = normalizeUpper(value);
     return pn.length >= 5 && /[0-9]/.test(pn) && !pn.includes(' ');
 }
 
-function getSubItemPriority(value) {
-    const text = normalizeUpper(value);
-    if (!text) return 999;
-
-    const letterMatch = text.match(/([A-Z])\s*$/);
-    if (letterMatch) {
-        return letterMatch[1].charCodeAt(0) - 64; // A=1, B=2, C=3...
-    }
-
-    const numericMatch = text.match(/(\d+)\s*$/);
-    if (numericMatch) {
-        return Number(numericMatch[1]);
-    }
-
-    return 999;
+function hasExactPnMatch(query, groups = []) {
+    const target = normalizeUpper(query);
+    if (!target || !looksLikePn(target)) return false;
+    return groups.some((rows) => (rows || []).some((row) => normalizeUpper(row?.pn) === target));
 }
 
 function compareManualAlternativeRows(a = {}, b = {}) {
@@ -129,11 +131,14 @@ const NAME_SOURCE_PRIORITY = {
     ORDER_BOOK_FOC: 76,
     ORDER_BOOK_REPAIR: 75,
     ORDER_BOOK_ADMIN_DOC: 72,
+    EQUIPAMENTO_SERIALIZADO: 71,
     ESTOQUE_PPU: 70,
+    ESTOQUE_CEIMSPA: 65,
     LISDE: 60,
     CEIMSPA_VIA_DICIONARIO: 55,
     ITEMS: 40,
     PN_ALTERNATIVOS_DOCUMENTO: 30,
+    MANUAL_TECNICO_WTP: 92,
 };
 
 function isMeaningfulName(name) {
@@ -194,6 +199,96 @@ function buildSbRelatedMap(sbItemRows = []) {
         bySb.get(sbNumero).add(pn);
     });
     return bySb;
+}
+
+function isRealStockSerial(value) {
+    const serial = normalizeUpper(value);
+    return Boolean(serial && !['N/A', 'NA', 'S/N', 'SEM SN', 'SEM S/N', '-'].includes(serial));
+}
+
+function aggregatePpuDetails(rows = []) {
+    const grouped = new Map();
+
+    (rows || []).forEach((row) => {
+        const origem = row.origem_saldo || 'PPU_OFICIAL';
+        const localizacao = String(row.localizacao || 'NÃO INFORMADO').trim() || 'NÃO INFORMADO';
+        const sn = isRealStockSerial(row.sn) ? normalizeUpper(row.sn) : null;
+        const key = sn
+            ? `${origem}|SN:${sn}|${localizacao}`
+            : `${origem}|REC:${row.recebimento_id || ''}|${localizacao}`;
+
+        if (!grouped.has(key)) {
+            grouped.set(key, {
+                quantidade: 0,
+                localizacao,
+                origem_saldo: origem,
+                numero_recibo: row.numero_recibo || null,
+                recebimento_id: row.recebimento_id || null,
+                recebimento_item_id: row.recebimento_item_id || null,
+                sn,
+                tipo_item: row.tipo_item || null,
+            });
+        }
+
+        const current = grouped.get(key);
+        current.quantidade += Number(row.quantidade || 0);
+        if (!current.numero_recibo && row.numero_recibo) current.numero_recibo = row.numero_recibo;
+    });
+
+    return Array.from(grouped.values()).sort((a, b) => {
+        const sourceDiff = String(a.origem_saldo).localeCompare(String(b.origem_saldo));
+        if (sourceDiff !== 0) return sourceDiff;
+        return String(a.localizacao).localeCompare(String(b.localizacao), 'pt-BR');
+    });
+}
+
+function aggregateReceiptIncorporations(rows = [], pnUpper = '') {
+    const grouped = new Map();
+
+    (rows || [])
+        .filter((row) => normalizeUpper(row.pn) === pnUpper
+            && row.recibo_ativo !== false
+            && row.item_ativo !== false
+            && Number(row.quantidade_incorporada || 0) > 0)
+        .forEach((row) => {
+            const destino = normalizeUpper(row.destino_estoque) === 'CEIMSPA' ? 'CEIMSPA' : 'PPU';
+            const key = `${row.recebimento_id || row.numero_recibo || 'SEM_RECIBO'}|${destino}`;
+            if (!grouped.has(key)) {
+                grouped.set(key, {
+                    numero_recibo: row.numero_recibo || null,
+                    destino_estoque: destino,
+                    quantidade_recebida: 0,
+                    quantidade_incorporada: 0,
+                    saldo_pendente: 0,
+                    incorporado_totalmente: true,
+                    localizacoes: new Set(),
+                    recebimento_id: row.recebimento_id || null,
+                    recebimento_item_ids: [],
+                });
+            }
+
+            const current = grouped.get(key);
+            current.quantidade_recebida += Number(row.quantidade || 0);
+            current.quantidade_incorporada += Number(row.quantidade_incorporada || 0);
+            current.saldo_pendente += Number(row.saldo_pendente || 0);
+            current.incorporado_totalmente = current.incorporado_totalmente && Boolean(row.incorporado_totalmente);
+            if (row.localizacao) current.localizacoes.add(row.localizacao);
+            if (row.recebimento_item_id) current.recebimento_item_ids.push(row.recebimento_item_id);
+        });
+
+    return Array.from(grouped.values()).map((row) => ({
+        ...row,
+        quantidade_recebida: Number(row.quantidade_recebida.toFixed(6)),
+        quantidade_incorporada: Number(row.quantidade_incorporada.toFixed(6)),
+        saldo_pendente: Number(row.saldo_pendente.toFixed(6)),
+        incorporado_totalmente: row.quantidade_recebida > 0
+            && row.quantidade_incorporada >= row.quantidade_recebida
+            && row.incorporado_totalmente,
+        localizacao: Array.from(row.localizacoes).join(' | ') || null,
+        recebimento_item_id: row.recebimento_item_ids[0] || null,
+        recebimento_item_ids: row.recebimento_item_ids,
+        localizacoes: undefined,
+    }));
 }
 
 function buildCeimspaUnconfirmedResults(ceimspaRows = [], query = '') {
@@ -265,12 +360,12 @@ exports.searchItems = async (req, res) => {
         // ---------------------------------------------------------
         const p1 = supabase.from('items').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p2 = supabase.from('dicionario_mestre').select('pn, nomenclatura, nsn, pi').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p3 = supabase.from('estoque_ppu').select('pn, nomenclatura, nsn_pi, sn').or(`pn.ilike.%${query}%,nsn_pi.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
+        const p3 = supabase.from('v_sisha_ppu_disponibilidade').select('pn, nomenclatura, nsn_pi, sn').or(`pn.ilike.%${query}%,nsn_pi.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p4 = supabase.from('lisde').select('pn, nomenclatura').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
         const p5 = supabase.from('price_list').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(20);
-        const p6 = supabase.from('estoque_ceimspa').select('pi, nomenclatura, quantidade, sj, uf').or(`pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p7 = supabase.from('rfq_cotacoes').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(20);
-        const p8 = supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').or(`pn.ilike.%${query}%,pi.ilike.%${query}%,pn_alt.ilike.%${query}%`).limit(100);
+        const p6 = supabase.from('v_sisha_ceimspa_disponibilidade').select('pn, pi, nomenclatura, quantidade, sj, uf, origem_saldo, numero_recibo, recebimento_id, recebimento_item_id, fonte_identificacao').or(`pn.ilike.%${query}%,pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(80);
+        const p7 = supabase.from('rfq_cotacoes').select('pn,pn_relacionado,tipo_relacao_pn,nomenclatura,nsn,ativo').eq('ativo', true).or(`pn.ilike.%${query}%,pn_relacionado.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(40);
+        const p8 = supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').eq('ativo', true).or(`pn.ilike.%${query}%,pi.ilike.%${query}%,pn_alt.ilike.%${query}%`).limit(100);
         const p9 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura').or(`pn.ilike.%${query}%`).limit(80);
         const p10 = supabase.from('service_bulletins').select('sb_numero, titulo').or(`sb_numero.ilike.%${query}%,titulo.ilike.%${query}%`).limit(30);
         const p11 = supabase.from('item_apelidos').select('pn, apelido, descricao_oficial').eq('ativo', true).or(`pn.ilike.%${query}%,apelido.ilike.%${query}%,descricao_oficial.ilike.%${query}%`).limit(50);
@@ -278,8 +373,14 @@ exports.searchItems = async (req, res) => {
         const p13 = supabase.from('leonardo_foc_spares').select('pn,descricao,documento_referencia').or(`pn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%`).limit(80);
         const p14 = supabase.from('leonardo_repairs').select('pn,sn,descricao,tipo,documento_referencia,status').or(`pn.ilike.%${query}%,sn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%,status.ilike.%${query}%,tipo.ilike.%${query}%`).limit(120);
         const p15 = supabase.from('leonardo_admin_docs').select('tipo_doc,numero_doc,assunto_pn,status').or(`numero_doc.ilike.%${query}%,assunto_pn.ilike.%${query}%,status.ilike.%${query}%`).limit(80);
+        const p16 = supabase.from('v_sisha_equipamentos_search').select('id,pn,sn,nomenclatura,local_atual,categoria_local_atual,condicao_atual,anv_atual,garantia_vencimento,ultima_evidencia_documento,search_text').ilike('search_text', `%${query}%`).limit(120);
+        const p17 = supabase.from('v_sisha_manual_pn_aplicacao').select('manual_id,manual_codigo,tipo_manual,manual_titulo,fabricante,ata_dmc,revisao,data_revisao,pn,fig,item,nomenclatura,usage_code,units_per_assy,tipo_vinculo,page_ref,storage_status').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%,manual_codigo.ilike.%${query}%`).limit(120);
+        // Inventário físico bruto do PPU: usado apenas para localizar itens/SNs que estejam
+        // em uma LOC excluída da disponibilidade. A quantidade NÃO entra no card PPU por esta consulta.
+        const p18 = supabase.from('estoque_ppu').select('id,pn,nomenclatura,nsn_pi,sn,quantidade,localizacao').or(`pn.ilike.%${query}%,nsn_pi.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(120);
+        const p19 = supabase.from('v_sisha_ppu_custodia_externa_atual').select('pn,nomenclature,nsn_normalized,nsn_original,sn,quantity,box_code,original_location').or(`pn.ilike.%${query}%,nsn_normalized.ilike.%${query}%,nsn_original.ilike.%${query}%,sn.ilike.%${query}%,nomenclature.ilike.%${query}%`).limit(120);
 
-        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15]);
+        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19]);
         const getRes = (index) => results[index].status === 'fulfilled' ? results[index].value.data : null;
 
         const itemsMatch = getRes(0) || [];
@@ -297,6 +398,47 @@ exports.searchItems = async (req, res) => {
         const focMatch = getRes(12) || [];
         const repairMatch = getRes(13) || [];
         const adminDocMatch = getRes(14) || [];
+        const equipmentMatch = getRes(15) || [];
+        const technicalManualMatch = getRes(16) || [];
+        const rawPpuMatch = getRes(17) || [];
+        const externalCustodyMatch = getRes(18) || [];
+
+        externalCustodyMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'PPU_CUSTODIA_EXTERNA');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclature, 'ESTOQUE_PPU');
+            setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, i.nsn_normalized || i.nsn_original, 'ESTOQUE_PPU');
+            if (normalizeUpper(i.sn) === query) registerSource(fontesEncontradas, pn, 'SN_ESTOQUE_PPU');
+        });
+
+        const ppuAvailablePns = new Set(ppuMatch.map((row) => normalizeUpper(row.pn)).filter(Boolean));
+        rawPpuMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            if (!ppuAvailablePns.has(pn)) registerSource(fontesEncontradas, pn, 'INVENTARIO_PPU_RASTREIO');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclatura, 'ESTOQUE_PPU');
+            setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, i.nsn_pi, 'ESTOQUE_PPU');
+            if (normalizeUpper(i.sn) === query) registerSource(fontesEncontradas, pn, 'SN_ESTOQUE_PPU');
+        });
+
+        technicalManualMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'MANUAL_TECNICO_WTP');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclatura, 'MANUAL_TECNICO_WTP');
+        });
+
+        equipmentMatch.forEach((i) => {
+            const pn = normalizeUpper(i.pn);
+            if (!pn) return;
+            pnsEncontrados.add(pn);
+            registerSource(fontesEncontradas, pn, 'EQUIPAMENTO_SERIALIZADO');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclatura, 'EQUIPAMENTO_SERIALIZADO');
+        });
 
         apelidosMatch.forEach((i) => {
             const pn = normalizeUpper(i.pn);
@@ -388,13 +530,27 @@ exports.searchItems = async (req, res) => {
             setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, i.nsn, 'PRICE_LIST');
         });
 
-        rfqMatch.forEach((i) => {
+        ceimspaMatch.forEach((i) => {
             const pn = normalizeUpper(i.pn);
             if (!pn) return;
             pnsEncontrados.add(pn);
-            registerSource(fontesEncontradas, pn, 'RFQ_COTACOES');
-            setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclatura, 'RFQ_COTACOES');
-            setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, i.nsn, 'RFQ_COTACOES');
+            registerSource(fontesEncontradas, pn, i.origem_saldo === 'RECIBO_PENDENTE_CEIMSPA' ? 'RECIBO_CEIMSPA' : 'ESTOQUE_CEIMSPA');
+            setBestName(baseNomes, origemNomenclaturaBase, pn, i.nomenclatura, 'ESTOQUE_CEIMSPA');
+            setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, i.pi, 'ESTOQUE_CEIMSPA');
+        });
+
+        rfqMatch.forEach((i) => {
+            const pnCotado = normalizeUpper(i.pn);
+            const pnRelacionado = normalizeUpper(i.pn_relacionado);
+            const directMatch = pnCotado === query || normalizeUpper(i.nsn) === query || normalizeUpper(i.nomenclatura).includes(query);
+            const relatedMatch = pnRelacionado === query;
+            const alvo = relatedMatch ? pnRelacionado : pnCotado;
+            if (!alvo) return;
+            pnsEncontrados.add(alvo);
+            registerSource(fontesEncontradas, alvo, relatedMatch ? 'RFQ_EVOLUCAO_FORNECIMENTO' : 'RFQ_COTACOES');
+            setBestName(baseNomes, origemNomenclaturaBase, alvo, i.nomenclatura, 'RFQ_COTACOES');
+            setNsnIfHigherPriority(baseNsns, origemNsnBase, alvo, i.nsn, 'RFQ_COTACOES');
+            if (directMatch && pnCotado) pnsEncontrados.add(pnCotado);
         });
 
         altDocMatch.forEach((i) => {
@@ -459,15 +615,41 @@ exports.searchItems = async (req, res) => {
             }
         }
 
-        const altDocExactMatch = altDocMatch.some((row) => {
-            const pn = normalizeUpper(row.pn);
-            const pnAlt = normalizeUpper(row.pn_alt);
-            const pi = normalizeUpper(row.pi);
-            return pn === query || pnAlt === query || pi === query;
-        });
+        // Se a consulta é exatamente um PN conhecido, esse PN define a identidade
+        // do cartão. Ocorrências do mesmo texto em nomenclaturas/manuais continuam
+        // como referências técnicas e não podem criar cartões concorrentes.
+        const exactPnIdentity = hasExactPnMatch(query, [
+            itemsMatch, dicMatch, ppuMatch, lisdeMatch, plMatch, ceimspaMatch,
+            rfqMatch, sbPnMatch, apelidosMatch, orderBookMatch, focMatch, repairMatch,
+            equipmentMatch, technicalManualMatch,
+        ])
+            || rfqMatch.some((row) => normalizeUpper(row.pn_relacionado) === query)
+            || altDocMatch.some((row) => normalizeUpper(row.pn) === query || normalizeUpper(row.pn_alt) === query)
+            || adminDocMatch.some((row) => normalizeUpper(row.assunto_pn) === query);
 
-        if (altDocExactMatch && pnsEncontrados.has(query)) {
+        if (exactPnIdentity && pnsEncontrados.has(query)) {
             pnsEncontrados = new Set([query]);
+
+            const hasWtpTextReference = technicalManualMatch.some((row) => {
+                const manualCode = normalizeUpper(row.manual_codigo);
+                const manualType = normalizeUpper(row.tipo_manual);
+                const isWtp = manualType === 'WTP' || manualCode.startsWith('WTP');
+                return isWtp
+                    && normalizeUpper(row.pn) !== query
+                    && normalizeUpper(row.nomenclatura).includes(query);
+            });
+            if (hasWtpTextReference) registerSource(fontesEncontradas, query, 'MANUAL_TECNICO_WTP_REFERENCIA');
+        } else {
+            const altDocExactMatch = altDocMatch.some((row) => {
+                const pn = normalizeUpper(row.pn);
+                const pnAlt = normalizeUpper(row.pn_alt);
+                const pi = normalizeUpper(row.pi);
+                return pn === query || pnAlt === query || pi === query;
+            });
+
+            if (altDocExactMatch && pnsEncontrados.has(query)) {
+                pnsEncontrados = new Set([query]);
+            }
         }
 
         const arrayPns = Array.from(pnsEncontrados);
@@ -484,7 +666,7 @@ exports.searchItems = async (req, res) => {
         // ---------------------------------------------------------
         // FASE 2: RECOLHA DE DADOS EM LOTE (PARALELA)
         // ---------------------------------------------------------
-        const q1 = supabase.from('estoque_ppu').select('*').in('pn', arrayPns);
+        const q1 = loadEffectivePpuRowsByPns(arrayPns).then((data) => ({ data }));
         const q2 = supabase.from('leonardo_spares').select('*').in('pn', arrayPns);
         const q3 = supabase.from('leonardo_foc_spares').select('*').in('pn', arrayPns);
         const q4 = supabase.from('leonardo_repairs').select('*').in('pn', arrayPns);
@@ -492,13 +674,18 @@ exports.searchItems = async (req, res) => {
         const q6 = supabase.from('odc_requests').select('*').in('pn', arrayPns);
         const q7 = supabase.from('lisde').select('*').in('pn', arrayPns);
         const q8 = supabase.from('price_list').select('*').in('pn', arrayPns);
-        const q9 = supabase.from('rfq_cotacoes').select('*').in('pn', arrayPns);
+        const q9 = supabase.from('rfq_cotacoes').select('*').eq('ativo', true).in('pn', arrayPns);
         const q10 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura, qtd, capitulo, item_num, aplicabilidade').in('pn', arrayPns);
         const q11 = supabase.from('compras_pds').select('*').in('pn', arrayPns).eq('ativo', true);
         const q12 = supabase.from('work_orders').select('*').in('pn', arrayPns).eq('ativo', true);
         const q13 = supabase.from('leonardo_admin_docs').select('*').in('assunto_pn', arrayPns);
+        const q14 = supabase.from('v_sisha_receipt_stock_status').select('*').in('pn', arrayPns);
+        const q15 = supabase.from('v_sisha_equipamentos_search').select('id,pn,sn,nomenclatura,local_atual,categoria_local_atual,condicao_atual,confianca_localizacao,anv_atual,garantia_vencimento,ultima_evidencia_tipo,ultima_evidencia_documento').in('pn', arrayPns);
+        const q16 = supabase.from('v_sisha_equipamentos_ppu_reconciliacao').select('*').in('pn', arrayPns);
+        const q17 = loadReferencePriceRows().then((rows) => ({ data: (rows || []).filter((row) => arrayPns.includes(normalizeUpper(row.pn))) }));
+        const q18 = supabase.from('v_sisha_manual_pn_aplicacao').select('*').in('pn', arrayPns);
 
-        const batchResults = await Promise.allSettled([q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12, q13]);
+        const batchResults = await Promise.allSettled([q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12, q13, q14, q15, q16, q17, q18]);
         const getBatchRes = (index) => batchResults[index].status === 'fulfilled' ? batchResults[index].value.data : null;
 
         const ppuData = getBatchRes(0) || [];
@@ -517,17 +704,50 @@ exports.searchItems = async (req, res) => {
         }
         const lisdeData = getBatchRes(6) || [];
         const plData = getBatchRes(7) || [];
-        const rfqDataFull = getBatchRes(8) || [];
+        const rfqDirectData = getBatchRes(8) || [];
+        let rfqRelatedData = [];
+        try {
+            const { data } = await supabase.from('rfq_cotacoes').select('*').eq('ativo', true).in('pn_relacionado', arrayPns);
+            rfqRelatedData = data || [];
+        } catch (_) { rfqRelatedData = []; }
+        const rfqMap = new Map();
+        [...rfqDirectData, ...rfqRelatedData].forEach((row) => rfqMap.set(String(row.id || `${row.cotacao_numero}|${row.pn}|${row.pn_relacionado || ''}`), row));
+        const rfqDataFull = Array.from(rfqMap.values());
         const sbItemData = getBatchRes(9) || [];
         const comprasPdData = getBatchRes(10) || [];
         const workOrdersData = getBatchRes(11) || [];
         const adminDocData = getBatchRes(12) || [];
+        const receiptStockStatusData = getBatchRes(13) || [];
+        const equipmentData = getBatchRes(14) || [];
+        const equipmentReconciliationData = getBatchRes(15) || [];
+        const referencePriceData = getBatchRes(16) || [];
+        const technicalManualData = getBatchRes(17) || [];
+        // O rastreio físico lê o estoque bruto + política de LOC. Não altera o saldo PPU oficial.
+        const ppuTrackingData = await loadTrackingRowsByPns(arrayPns).catch(() => []);
+
+        // Contexto WTP: para reconhecer variantes de ITEM (ex.: 380/380A/380B)
+        // precisamos enxergar as outras linhas do mesmo manual, não apenas o PN pesquisado.
+        // A leitura é somente documental; nenhuma relação criada aqui vira alternativo confirmado.
+        let technicalManualContextData = technicalManualData;
+        const technicalManualIds = [...new Set(technicalManualData.map((row) => row.manual_id).filter(Boolean))];
+        if (technicalManualIds.length > 0) {
+            try {
+                const { data } = await supabase
+                    .from('v_sisha_manual_pn_aplicacao')
+                    .select('*')
+                    .in('manual_id', technicalManualIds.slice(0, 30))
+                    .limit(5000);
+                if (data && data.length > 0) technicalManualContextData = data;
+            } catch (_) {
+                technicalManualContextData = technicalManualData;
+            }
+        }
 
         let altDocRows = [];
         try {
             const [altByPnRes, altByAltRes] = await Promise.allSettled([
-                supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').in('pn', arrayPns),
-                supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').in('pn_alt', arrayPns),
+                supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').eq('ativo', true).in('pn', arrayPns),
+                supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').eq('ativo', true).in('pn_alt', arrayPns),
             ]);
             const altByPn = altByPnRes.status === 'fulfilled' ? (altByPnRes.value.data || []) : [];
             const altByAlt = altByAltRes.status === 'fulfilled' ? (altByAltRes.value.data || []) : [];
@@ -598,8 +818,7 @@ exports.searchItems = async (req, res) => {
         let ppuAltData = [];
         if (altPns.length > 0) {
             const safeAltPns = altPns.slice(0, 150).map((item) => normalizeUpper(item)).filter(Boolean);
-            const { data: pAlt } = await supabase.from('estoque_ppu').select('pn, quantidade').in('pn', safeAltPns);
-            ppuAltData = pAlt || [];
+            ppuAltData = await loadEffectivePpuRowsByPns(safeAltPns).catch(() => []);
         }
 
         const pisToSearch = new Set();
@@ -607,10 +826,22 @@ exports.searchItems = async (req, res) => {
         allAlternativosRaw.forEach((a) => { if (a.pi) pisToSearch.add(a.pi); });
 
         let allCeimspa = [];
-        if (pisToSearch.size > 0) {
-            const safePis = Array.from(pisToSearch).slice(0, 100);
-            const { data: ceimspa } = await supabase.from('estoque_ceimspa').select('*').in('pi', safePis);
-            allCeimspa = ceimspa || [];
+        const safePis = Array.from(pisToSearch).slice(0, 100);
+        const ceimspaQueries = [];
+        if (safePis.length > 0) {
+            ceimspaQueries.push(supabase.from('v_sisha_ceimspa_disponibilidade').select('*').in('pi', safePis));
+        }
+        if (arrayPns.length > 0) {
+            ceimspaQueries.push(supabase.from('v_sisha_ceimspa_disponibilidade').select('*').in('pn', arrayPns));
+        }
+        if (ceimspaQueries.length > 0) {
+            const ceimspaResults = await Promise.allSettled(ceimspaQueries);
+            const ceimspaMap = new Map();
+            ceimspaResults.forEach((result) => {
+                if (result.status !== 'fulfilled') return;
+                (result.value.data || []).forEach((row) => ceimspaMap.set(row.id, row));
+            });
+            allCeimspa = Array.from(ceimspaMap.values());
         }
 
         const sbHeaderMap = new Map((sbHeaders || []).map((row) => [normalizeUpper(row.sb_numero), row]));
@@ -620,15 +851,17 @@ exports.searchItems = async (req, res) => {
         // FASE 4: MONTAGEM FINAL DO CARTÃO
         // ---------------------------------------------------------
         const finalResults = [];
-        const dataHoje = new Date();
-        dataHoje.setHours(0, 0, 0, 0);
-
         for (const pn of arrayPns) {
             const pnUpper = normalizeUpper(pn);
             const myDic = dicData.filter((d) => normalizeUpper(d.pn) === pnUpper);
             const myPpu = ppuData.filter((p) => normalizeUpper(p.pn) === pnUpper);
+            const myPpuTracking = ppuTrackingData.filter((p) => normalizeUpper(p.pn) === pnUpper);
+            const myPpuExcluded = myPpuTracking.filter((p) => p.contabiliza_ppu === false);
+            const myPpuRedirectedCeimspa = myPpuExcluded.filter((p) => normalizeUpper(p.destino_contabilizacao) === 'CEIMSPA');
             const myPl = plData.filter((p) => normalizeUpper(p.pn) === pnUpper);
-            const myRfq = rfqDataFull.filter((r) => normalizeUpper(r.pn) === pnUpper);
+            const myRfqDirect = rfqDataFull.filter((r) => normalizeUpper(r.pn) === pnUpper);
+            const myRfqRelated = rfqDataFull.filter((r) => normalizeUpper(r.pn_relacionado) === pnUpper);
+            const myRfq = [...myRfqDirect, ...myRfqRelated.filter((row) => !myRfqDirect.some((direct) => direct.id === row.id))];
             const mySbItems = sbItemData.filter((row) => normalizeUpper(row.pn) === pnUpper);
 
             let foundNsn = 'Aguardando Cadastro';
@@ -664,6 +897,7 @@ exports.searchItems = async (req, res) => {
             const myLisde = lisdeData.filter((l) => normalizeUpper(l.pn) === pnUpper);
             const nomeEscolhido = chooseBestName([
                 { nome: myDic.find((d) => isMeaningfulName(d.nomenclatura))?.nomenclatura, origem: 'DICIONARIO_MESTRE' },
+                { nome: technicalManualData.find((m) => normalizeUpper(m.pn) === pnUpper && isMeaningfulName(m.nomenclatura))?.nomenclatura, origem: 'MANUAL_TECNICO_WTP' },
                 { nome: myPl.find((p) => isMeaningfulName(p.nomenclatura))?.nomenclatura, origem: 'PRICE_LIST' },
                 { nome: mySbItems.find((s) => isMeaningfulName(s.nomenclatura))?.nomenclatura, origem: 'SERVICE_BULLETIN' },
                 { nome: myRfq.find((r) => isMeaningfulName(r.nomenclatura))?.nomenclatura, origem: 'RFQ_COTACOES' },
@@ -681,22 +915,62 @@ exports.searchItems = async (req, res) => {
                 origem_nsn: origemNsn || null,
             };
 
-            item.oda = odaData.filter((p) => normalizeUpper(p.pn) === pnUpper);
-            const legacyOdc = odcData.filter((p) => normalizeUpper(p.pn) === pnUpper);
-            const comprasPdOdc = comprasPdData
+            const processKey = (row = {}) => {
+                const pd = normalizeUpper(row.numero_pd || row.pd_referencia || row.documento_referencia);
+                const pn = normalizeUpper(row.pn || pnUpper);
+                return `${pd.replace(/[^A-Z0-9]/g, '')}|${pn.replace(/[^A-Z0-9]/g, '')}`;
+            };
+
+            const odaMap = new Map();
+            odaData
+                .filter((p) => normalizeUpper(p.pn) === pnUpper)
+                .forEach((row) => odaMap.set(processKey(row), row));
+
+            comprasPdData
+                .filter((p) => normalizeUpper(p.pn) === pnUpper && p.ativo !== false && normalizeUpper(p.status_grupo || p.status) === 'ODA')
+                .forEach((pd) => {
+                    const key = processKey(pd);
+                    const orderBook = odaMap.get(key) || null;
+                    odaMap.set(key, {
+                        ...(orderBook || {}),
+                        ...pd,
+                        origem: orderBook ? 'ORDER_BOOK_RECONCILIADO' : (pd.origem_importacao || 'COMPRAS_PDS'),
+                        documento_referencia: pd.numero_pd || orderBook?.documento_referencia,
+                        pd_referencia: pd.numero_pd || orderBook?.documento_referencia,
+                        status_categoria: orderBook?.status_categoria || 'ODA',
+                        order_book_snapshot: orderBook,
+                    });
+                });
+            item.oda = Array.from(odaMap.values());
+
+            const odcStatuses = new Set(['ELB', 'TRI', 'ANS', 'COT', 'PRO', 'LPC', 'ODC', 'ATIVO']);
+            const odcMap = new Map();
+            odcData
+                .filter((p) => normalizeUpper(p.pn) === pnUpper)
+                .forEach((row) => {
+                    const key = processKey(row);
+                    if (!odaMap.has(key)) odcMap.set(key, row);
+                });
+
+            comprasPdData
                 .filter((p) => {
                     const st = normalizeUpper(p.status_grupo || p.status);
-                    return normalizeUpper(p.pn) === pnUpper && p.ativo !== false && !['CAN', 'EXCLUIDO', 'REC', 'FAT'].includes(st);
+                    return normalizeUpper(p.pn) === pnUpper && p.ativo !== false && odcStatuses.has(st);
                 })
                 .map((p) => ({
                     ...p,
                     origem: p.origem_importacao || 'COMPRAS_PDS',
+                    documento_referencia: p.numero_pd,
                     pd_referencia: p.numero_pd,
                     qtd_pendente: Number(p.qtd_comprada || p.quantidade || p.qtd_pedida || 0),
                     status_pd: p.status_grupo || p.status,
                     numero_oc: p.numero_oc,
-                }));
-            item.odc = [...legacyOdc, ...comprasPdOdc];
+                }))
+                .forEach((row) => {
+                    const key = processKey(row);
+                    if (!odaMap.has(key)) odcMap.set(key, { ...(odcMap.get(key) || {}), ...row });
+                });
+            item.odc = Array.from(odcMap.values());
             item.foc = focData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const repairsOrderBook = repData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const repairsWo = workOrdersData
@@ -714,6 +988,9 @@ exports.searchItems = async (req, res) => {
                     tipo_wo: wo.tipo_wo || null,
                     observacao: wo.observacao || null,
                     data_previsao: wo.data_previsao_entrega || wo.data_previsao,
+                    valor_orcamento: Number(wo.valor_total) > 0 ? Number(wo.valor_total) : (Number(wo.preco_contrato) > 0 ? Number(wo.preco_contrato) : null),
+                    moeda_orcamento: wo.moeda || 'GBP',
+                    origem_orcamento: Number(wo.valor_total) > 0 || Number(wo.preco_contrato) > 0 ? 'WO' : null,
                 }));
             const docsOrderBook = adminDocData
                 .filter((doc) => normalizeUpper(doc.assunto_pn) === pnUpper)
@@ -726,39 +1003,197 @@ exports.searchItems = async (req, res) => {
                     pn: pnUpper,
                     observacao: `Documento ${doc.tipo_doc || 'Order Book'} vinculado ao PN ${pnUpper}`,
                 }));
-            item.repairs = [...repairsOrderBook, ...repairsWo, ...docsOrderBook];
+            const repairQuotes = myRfqDirect
+                .filter((row) => ['REPARO', 'OVERHAUL', 'SERVICO'].includes(normalizeUpper(row.tipo_cotacao)) && row.ativo !== false)
+                .map((row) => ({
+                    origem: 'COTACAO_REPARO',
+                    tipo: row.tipo_cotacao || 'REPARO',
+                    documento_referencia: row.cotacao_numero,
+                    pn: row.pn,
+                    sn: row.sn || null,
+                    numero_wo: row.wo_referencia || null,
+                    status: isRfqPriceCurrent(row.validade, row) === false ? 'COTAÇÃO VENCIDA' : 'COTAÇÃO',
+                    observacao: row.observacoes || null,
+                    fornecedor: row.fornecedor || null,
+                    validade: row.validade || null,
+                    valor_orcamento: Number(row.valor_unitario) > 0 ? Number(row.valor_unitario) : null,
+                    moeda_orcamento: row.moeda || 'GBP',
+                    origem_orcamento: 'COTAÇÃO',
+                }));
+            item.repairs = [...repairsOrderBook, ...repairsWo, ...repairQuotes, ...docsOrderBook];
             item.lisde = lisdeData.filter((l) => normalizeUpper(l.pn) === pnUpper);
 
-            let cotacoesValidasParaOPriceList = [];
-            myRfq.forEach((cotacao) => {
-                if (cotacao.validade) {
-                    const partesValidade = cotacao.validade.split(' a ');
-                    const dataFimStr = partesValidade.length === 2 ? partesValidade[1].trim() : cotacao.validade.trim();
-                    const pData = dataFimStr.split('.');
-                    if (pData.length === 3) {
-                        const dataFim = new Date(`${pData[2]}-${pData[1]}-${pData[0]}T12:00:00Z`);
-                        if (dataFim >= dataHoje) {
-                            cotacoesValidasParaOPriceList.push({
-                                origem: 'RFQ',
-                                valor_unitario: cotacao.valor_unitario,
-                                lead_time: cotacao.lead_time_dias,
-                                moq: cotacao.qtd_solicitada,
-                                validade: cotacao.validade,
-                                cotacao_numero: cotacao.cotacao_numero,
-                                data_insercao: cotacao.data_insercao,
-                            });
-                        }
-                    }
-                }
-            });
-            cotacoesValidasParaOPriceList.sort((a, b) => new Date(b.data_insercao) - new Date(a.data_insercao));
-            item.price_list = [...cotacoesValidasParaOPriceList, ...myPl];
+            const resolvedPrice = referencePriceData.find((row) => normalizeUpper(row.pn) === pnUpper) || null;
+            const priceEntries = [];
+
+            if (resolvedPrice && Number(resolvedPrice.valor_unitario_gbp) > 0) {
+                const resolvedRfq = resolvedPrice.fonte_preco === 'RFQ'
+                    ? myRfqDirect.find((row) => String(resolvedPrice.documento_fonte || '').includes(String(row.cotacao_numero || '')))
+                    : null;
+                priceEntries.push({
+                    origem: resolvedPrice.fonte_preco,
+                    valor_unitario: Number(resolvedPrice.valor_unitario_gbp),
+                    moeda: 'GBP',
+                    lead_time: resolvedPrice.lead_time,
+                    moq: resolvedPrice.moq,
+                    validade: resolvedPrice.validade,
+                    vigente: resolvedPrice.vigente,
+                    documento_fonte: resolvedPrice.documento_fonte,
+                    data_referencia: resolvedPrice.data_referencia,
+                    resolvido: true,
+                    pn_relacionado: resolvedRfq?.pn_relacionado || null,
+                    tipo_relacao_pn: resolvedRfq?.tipo_relacao_pn || null,
+                });
+            }
+
+            myPl
+                .filter((row) => Number(row.valor_unitario) > 0)
+                .forEach((row) => {
+                    const duplicateResolved = resolvedPrice?.fonte_preco === 'PRICE_LIST'
+                        && Number(resolvedPrice.valor_unitario_gbp) === Number(row.valor_unitario);
+                    if (duplicateResolved) return;
+                    priceEntries.push({
+                        ...row,
+                        origem: 'PRICE_LIST',
+                        moeda: 'GBP',
+                        resolvido: false,
+                    });
+                });
+
+            [...myRfqDirect]
+                .filter((row) => Number(row.valor_unitario) > 0 && normalizeUpper(row.tipo_cotacao || 'MATERIAL') === 'MATERIAL')
+                .sort((a, b) => new Date(b.data_insercao || 0) - new Date(a.data_insercao || 0))
+                .forEach((row) => {
+                    const duplicateResolved = resolvedPrice?.fonte_preco === 'RFQ'
+                        && String(resolvedPrice.documento_fonte || '').includes(String(row.cotacao_numero || ''))
+                        && Number(resolvedPrice.valor_unitario_gbp) === Number(row.valor_unitario);
+                    if (duplicateResolved) return;
+                    priceEntries.push({
+                        origem: 'RFQ',
+                        valor_unitario: Number(row.valor_unitario),
+                        moeda: 'GBP',
+                        lead_time: row.lead_time_dias,
+                        moq: row.qtd_solicitada,
+                        validade: row.validade,
+                        cotacao_numero: row.cotacao_numero,
+                        data_referencia: row.data_cotacao || row.data_insercao,
+                        documento_fonte: row.cotacao_numero ? `RFQ ${row.cotacao_numero}` : 'RFQ',
+                        resolvido: false,
+                        pn_relacionado: row.pn_relacionado || null,
+                        tipo_relacao_pn: row.tipo_relacao_pn || null,
+                        fornecedor: row.fornecedor || null,
+                        vigente: isRfqPriceCurrent(row.validade, row),
+                    });
+                });
+
+            item.rfq_evolucoes = myRfq
+                .filter((row) => ['SUPERSEDES', 'SUPERSEDED_BY'].includes(normalizeUpper(row.tipo_relacao_pn)) && row.pn_relacionado)
+                .map((row) => {
+                    const tipo = normalizeUpper(row.tipo_relacao_pn);
+                    const pnAnterior = tipo === 'SUPERSEDES' ? normalizeUpper(row.pn_relacionado) : normalizeUpper(row.pn);
+                    const pnAtual = tipo === 'SUPERSEDES' ? normalizeUpper(row.pn) : normalizeUpper(row.pn_relacionado);
+                    return {
+                        id: row.id, pn_anterior: pnAnterior, pn_atual_fornecimento: pnAtual,
+                        cotacao_numero: row.cotacao_numero, fornecedor: row.fornecedor || 'LEONARDO',
+                        data_cotacao: row.data_cotacao, validade: row.validade,
+                        preco_vigente: isRfqPriceCurrent(row.validade, row),
+                        valor_unitario: Number(row.valor_unitario) > 0 ? Number(row.valor_unitario) : null,
+                        moeda: row.moeda || 'GBP', lead_time_dias: row.lead_time_dias,
+                        relacao_pn_texto: row.relacao_pn_texto, observacoes: row.observacoes || null,
+                    };
+                })
+                .filter((row, index, all) => all.findIndex((other) => `${other.pn_anterior}|${other.pn_atual_fornecimento}|${other.cotacao_numero}` === `${row.pn_anterior}|${row.pn_atual_fornecimento}|${row.cotacao_numero}`) === index)
+                .sort((a, b) => new Date(b.data_cotacao || 0) - new Date(a.data_cotacao || 0));
+
+            item.price_list = priceEntries;
+            item.preco_referencia = resolvedPrice ? {
+                valor_unitario_gbp: Number(resolvedPrice.valor_unitario_gbp) || null,
+                moeda: resolvedPrice.moeda || 'GBP',
+                fonte_preco: resolvedPrice.fonte_preco || null,
+                fonte_exibicao: resolvedPrice.fonte_exibicao || resolvedPrice.fonte_preco || null,
+                documento_fonte: resolvedPrice.documento_fonte || null,
+                data_referencia: resolvedPrice.data_referencia || null,
+                validade: resolvedPrice.validade || null,
+                vigente: resolvedPrice.vigente ?? null,
+                estimativa: Boolean(resolvedPrice.estimativa),
+                necessita_cotacao: Boolean(resolvedPrice.necessita_cotacao),
+                status_preco: resolvedPrice.status_preco || null,
+            } : null;
 
             item.ppu_qtd = myPpu.reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
-            item.ppu_locais = myPpu.length > 0 ? [...new Set(myPpu.map((p) => p.localizacao))].join(' | ') : 'N/A';
+            item.ppu_oficial_qtd = myPpu
+                .filter((p) => p.origem_saldo !== 'RECIBO_PENDENTE')
+                .reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+            item.recibos_pendentes_qtd = myPpu
+                .filter((p) => p.origem_saldo === 'RECIBO_PENDENTE')
+                .reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+            item.ppu_detalhes = aggregatePpuDetails(myPpu);
+            item.ppu_locais = item.ppu_detalhes.length > 0
+                ? item.ppu_detalhes.map((p) => `${p.localizacao} (${p.quantidade})`).join(' | ')
+                : 'N/A';
 
-            const garantias = myPpu.map((p) => p.data_garantia).filter(Boolean);
+            item.equipamentos_serializados = equipmentData
+                .filter((equipment) => normalizeUpper(equipment.pn) === pnUpper)
+                .map((equipment) => ({
+                    id: equipment.id, pn: equipment.pn, sn: equipment.sn, nomenclatura: equipment.nomenclatura,
+                    local_atual: equipment.local_atual, categoria_local_atual: equipment.categoria_local_atual,
+                    condicao_atual: equipment.condicao_atual, confianca_localizacao: equipment.confianca_localizacao,
+                    anv_atual: equipment.anv_atual, garantia_vencimento: equipment.garantia_vencimento,
+                    ultima_evidencia_tipo: equipment.ultima_evidencia_tipo, ultima_evidencia_documento: equipment.ultima_evidencia_documento,
+                }));
+
+            // A reconciliação PPU x SN só faz sentido quando existe evidência documental
+            // de que o PN pertence a um fluxo serializável. A view de reconciliação também
+            // devolve linhas para itens comuns do PPU; sem este gate, um simples saldo
+            // pode aparecer incorretamente como "0 de N com SN identificado".
+            //
+            // Evidências aceitas:
+            // 1) cadastro/inventário/lista de Equipamentos;
+            // 2) qualquer registro de reparo do Order Book (Repairs/Warranty Repairs);
+            // 3) qualquer WO ativa, pois WO é fluxo de reparo de equipamento.
+            //
+            // PPU, localização, manual, LISDE, PD ou OC isoladamente NÃO ativam SN.
+            const hasEquipmentInventoryEvidence = item.equipamentos_serializados.length > 0
+                || myPpu.some((row) => isRealStockSerial(row.sn));
+            const hasOrderBookRepairEvidence = repairsOrderBook.length > 0;
+            const hasWorkOrderRepairEvidence = repairsWo.length > 0;
+
+            item.rastreabilidade_sn_aplicavel =
+                hasEquipmentInventoryEvidence || hasOrderBookRepairEvidence || hasWorkOrderRepairEvidence;
+            item.rastreabilidade_sn_fontes = [
+                hasEquipmentInventoryEvidence ? 'EQUIPAMENTOS' : null,
+                hasOrderBookRepairEvidence ? 'ORDER_BOOK_REPAIR' : null,
+                hasWorkOrderRepairEvidence ? 'WORK_ORDER' : null,
+            ].filter(Boolean);
+            item.reconciliacao_ppu_sn = item.rastreabilidade_sn_aplicavel
+                ? equipmentReconciliationData.filter((row) => normalizeUpper(row.pn) === pnUpper)
+                : [];
+            item.equipamentos_total_identificados = item.equipamentos_serializados.length;
+
+            const garantias = [...myPpu.map((p) => p.data_garantia), ...item.equipamentos_serializados.map((e) => e.garantia_vencimento)].filter(Boolean);
             item.data_garantia = garantias.length > 0 ? garantias.sort().reverse()[0] : null;
+
+            item.manual_tecnico_aplicacoes = technicalManualData
+                .filter((row) => normalizeUpper(row.pn) === pnUpper)
+                .map((row) => ({
+                    manual_id: row.manual_id,
+                    manual_codigo: row.manual_codigo,
+                    tipo_manual: row.tipo_manual,
+                    titulo: row.manual_titulo,
+                    fabricante: row.fabricante,
+                    ata_dmc: row.ata_dmc,
+                    revisao: row.revisao,
+                    data_revisao: row.data_revisao,
+                    fig: row.fig || '1',
+                    item: row.item,
+                    nomenclatura: row.nomenclatura,
+                    usage_code: row.usage_code,
+                    units_per_assy: row.units_per_assy,
+                    tipo_vinculo: row.tipo_vinculo,
+                    page_ref: row.page_ref,
+                    storage_status: row.storage_status,
+                }))
+                .filter((row, index, all) => all.findIndex((other) => `${other.manual_id}|${other.fig}|${other.item}|${other.nomenclatura}` === `${row.manual_id}|${row.fig}|${row.item}|${row.nomenclatura}`) === index);
 
             item.dicionario = myDic;
 
@@ -816,12 +1251,87 @@ exports.searchItems = async (req, res) => {
             });
 
             item.alternativos = Array.from(altsUnicosMap.values()).sort(compareAlternativeCards);
-            item.tem_mapa_manual = item.dicionario.length > 0;
+
+            // Relações especiais da WTP são informativas e fail-closed:
+            // ITEM 380/380A, por exemplo, gera uma possível equivalência WTP,
+            // mas só entra em `alternativos` se alguma regra oficial já a confirmar.
+            const wtpStructuredReferences = buildWtpReferences({
+                pn: pnUpper,
+                applications: item.manual_tecnico_aplicacoes.map((row) => ({ ...row, pn: pnUpper })),
+                manualRows: technicalManualContextData,
+                confirmedAlternatives: item.alternativos.map((alt) => alt.pn),
+            });
+
+            const wtpTextReferences = pnUpper === query
+                ? buildWtpTextReferences({
+                    pn: pnUpper,
+                    rows: technicalManualMatch,
+                    confirmedAlternatives: item.alternativos.map((alt) => alt.pn),
+                })
+                : [];
+
+            const wtpReferenceMap = new Map();
+            [...wtpStructuredReferences, ...wtpTextReferences].forEach((ref) => {
+                const key = [
+                    ref.tipo_relacao,
+                    ref.manual_id,
+                    normalizeUpper(ref.pn_relacionado),
+                    normalizeUpper(ref.fig),
+                    normalizeUpper(ref.item_relacionado),
+                ].join('|');
+                if (!wtpReferenceMap.has(key)) wtpReferenceMap.set(key, ref);
+            });
+            item.wtp_referencias = Array.from(wtpReferenceMap.values());
+
+            item.tem_mapa_manual = item.dicionario.length > 0
+                || item.manual_tecnico_aplicacoes.length > 0
+                || item.wtp_referencias.length > 0;
             item.fontes_alternativos = mergeSourceLabels(item.alternativos.map((alt) => alt.fonte));
 
             const meusPis = [...new Set(item.dicionario.map((d) => d.pi).filter(Boolean))];
-            item.ceimspa_detalhes = allCeimspa.filter((c) => meusPis.includes(c.pi));
+            const ceimspaOficial = allCeimspa.filter((c) => normalizeUpper(c.pn) === pnUpper || meusPis.includes(c.pi));
+            const ceimspaPorClassificacaoPpu = myPpuRedirectedCeimspa.map((row) => ({
+                id: `PPU-LOC-CEIMSPA-${row.id}`,
+                pn: row.pn,
+                pi: row.nsn_pi || null,
+                nomenclatura: row.nomenclatura || null,
+                quantidade: Number(row.quantidade || 0),
+                sj: 'LOC PPU',
+                uf: row.localizacao || null,
+                sn: row.sn || null,
+                origem_saldo: 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA',
+                localizacao_fisica: row.localizacao || null,
+                situacao_operacional: row.situacao_operacional || 'A_CONFIRMAR',
+            }));
+            item.ceimspa_detalhes = [...ceimspaOficial, ...ceimspaPorClassificacaoPpu];
             item.ceimspa_qtd = item.ceimspa_detalhes.reduce((acc, c) => acc + (Number(c.quantidade) || 0), 0);
+
+            item.itens_fora_linha = myPpuExcluded.map((row) => {
+                const sn = isRealStockSerial(row.sn) ? normalizeUpper(row.sn) : null;
+                const evidencias = sn
+                    ? (item.repairs || []).filter((repair) => normalizeUpper(repair.sn) === sn).map((repair) => ({
+                        origem: repair.origem || null,
+                        documento: repair.numero_wo || repair.documento_referencia || null,
+                        status: repair.status || repair.resultado_tecnico || null,
+                        tipo: repair.tipo || repair.tipo_wo || null,
+                    }))
+                    : [];
+                return {
+                    id: row.id,
+                    pn: row.pn,
+                    sn: row.sn || null,
+                    quantidade: Number(row.quantidade || 0),
+                    nomenclatura: row.nomenclatura || null,
+                    localizacao_fisica: row.localizacao || 'NÃO DEFINIDO',
+                    contabiliza_em: row.destino_contabilizacao || 'FORA_LINHA',
+                    situacao_operacional: row.situacao_operacional || 'A_CONFIRMAR',
+                    observacao_classificacao: row.observacao_classificacao || null,
+                    evidencias,
+                };
+            });
+            item.itens_fora_linha_qtd = item.itens_fora_linha.reduce((acc, row) => acc + Number(row.quantidade || 0), 0);
+
+            item.recibos_incorporados = aggregateReceiptIncorporations(receiptStockStatusData, pnUpper);
 
             item.sb_referencias = mySbItems.map((row) => {
                 const sbNumero = normalizeUpper(row.sb_numero);

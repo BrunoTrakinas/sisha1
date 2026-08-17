@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, FileSearch, Send, Upload, CheckCircle2, XCircle, LoaderCircle, Database, ShieldCheck, Compass, Layers, ClipboardCheck, MessageSquare, RefreshCw } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Bot, FileSearch, Send, Upload, CheckCircle2, XCircle, LoaderCircle, Database, ShieldCheck, Compass, Layers, ClipboardCheck, RefreshCw, Download, Sparkles, RotateCcw, Copy, Check, ChevronDown } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { apiFetch, buildAuthHeaders } from '../lib/api';
 
@@ -39,13 +40,51 @@ function JsonCard({ title, value }) {
 
 function MessageBubble({ message }) {
   const mine = message.role === 'user';
+  const [copied, setCopied] = useState(false);
+
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(String(message.content || ''));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  if (mine) {
+    return (
+      <div className="flex justify-end py-2">
+        <div className="max-w-[88%] lg:max-w-[78%] rounded-[24px] rounded-br-md bg-blue-600 px-5 py-3.5 text-white shadow-sm">
+          <div className="whitespace-pre-wrap break-words text-[15px] font-semibold leading-7">{message.content}</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[92%] rounded-3xl px-5 py-4 shadow-sm border ${mine
-        ? 'bg-blue-600 text-white border-blue-500'
-        : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 border-slate-200 dark:border-slate-700'
-      }`}>
-        <p className="text-sm font-semibold whitespace-pre-wrap leading-relaxed">{message.content}</p>
+    <div className="group flex items-start gap-3 py-3">
+      <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
+        <Sparkles size={17} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="mb-1.5 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-black uppercase tracking-[0.14em] text-slate-700 dark:text-slate-200">Lince</span>
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">SISHA</span>
+          </div>
+          <button
+            type="button"
+            onClick={copyMessage}
+            className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-black text-slate-400 opacity-0 transition hover:bg-slate-100 hover:text-slate-700 group-hover:opacity-100 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            title="Copiar resposta"
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? 'COPIADO' : 'COPIAR'}
+          </button>
+        </div>
+        <div className="whitespace-pre-wrap break-words text-[15px] font-semibold leading-7 text-slate-800 dark:text-slate-100">
+          {message.content}
+        </div>
       </div>
     </div>
   );
@@ -80,10 +119,14 @@ function DestinationSelect({ value, onChange, options = [], disabled = false }) 
 
 export default function ChatLince() {
   const { token, user } = useAuth();
+  const navigate = useNavigate();
   const isAdmin = ['admin', 'dono'].includes(user?.role);
   const fileInputRef = useRef(null);
+  const composerRef = useRef(null);
+  const conversationEndRef = useRef(null);
 
   const [pergunta, setPergunta] = useState('');
+  const [contextoAberto, setContextoAberto] = useState(true);
   const [mensagens, setMensagens] = useState([
     {
       role: 'assistant',
@@ -106,18 +149,51 @@ export default function ChatLince() {
   const [destinoAdmin, setDestinoAdmin] = useState('');
   const [docMsg, setDocMsg] = useState(null);
   const [observacaoAdmin, setObservacaoAdmin] = useState('');
-  const [pendentes, setPendentes] = useState([]);
-  const [carregandoPendentes, setCarregandoPendentes] = useState(false);
-  const [helpdesk, setHelpdesk] = useState([]);
-  const [carregandoHelpdesk, setCarregandoHelpdesk] = useState(false);
-  const [respostasHelpdesk, setRespostasHelpdesk] = useState({});
-  const [helpdeskMsg, setHelpdeskMsg] = useState(null);
   const [acaoPendente, setAcaoPendente] = useState(null);
   const [senhaAcao, setSenhaAcao] = useState('');
   const [executandoAcao, setExecutandoAcao] = useState(false);
   const [acaoMsg, setAcaoMsg] = useState(null);
   const [reindexandoRag, setReindexandoRag] = useState(false);
   const [ragMsg, setRagMsg] = useState(null);
+
+  useEffect(() => {
+    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [mensagens, consultando]);
+
+  const resizeComposer = (element = composerRef.current) => {
+    if (!element) return;
+    element.style.height = 'auto';
+    element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
+  };
+
+  const limparComposer = () => {
+    setPergunta('');
+    window.requestAnimationFrame(() => {
+      if (composerRef.current) composerRef.current.style.height = '52px';
+    });
+  };
+
+  const novaConversa = () => {
+    setMensagens([{
+      role: 'assistant',
+      content: 'Olá! Sou o Lince. Posso cruzar PN, SN, Master OS, Livro de Equipamentos, PPU, Recibos, PIM, STC, WO, PD/OC, Order Book e manuais técnicos. Diga o que você precisa descobrir e eu separo fato confirmado, intenção e pendência.',
+    }]);
+    setFontes([]);
+    setModulos(null);
+    setTrilhaSn([]);
+    setAplicacoesManual([]);
+    setApelidoPendente(null);
+    setUltimoItemContexto(null);
+    setAcaoPendente(null);
+    limparComposer();
+  };
+
+  const onComposerKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
 
   const registrosSugeridos = useMemo(() => safeList(analise?.registros_sugeridos), [analise]);
   const riscos = useMemo(() => safeList(analise?.riscos), [analise]);
@@ -126,36 +202,10 @@ export default function ChatLince() {
   const acoesConsultivas = useMemo(() => safeList(analise?.acoes_consultivas), [analise]);
   const osEventos = useMemo(() => safeList(analise?.os_eventos_sugeridos), [analise]);
   const snTrilhaSugerida = useMemo(() => safeList(analise?.sn_trilha_sugerida), [analise]);
-
-  const carregarPendentes = async () => {
-    if (!isAdmin || !token) return;
-    setCarregandoPendentes(true);
-    try {
-      const response = await apiFetch('/chat-lince/documentos?status=PENDENTE_CONFIRMACAO', {}, token);
-      const result = await response.json();
-      if (result.status === 'success') setPendentes(result.data || []);
-    } catch {
-      // mantém a tela silenciosa para não poluir o fluxo principal
-    } finally {
-      setCarregandoPendentes(false);
-    }
-  };
-
-
-  const carregarHelpdesk = async () => {
-    if (!isAdmin || !token) return;
-    setCarregandoHelpdesk(true);
-    try {
-      const response = await apiFetch('/chat-lince/helpdesk?status=ABERTO', {}, token);
-      const result = await response.json();
-      if (result.status === 'success') setHelpdesk(result.data || []);
-    } catch {
-      // pendências humanas não devem quebrar o chat
-    } finally {
-      setCarregandoHelpdesk(false);
-    }
-  };
-
+  const isReceiptAnalysis = useMemo(() => {
+    const marker = `${tipoDocumento} ${analise?.classificacao || ''} ${analise?.destino_sugerido || ''}`.toUpperCase();
+    return marker.includes('RECIBO') || ['recibo_material', 'recibo_pd'].includes(tipoDocumento);
+  }, [analise, tipoDocumento]);
 
   const reindexarRag = async () => {
     if (!isAdmin || !token || reindexandoRag) return;
@@ -167,14 +217,19 @@ export default function ChatLince() {
         {
           method: 'POST',
           headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ limit: 1000 }),
+          body: JSON.stringify({ limit: 1000, limitPerSource: 1000, includeStructuredSources: true, includeChatDocuments: true }),
         },
         token
       );
       const result = await response.json();
       if (result.status === 'success') {
         const data = result.data || {};
-        setRagMsg({ tipo: 'success', texto: `RAG reindexado: ${data.indexed || 0}/${data.processed || 0} documento(s) indexado(s).` });
+        const docs = data.documentos_chat || {};
+        const fontes = data.fontes_logisticas || {};
+        setRagMsg({
+          tipo: 'success',
+          texto: `RAG reindexado: ${data.indexed || 0}/${data.processed || 0} registro(s), ${data.chunks || 0} trecho(s). Documentos: ${docs.indexed || 0}/${docs.processed || 0}. Fontes logísticas: ${fontes.indexed || 0}/${fontes.processed || 0}.`,
+        });
       } else {
         setRagMsg({ tipo: 'error', texto: result.message || 'Falha ao reindexar documentos.' });
       }
@@ -184,12 +239,6 @@ export default function ChatLince() {
       setReindexandoRag(false);
     }
   };
-
-  useEffect(() => {
-    carregarPendentes();
-    carregarHelpdesk();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, token]);
 
   const normalizarTexto = (value = '') => String(value || '')
     .normalize('NFD')
@@ -201,8 +250,8 @@ export default function ChatLince() {
   const temIdentificadorExplicito = (value = '') => {
     const normalized = normalizarTexto(value);
     return /\b(PN|P\/N|SN|S\/N|OC|ODC|ODA|PD|SEPD|WO|OS|PIM|SB)\b/.test(normalized)
-      || /\b[A-Z]{1,6}[\-\/]?\d[A-Z0-9.\-\/]{2,}\b/.test(normalized)
-      || /\b\d{4,}[A-Z0-9.\-\/]*\b/.test(normalized);
+      || /\b[A-Z]{1,6}[/-]?\d[A-Z0-9./-]{2,}\b/.test(normalized)
+      || /\b\d{4,}[A-Z0-9./-]*\b/.test(normalized);
   };
 
   const montarPerguntaBackend = (texto, contexto = ultimoItemContexto) => {
@@ -250,7 +299,6 @@ export default function ChatLince() {
     setModulos(result.data?.contexto?.modulos || null);
     setTrilhaSn(result.data?.contexto?.trilha_sn || []);
     setAplicacoesManual(result.data?.contexto?.aplicacoes_manual || []);
-    if (isAdmin) carregarHelpdesk();
   };
 
   const confirmarApelidoPendente = async () => {
@@ -321,7 +369,7 @@ export default function ChatLince() {
 
     const respostaConfirmacao = texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
     if (apelidoPendente && /^(sim|s|confirmo|confirma|isso|e isso|é isso|pode cadastrar|pode sim)$/.test(respostaConfirmacao)) {
-      setPergunta('');
+      limparComposer();
       setMensagens((prev) => [...prev, { role: 'user', content: texto }]);
       setConsultando(true);
       await confirmarApelidoPendente();
@@ -331,7 +379,7 @@ export default function ChatLince() {
 
     const perguntaBackend = montarPerguntaBackend(texto);
 
-    setPergunta('');
+    limparComposer();
     setConsultando(true);
     setMensagens((prev) => [...prev, { role: 'user', content: texto }]);
 
@@ -410,14 +458,15 @@ export default function ChatLince() {
       );
       const result = await response.json();
       if (result.status === 'success' || result.status === 'partial_success') {
-        const novaAnalise = result.data?.analise || null;
+        const novaAnalise = result.data?.analise
+          ? { ...result.data.analise, _arquivo_nome: arquivo?.name || result.data?.documento?.nome_arquivo || '' }
+          : null;
         setAnalise(novaAnalise);
         setDestinoAdmin(novaAnalise?.destino_sugerido || safeList(novaAnalise?.destinos_possiveis)[0]?.tabela || 'chat_lince_documentos');
         setDocumentoId(result.data?.documento_id || null);
         setDocMsg({ tipo: result.status === 'success' ? 'success' : 'warn', texto: result.message });
         setArquivo(null);
         if (fileInputRef.current) fileInputRef.current.value = '';
-        carregarPendentes();
       } else {
         setDocMsg({ tipo: 'error', texto: result.message || 'Falha ao analisar documento.' });
       }
@@ -426,6 +475,57 @@ export default function ChatLince() {
     } finally {
       setAnalisando(false);
     }
+  };
+
+  const enviarReciboParaTriagem = () => {
+    if (!analise || !isAdmin) return;
+    const extracted = analise?.entidades?.recibo || analise?.recibo_extraido || {};
+    const candidateItems = safeList(extracted.itens).length
+      ? safeList(extracted.itens)
+      : registrosSugeridos.map((registro) => registro?.payload || registro?.campos || registro).filter(Boolean);
+
+    const itens = candidateItems.map((item, index) => ({
+      sequencia_item: item.sequencia_item || index + 1,
+      pn: item.pn || item.part_number || item.identificador || '',
+      nsn_pi: item.nsn_pi || item.nsn || item.pi || '',
+      nomenclatura: item.nomenclatura || item.descricao || item.description || '',
+      quantidade: Number(item.quantidade ?? item.qtd ?? item.qty ?? 1) || 1,
+      sn: item.sn || item.serial_number || '',
+      localizacao_ppu: item.localizacao_ppu || item.local || '',
+      condicao_item: item.condicao_item || 'RECEBIDO_DISPONIVEL',
+      observacao_item: item.observacao_item || item.observacao || '',
+      inventariado_ppu: false,
+      data_garantia: item.data_garantia || '',
+      valor_unitario: item.valor_unitario ?? item.preco_unitario ?? '',
+      documento_referencia: item.documento_referencia || item.pd || extracted.documento_referencia || '',
+      dados_originais: item,
+    })).filter((item) => String(item.pn || '').trim());
+
+    if (!itens.length) {
+      setDocMsg({ tipo: 'error', texto: 'A IA não estruturou nenhum item com PN. Revise o documento ou use a importação própria de recibos.' });
+      return;
+    }
+
+    const draft = {
+      numero_recibo: extracted.numero_recibo || extracted.numero || extracted.recibo_ref || '',
+      tipo_recebimento: extracted.tipo_recebimento || (tipoDocumento === 'recibo_pd' ? 'PD' : 'MATERIAL'),
+      data_recebimento: extracted.data_recebimento || extracted.data_entrega || '',
+      documento_referencia: extracted.documento_referencia || '',
+      fornecedor: extracted.fornecedor || '',
+      origem_material: extracted.origem_material || '',
+      recebido_por_nome: extracted.recebido_por_nome || extracted.recebido_por || '',
+      conferido_por_nome: extracted.conferido_por_nome || extracted.conferido_por || '',
+      metodo_importacao: 'IA_CHAT_LINCE',
+      arquivo_nome: analise?._arquivo_nome || '',
+      chat_lince_documento_id: documentoId,
+      is_foc: Boolean(extracted.is_foc),
+      observacao: extracted.observacao || 'Rascunho extraído pelo Chat Lince. Revisão humana obrigatória.',
+      dados_originais: { classificacao: analise.classificacao, entidades: analise.entidades },
+      itens,
+    };
+
+    window.sessionStorage.setItem('sisha_receipt_draft', JSON.stringify(draft));
+    navigate('/recebimentos');
   };
 
   const decidirDocumento = async (acao, id = documentoId, destinoOverride = '') => {
@@ -445,7 +545,6 @@ export default function ChatLince() {
       if (result.status === 'success') {
         setDocMsg({ tipo: 'success', texto: result.message });
         setObservacaoAdmin('');
-        carregarPendentes();
       } else {
         setDocMsg({ tipo: 'error', texto: result.message || 'Falha na decisão documental.' });
       }
@@ -455,153 +554,215 @@ export default function ChatLince() {
   };
 
 
-  const responderHelpdesk = async (id) => {
-    const respostaAdmin = String(respostasHelpdesk[id] || '').trim();
-    if (!respostaAdmin || !isAdmin) return;
-    setHelpdeskMsg(null);
+  const exportarNormalizado = async (id = documentoId) => {
+    if (!id || !isAdmin) return;
+    setDocMsg(null);
     try {
       const response = await apiFetch(
-        `/chat-lince/helpdesk/${id}/responder`,
-        {
-          method: 'POST',
-          headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ respostaAdmin, responderPeloChat: true }),
-        },
+        `/chat-lince/documentos/${id}/exportar-normalizado`,
+        { method: 'GET', headers: buildAuthHeaders(token) },
         token
       );
-      const result = await response.json();
-      if (result.status === 'success') {
-        setHelpdeskMsg({ tipo: 'success', texto: result.message });
-        setRespostasHelpdesk((prev) => ({ ...prev, [id]: '' }));
-        carregarHelpdesk();
-      } else {
-        setHelpdeskMsg({ tipo: 'error', texto: result.message || 'Falha ao responder pendência.' });
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}));
+        throw new Error(errorBody.message || 'Falha ao exportar documento normalizado.');
       }
-    } catch {
-      setHelpdeskMsg({ tipo: 'error', texto: 'Falha de comunicação com o servidor.' });
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `SISHA_IA_Normalizado_${id}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setDocMsg({ tipo: 'success', texto: 'Arquivo normalizado exportado para conferência/importação assistida.' });
+    } catch (error) {
+      setDocMsg({ tipo: 'error', texto: error.message || 'Falha ao exportar documento normalizado.' });
     }
   };
 
+
   return (
     <div className="space-y-8 animate-fade-in">
-      <section className="bg-white dark:bg-slate-800 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 dark:border-slate-700">
-        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-6">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white flex items-center gap-3 uppercase">
-              <Bot className="text-blue-600" /> Chat Lince
-            </h1>
-            <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 font-semibold">
-              IA consultiva e documental do SISHA-1. Integrada a PN/SN, WO, OC/PD, recibos, Manual/Dicionário, Política de Estoque, Custo Operacional, Gerador de Necessidades, RAG documental e Help Desk PPU.
-            </p>
+      <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
+        <div className="flex flex-col gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-sm">
+              <Bot size={22} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-black tracking-tight text-slate-900 dark:text-white">Chat Lince</h1>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> ONLINE
+                </span>
+              </div>
+              <p className="mt-0.5 truncate text-xs font-semibold text-slate-500 dark:text-slate-400">
+                Assistente logístico do SISHA • cruza fontes, preserva evidências e não grava sem confirmação
+              </p>
+            </div>
           </div>
-          <span className="inline-flex items-center gap-2 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 py-2 text-xs font-black text-blue-700 dark:text-blue-300 uppercase tracking-widest">
-            <ShieldCheck size={14} /> Não grava sem confirmação
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={novaConversa}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              <RotateCcw size={15} /> NOVA CONVERSA
+            </button>
+            <button
+              type="button"
+              onClick={() => setContextoAberto((old) => !old)}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              <Database size={15} /> FONTES <ChevronDown size={14} className={`transition ${contextoAberto ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div className="xl:col-span-2 rounded-3xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/30 overflow-hidden">
-            <div className="p-5 border-b border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/60">
-              <h2 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Consulta logística Premium</h2>
-            </div>
+        <div className={`grid min-h-[610px] ${contextoAberto ? 'xl:grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-1'}`}>
+          <div className="flex min-w-0 flex-col bg-white dark:bg-slate-900">
+            <div className="h-[520px] overflow-y-auto px-5 py-5 sm:px-8 lg:px-12">
+              <div className="mx-auto w-full max-w-4xl">
+                {mensagens.map((message, index) => <MessageBubble key={`${message.role}-${index}`} message={message} />)}
 
-            <div className="h-[430px] overflow-y-auto p-5 space-y-4">
-              {mensagens.map((message, index) => <MessageBubble key={`${message.role}-${index}`} message={message} />)}
-              {consultando && (
-                <div className="flex items-center gap-2 text-sm font-black text-blue-600">
-                  <LoaderCircle size={18} className="animate-spin" /> Chat Lince cruzando manual, PN, SN, OC, PD, WO, políticas, custo e necessidades...
-                </div>
-              )}
+                {mensagens.length === 1 && !consultando && (
+                  <div className="mt-5 grid gap-2 sm:grid-cols-3">
+                    {[
+                      'Faça um dossiê completo do PN 528-027-01.',
+                      'Onde está este SN e qual a última evidência?',
+                      'Cruze PD, Order Book e Recibos deste PN.',
+                    ].map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        onClick={() => { setPergunta(suggestion); window.requestAnimationFrame(() => resizeComposer()); composerRef.current?.focus(); }}
+                        className="rounded-2xl border border-slate-200 p-3 text-left text-xs font-bold leading-5 text-slate-600 transition hover:border-blue-300 hover:bg-blue-50/40 hover:text-blue-700 dark:border-slate-700 dark:text-slate-300 dark:hover:border-blue-800 dark:hover:bg-blue-950/20 dark:hover:text-blue-300"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {consultando && (
+                  <div className="flex items-center gap-3 py-5 text-sm font-bold text-slate-500 dark:text-slate-400">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-950/30">
+                      <LoaderCircle size={18} className="animate-spin" />
+                    </div>
+                    <span>Lince está cruzando as fontes do SISHA e validando as evidências...</span>
+                  </div>
+                )}
+                <div ref={conversationEndRef} />
+              </div>
             </div>
 
             {acaoPendente && isAdmin && (
-              <form onSubmit={confirmarAcaoExecutor} className="p-4 border-t border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 space-y-3">
+              <form onSubmit={confirmarAcaoExecutor} className="mx-5 mb-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/20 sm:mx-8 lg:mx-12">
                 <div className="flex items-start gap-3">
-                  <ShieldCheck size={20} className="text-amber-600 shrink-0 mt-1" />
+                  <ShieldCheck size={20} className="mt-0.5 shrink-0 text-amber-600" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-black text-amber-800 dark:text-amber-200 uppercase">Confirmação de ação no banco</p>
-                    <p className="text-xs font-semibold text-amber-700 dark:text-amber-300 mt-1">
-                      O Chat Lince preparou um plano de alteração. A senha é enviada somente para validação do backend; ela não entra como mensagem no chat.
-                    </p>
+                    <p className="text-sm font-black text-amber-800 dark:text-amber-200">Ação preparada — confirmação obrigatória</p>
+                    <p className="mt-1 text-xs font-semibold text-amber-700 dark:text-amber-300">A senha valida a ação no backend e nunca entra na conversa.</p>
                   </div>
                 </div>
-                {acaoMsg && <p className={`text-sm font-black ${acaoMsg.tipo === 'success' ? 'text-green-700' : 'text-red-700'}`}>{acaoMsg.texto}</p>}
-                <div className="flex flex-col sm:flex-row gap-3">
+                {acaoMsg && <p className={`mt-3 text-sm font-black ${acaoMsg.tipo === 'success' ? 'text-green-700' : 'text-red-700'}`}>{acaoMsg.texto}</p>}
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                   <input
                     type="password"
                     value={senhaAcao}
                     onChange={(e) => setSenhaAcao(e.target.value)}
-                    placeholder="Digite sua senha para autorizar"
-                    className="flex-1 p-4 rounded-2xl border-2 border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white font-bold placeholder:text-slate-400"
+                    placeholder="Senha para autorizar"
+                    className="min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-4 py-3 text-sm font-bold text-slate-900 outline-none focus:border-amber-500 focus:ring-4 focus:ring-amber-500/10 dark:border-amber-800 dark:bg-slate-950 dark:text-white"
                   />
-                  <button disabled={executandoAcao || !senhaAcao.trim()} className="px-6 py-4 rounded-2xl bg-amber-600 text-white font-black hover:bg-amber-700 disabled:opacity-50 flex items-center justify-center gap-2">
-                    {executandoAcao ? <LoaderCircle size={18} className="animate-spin" /> : <ShieldCheck size={18} />} CONFIRMAR
+                  <button disabled={executandoAcao || !senhaAcao.trim()} className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-600 px-5 py-3 text-xs font-black text-white hover:bg-amber-700 disabled:opacity-50">
+                    {executandoAcao ? <LoaderCircle size={16} className="animate-spin" /> : <ShieldCheck size={16} />} CONFIRMAR
                   </button>
-                  <button type="button" onClick={() => { setAcaoPendente(null); setSenhaAcao(''); setAcaoMsg(null); }} className="px-6 py-4 rounded-2xl bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-black hover:bg-slate-300 dark:hover:bg-slate-700">
+                  <button type="button" onClick={() => { setAcaoPendente(null); setSenhaAcao(''); setAcaoMsg(null); }} className="rounded-xl bg-slate-200 px-5 py-3 text-xs font-black text-slate-700 hover:bg-slate-300 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
                     CANCELAR
                   </button>
                 </div>
               </form>
             )}
 
-            <form onSubmit={enviarPergunta} className="p-4 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col sm:flex-row gap-3">
-              <input
-                value={pergunta}
-                onChange={(e) => setPergunta(e.target.value)}
-                placeholder="Ex.: Onde está o SN X? Onde esse cartridge é aplicado no manual? Esse PN tem OC/PD/WO?"
-                className="flex-1 p-4 rounded-2xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-white font-bold placeholder:text-slate-400"
-              />
-              <button disabled={consultando || !pergunta.trim()} className="px-6 py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
-                <Send size={18} /> ENVIAR
-              </button>
-            </form>
+            <div className="border-t border-slate-200 bg-white px-4 py-4 dark:border-slate-700 dark:bg-slate-900 sm:px-8 lg:px-12">
+              <form onSubmit={enviarPergunta} className="mx-auto max-w-4xl">
+                <div className="rounded-[24px] border border-slate-300 bg-white p-2 shadow-sm transition focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-500/10 dark:border-slate-700 dark:bg-slate-950">
+                  <textarea
+                    ref={composerRef}
+                    rows={1}
+                    value={pergunta}
+                    onChange={(e) => { setPergunta(e.target.value); resizeComposer(e.target); }}
+                    onKeyDown={onComposerKeyDown}
+                    placeholder="Pergunte sobre PN, SN, localização, Master OS, PIM, STC, WO, PD/OC, Recibos ou manuais..."
+                    className="block h-[52px] max-h-[180px] min-h-[52px] w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-0 bg-transparent px-3 py-3 text-[15px] font-semibold leading-6 text-slate-900 outline-none placeholder:text-slate-400 dark:text-white"
+                  />
+                  <div className="flex items-center justify-between gap-3 px-2 pb-1">
+                    <span className="text-[10px] font-bold text-slate-400">Enter envia • Shift+Enter quebra linha</span>
+                    <button
+                      disabled={consultando || !pergunta.trim()}
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700"
+                      title="Enviar"
+                    >
+                      {consultando ? <LoaderCircle size={17} className="animate-spin" /> : <Send size={17} />}
+                    </button>
+                  </div>
+                </div>
+                <p className="mt-2 text-center text-[10px] font-semibold text-slate-400">O Lince diferencia evidência confirmada, intenção documental e pendência. Decisões ambíguas continuam fail-closed.</p>
+              </form>
+            </div>
           </div>
 
-          <aside className="rounded-3xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 space-y-4">
-            <div className="flex items-center gap-2 text-slate-900 dark:text-white">
-              <Database size={18} className="text-blue-600" />
-              <h3 className="font-black uppercase text-sm">Contexto usado</h3>
-            </div>
-
-            {isAdmin && (
-              <div className="rounded-2xl border border-blue-100 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/20 p-4 space-y-3">
+          {contextoAberto && (
+            <aside className="border-t border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-950/35 xl:border-l xl:border-t-0">
+              <div className="mb-4 flex items-center justify-between gap-2">
                 <div>
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-700 dark:text-blue-300">RAG documental</p>
-                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 mt-1">Reindexa documentos já analisados pelo Chat Lince sem precisar copiar token JWT manualmente.</p>
+                  <p className="text-xs font-black text-slate-900 dark:text-white">Fontes desta resposta</p>
+                  <p className="mt-0.5 text-[10px] font-semibold text-slate-500">Mostra o que realmente foi consultado.</p>
                 </div>
-                {ragMsg && <p className={`text-xs font-black ${ragMsg.tipo === 'success' ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>{ragMsg.texto}</p>}
-                <button type="button" onClick={reindexarRag} disabled={reindexandoRag} className="w-full px-4 py-3 rounded-2xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
-                  {reindexandoRag ? <LoaderCircle size={16} className="animate-spin" /> : <RefreshCw size={16} />} REINDEXAR DOCUMENTOS
-                </button>
+                <Database size={17} className="text-blue-600" />
               </div>
-            )}
 
-            {modulos && (
-              <div className="rounded-2xl bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900 p-4">
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-700 dark:text-blue-300 mb-2">Módulos acionados</p>
-                <div className="grid grid-cols-1 gap-2">
-                  {Object.entries(modulos).map(([key, value]) => (
-                    <div key={key} className="flex items-center justify-between gap-2 text-xs font-black text-slate-700 dark:text-slate-200">
-                      <span>{key.replaceAll('_', ' ')}</span>
-                      <span className={value ? 'text-green-600' : 'text-slate-400'}>{value ? 'SIM' : 'NÃO'}</span>
-                    </div>
+              {modulos && Object.entries(modulos).filter(([, value]) => Boolean(value)).length > 0 && (
+                <div className="mb-4 flex flex-wrap gap-1.5">
+                  {Object.entries(modulos).filter(([, value]) => Boolean(value)).map(([key]) => (
+                    <span key={key} className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[9px] font-black uppercase tracking-wide text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">
+                      {key.replaceAll('_', ' ')}
+                    </span>
                   ))}
                 </div>
-              </div>
-            )}
+              )}
 
-            {trilhaSn.length > 0 && <JsonCard title="Trilha SN / localização" value={trilhaSn} />}
-            {aplicacoesManual.length > 0 && <JsonCard title="Aplicação no manual/dicionário" value={aplicacoesManual} />}
-
-            {fontes.length > 0 ? fontes.map((fonte, index) => (
-              <div key={`${fonte.tabela}-${index}`} className="rounded-2xl bg-slate-50 dark:bg-slate-950/50 border border-slate-100 dark:border-slate-700 p-4">
-                <p className="font-black text-slate-800 dark:text-slate-100">{fonte.tabela}</p>
-                <p className="text-xs font-bold text-slate-500">{fonte.quantidade} registro(s). {fonte.motivo || ''}</p>
+              <div className="max-h-[430px] space-y-2 overflow-y-auto pr-1">
+                {fontes.length > 0 ? fontes.map((fonte, index) => (
+                  <div key={`${fonte.tabela}-${index}`} className="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-xs font-black leading-5 text-slate-800 dark:text-slate-100">{fonte.rotulo || fonte.tabela}</p>
+                      <span className="shrink-0 rounded-full bg-blue-50 px-2 py-0.5 text-[9px] font-black text-blue-700 dark:bg-blue-950/30 dark:text-blue-300">{fonte.quantidade}</span>
+                    </div>
+                    {fonte.motivo && <p className="mt-1 text-[10px] font-semibold leading-4 text-slate-500 dark:text-slate-400">{fonte.motivo}</p>}
+                  </div>
+                )) : (
+                  <div className="rounded-xl border border-dashed border-slate-300 p-4 text-center text-xs font-semibold text-slate-400 dark:border-slate-700">As fontes utilizadas aparecem aqui depois da consulta.</div>
+                )}
               </div>
-            )) : (
-              <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">As fontes aparecem aqui após cada consulta.</p>
-            )}
-          </aside>
+
+              {trilhaSn.length > 0 && <div className="mt-4"><JsonCard title="Trilha SN / localização" value={trilhaSn} /></div>}
+              {aplicacoesManual.length > 0 && <div className="mt-4"><JsonCard title="Aplicação no manual" value={aplicacoesManual} /></div>}
+
+              {isAdmin && (
+                <details className="mt-4 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                  <summary className="cursor-pointer text-[10px] font-black uppercase tracking-wider text-slate-500">Ferramentas administrativas / RAG</summary>
+                  <p className="mt-2 text-[10px] font-semibold leading-4 text-slate-500">Reindexa a base documental e as fontes estruturadas sem alterar o estado operacional.</p>
+                  {ragMsg && <p className={`mt-2 text-[10px] font-black ${ragMsg.tipo === 'success' ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>{ragMsg.texto}</p>}
+                  <button type="button" onClick={reindexarRag} disabled={reindexandoRag} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 py-2.5 text-[10px] font-black text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-700 dark:hover:bg-slate-600">
+                    {reindexandoRag ? <LoaderCircle size={14} className="animate-spin" /> : <RefreshCw size={14} />} REINDEXAR BASE
+                  </button>
+                </details>
+              )}
+            </aside>
+          )}
         </div>
       </section>
 
@@ -612,7 +773,7 @@ export default function ChatLince() {
               <FileSearch className="text-emerald-600" /> Documental
             </h2>
             <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 font-semibold">
-              O Chat Lince lê o arquivo, sugere classificação, pergunta/mostra a tabela de destino e deixa o resultado em staging para confirmação do Admin.
+              O Chat Lince lê o arquivo, sugere classificação, normaliza os registros e os mantém em staging auditável. A importação operacional só ocorre após revisão humana pelo fluxo específico do documento.
             </p>
           </div>
           {!isAdmin && (
@@ -720,9 +881,17 @@ export default function ChatLince() {
                 />
                 <div className="flex items-start gap-2 rounded-2xl bg-white/70 dark:bg-slate-950/40 border border-blue-100 dark:border-blue-900 p-3 text-xs font-bold text-slate-600 dark:text-slate-300">
                   <ClipboardCheck size={16} className="text-blue-600 shrink-0 mt-0.5" />
-                  <span>Confirmar grava o documento como validado, registra auditoria e mantém OS de instalação/remoção em staging até você enviar o modelo oficial.</span>
+                  <span>Confirmar valida o documento e cria registros normalizados em staging. Nenhuma tabela operacional é alterada automaticamente; os registros podem ser exportados para conferência e importação assistida.</span>
                 </div>
                 <div className="flex flex-col sm:flex-row justify-end gap-3">
+                  {isReceiptAnalysis && (
+                    <button type="button" onClick={enviarReciboParaTriagem} className="px-5 py-3 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 flex items-center justify-center gap-2">
+                      <ClipboardCheck size={18} /> ABRIR TRIAGEM DO RECIBO
+                    </button>
+                  )}
+                  <button type="button" onClick={() => exportarNormalizado()} className="px-5 py-3 rounded-2xl bg-slate-700 text-white font-black hover:bg-slate-800 flex items-center justify-center gap-2">
+                    <Download size={18} /> EXPORTAR NORMALIZADO
+                  </button>
                   <button type="button" onClick={() => decidirDocumento('rejeitar')} className="px-5 py-3 rounded-2xl bg-red-600 text-white font-black hover:bg-red-700 flex items-center justify-center gap-2">
                     <XCircle size={18} /> REJEITAR
                   </button>
@@ -738,97 +907,9 @@ export default function ChatLince() {
 
 
       {isAdmin && (
-        <section className="bg-white dark:bg-slate-800 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 dark:border-slate-700">
-          <div className="flex items-center justify-between gap-4 mb-6">
-            <div>
-              <h2 className="text-xl font-black text-slate-900 dark:text-white uppercase flex items-center gap-3">
-                <MessageSquare className="text-blue-600" /> Help Desk do Chat Lince
-              </h2>
-              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-1">Dúvidas que a IA não respondeu com segurança e enviou para análise humana do PPU/Admin.</p>
-            </div>
-            <button onClick={carregarHelpdesk} disabled={carregandoHelpdesk} className="px-5 py-3 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 disabled:opacity-50">
-              {carregandoHelpdesk ? 'ATUALIZANDO...' : 'ATUALIZAR'}
-            </button>
-          </div>
-
-          {helpdeskMsg && (
-            <p className={`font-black mb-6 ${helpdeskMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>{helpdeskMsg.texto}</p>
-          )}
-
-          {helpdesk.length > 0 ? (
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              {helpdesk.map((ticket) => (
-                <div key={ticket.id} className="rounded-3xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/30 p-5 space-y-4">
-                  <div>
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-600 dark:text-blue-300">{ticket.protocolo || ticket.status || 'ABERTO'}</p>
-                    <h3 className="font-black text-slate-900 dark:text-white">{ticket.termo_pesquisado || 'Dúvida sem termo detectado'}</h3>
-                    <p className="text-xs font-semibold text-slate-500">{ticket.usuario_email || 'Usuário'} • {ticket.created_at ? new Date(ticket.created_at).toLocaleString('pt-BR') : 'sem data'}</p>
-                  </div>
-                  <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-4">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Pergunta original</p>
-                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{ticket.pergunta_original}</p>
-                  </div>
-                  <textarea
-                    value={respostasHelpdesk[ticket.id] || ''}
-                    onChange={(e) => setRespostasHelpdesk((prev) => ({ ...prev, [ticket.id]: e.target.value }))}
-                    placeholder="Resposta do PPU/Admin para devolver ao usuário ou registrar como resolvido..."
-                    className="w-full min-h-28 p-4 rounded-2xl border-2 border-blue-100 dark:border-blue-900 bg-white dark:bg-slate-950 text-slate-900 dark:text-white font-semibold placeholder:text-slate-400"
-                  />
-                  <div className="flex justify-end">
-                    <button onClick={() => responderHelpdesk(ticket.id)} disabled={!String(respostasHelpdesk[ticket.id] || '').trim()} className="px-5 py-3 rounded-2xl bg-green-600 text-white font-black hover:bg-green-700 disabled:opacity-50">
-                      RESPONDER / MARCAR RESOLVIDO
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/30 p-5">
-              <p className="text-sm font-bold text-slate-600 dark:text-slate-300">Nenhuma dúvida aberta no Help Desk do Chat Lince.</p>
-            </div>
-          )}
-        </section>
-      )}
-
-      {isAdmin && (
-        <section className="bg-white dark:bg-slate-800 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 dark:border-slate-700">
-          <div className="flex items-center justify-between gap-4 mb-6">
-            <div>
-              <h2 className="text-xl font-black text-slate-900 dark:text-white uppercase">Pendências do Chat Lince</h2>
-              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-1">Documentos analisados aguardando confirmação humana.</p>
-            </div>
-            <button onClick={carregarPendentes} disabled={carregandoPendentes} className="px-5 py-3 rounded-2xl bg-slate-900 text-white font-black hover:bg-slate-800 disabled:opacity-50">
-              {carregandoPendentes ? 'ATUALIZANDO...' : 'ATUALIZAR'}
-            </button>
-          </div>
-
-          {pendentes.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {pendentes.map((doc) => (
-                <div key={doc.id} className="rounded-3xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/30 p-5 space-y-3">
-                  <div>
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{doc.classificacao || doc.tipo_documento}</p>
-                    <h3 className="font-black text-slate-900 dark:text-white break-words">{doc.nome_arquivo}</h3>
-                    <p className="text-xs font-semibold text-slate-500">{doc.created_by_email || 'Sistema'} • {doc.created_at ? new Date(doc.created_at).toLocaleString('pt-BR') : 'sem data'}</p>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-[10px] font-black uppercase">
-                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 px-3 py-1"><Compass size={12} /> {doc.destino_sugerido || 'staging'}</span>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 px-3 py-1"><Layers size={12} /> {Math.round(Number(doc.confianca || 0) * 100)}%</span>
-                  </div>
-                  <p className="text-sm text-slate-700 dark:text-slate-300 line-clamp-4">{doc.resumo || 'Sem resumo.'}</p>
-                  <div className="flex gap-2">
-                    <button onClick={() => decidirDocumento('rejeitar', doc.id)} className="flex-1 px-4 py-3 rounded-2xl bg-red-600 text-white text-xs font-black hover:bg-red-700">REJEITAR</button>
-                    <button onClick={() => decidirDocumento('confirmar', doc.id, doc.destino_sugerido)} className="flex-1 px-4 py-3 rounded-2xl bg-green-600 text-white text-xs font-black hover:bg-green-700">CONFIRMAR</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/30 p-5">
-              <p className="text-sm font-bold text-slate-600 dark:text-slate-300">Nenhuma pendência documental no momento.</p>
-            </div>
-          )}
-        </section>
+        <div className="rounded-2xl border border-blue-100 dark:border-blue-900 bg-blue-50/60 dark:bg-blue-950/20 px-4 py-3 text-xs font-bold text-blue-800 dark:text-blue-200">
+          Pendências administrativas e dúvidas do Help Desk agora são tratadas na Central de Pendências em Atualizar Sistema.
+        </div>
       )}
     </div>
   );

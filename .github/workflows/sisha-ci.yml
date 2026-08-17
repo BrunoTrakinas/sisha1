@@ -1,0 +1,64 @@
+name: SISHA CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sisha-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-golden:
+    name: Backend Golden Cases
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sisha-backend/package-lock.json
+
+      - name: Install backend
+        working-directory: sisha-backend
+        run: npm ci
+
+      - name: Golden cases
+        working-directory: sisha-backend
+        run: npm test
+
+  frontend-build:
+    name: Frontend Production Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sisha-frontend/package-lock.json
+
+      - name: Install frontend
+        working-directory: sisha-frontend
+        run: npm ci
+
+      - name: Production build
+        working-directory: sisha-frontend
+        run: npm run build

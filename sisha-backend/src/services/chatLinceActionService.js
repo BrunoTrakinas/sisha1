@@ -1,7 +1,15 @@
 const supabase = require('../config/supabaseClient');
+const { getSupabaseAdmin } = require('../config/supabaseAdminClient');
+const { signInWithPassword } = require('./supabaseAuthService');
+const { bindAuthorizedUserIdentity } = require('./authIdentityBindingService');
+const {
+  ALLOWED_PD_STATUSES,
+  buildPlanGuard,
+  validatePlanEnvelope,
+  validateCurrentTargets,
+} = require('./chatLinceActionPolicyService');
 
 const ALLOWED_ROLES = new Set(['admin', 'dono']);
-const ALLOWED_PD_STATUSES = new Set(['ELB', 'TRI', 'ANS', 'COT', 'PRO', 'LPC', 'ODC', 'ODA', 'EMB', 'REC', 'FAT', 'CAN']);
 const BLOCKED_WORDS = ['authorized_users', 'senha', 'password', 'token', 'jwt', 'login', 'perfil', 'role', 'admin', 'dono'];
 
 function normalizeUpper(value = '') {
@@ -10,6 +18,10 @@ function normalizeUpper(value = '') {
 
 function normalizePassword(value = '') {
   return String(value || '').trim();
+}
+
+function normalizeEmail(value = '') {
+  return String(value || '').trim().toLowerCase();
 }
 
 function cleanDoc(value = '') {
@@ -61,33 +73,43 @@ function detectActionIntent(text = '') {
   if (!pds.length || !toStatus) return null;
   if (!ALLOWED_PD_STATUSES.has(toStatus)) return { type: 'BLOQUEADA', reason: 'Status de destino não permitido.' };
 
-  return {
-    type: 'ALTERAR_STATUS_PD',
-    pds,
-    fromStatus,
-    toStatus,
-  };
+  return { type: 'ALTERAR_STATUS_PD', pds, fromStatus, toStatus };
 }
 
 async function verifyPassword(user = {}, password = '') {
   const senha = normalizePassword(password);
   if (!senha) return { ok: false, reason: 'Informe a senha para autorizar.' };
 
-  const email = String(user?.email || '').trim().toLowerCase();
-  if (!email) return { ok: false, reason: 'Usuário sem email autenticado.' };
+  const email = normalizeEmail(user?.email);
+  if (!email) return { ok: false, reason: 'Usuario sem email autenticado.' };
 
-  const { data, error } = await supabase
+  const { data, error } = await getSupabaseAdmin()
     .from('authorized_users')
-    .select('id,email,senha,role,active')
+    .select('id,email,role,active,auth_user_id,auth_bound_at')
     .eq('email', email)
     .maybeSingle();
 
   if (error) return { ok: false, reason: error.message };
-  if (!data || data.active === false) return { ok: false, reason: 'Usuário não autorizado ou inativo.' };
-  if (normalizePassword(data.senha) !== senha) return { ok: false, reason: 'Senha de autorização incorreta.' };
-  if (!ALLOWED_ROLES.has(String(data.role || '').toLowerCase())) return { ok: false, reason: 'Somente Admin ou Dono pode executar alterações pelo Chat Lince.' };
+  if (!data || data.active === false) return { ok: false, reason: 'Usuario nao autorizado ou inativo.' };
+  if (!ALLOWED_ROLES.has(String(data.role || '').toLowerCase())) return { ok: false, reason: 'Somente Admin ou Dono pode executar alteracoes pelo Chat Lince.' };
 
-  return { ok: true, user: data };
+  try {
+    const auth = await signInWithPassword(email, senha);
+    await bindAuthorizedUserIdentity({
+      authorizedUserId: data.id,
+      authUserId: auth.user.id,
+      authEmail: auth.user.email,
+    });
+    if (data.auth_user_id && String(data.auth_user_id) !== String(auth.user.id)) {
+      return { ok: false, reason: 'A identidade Supabase autenticada diverge do vínculo autorizado no SISHA.' };
+    }
+    return { ok: true, user: data, auth_provider: 'supabase', auth_user_id: auth.user.id };
+  } catch (error) {
+    if (String(error?.code || '').startsWith('AUTH_IDENTITY_')) {
+      return { ok: false, reason: 'A identidade Supabase nao corresponde ao cadastro autorizado no SISHA.' };
+    }
+    return { ok: false, reason: 'Senha de autorizacao incorreta ou acesso Supabase ainda nao ativado.' };
+  }
 }
 
 function formatPlanResponse(plan = {}) {
@@ -95,20 +117,27 @@ function formatPlanResponse(plan = {}) {
     const atual = item.status_atual || item.status_grupo_atual || 'não informado';
     return `- ${item.numero_pd}: ${atual} → ${plan.plan_payload?.novo_status}`;
   });
-  const naoEncontrados = plan?.plan_payload?.nao_encontrados || [];
-  const partes = [
+  return [
     'Entendi. Eu posso preparar essa alteração, mas não vou mexer no banco sem sua confirmação.',
     '',
     'Plano de alteração:',
     ...linhas,
-  ];
-  if (naoEncontrados.length) {
-    partes.push('', `Não encontrei estes PDs: ${naoEncontrados.join(', ')}.`);
-  }
-  partes.push('', 'Impacto: os PDs alterados passam a ser considerados pelo SISHA conforme o novo status no Radar Logístico, Gerador de Necessidades e consultas de compra.');
-  partes.push('A OC vinculada não será alterada automaticamente nesta versão; somente os PDs listados no plano.');
-  partes.push('', 'Para executar, confirme no campo de senha mascarado que apareceu abaixo do chat.');
-  return partes.join('\n');
+    '',
+    'Impacto: os PDs alterados passam a ser considerados pelo SISHA conforme o novo status no Radar Logístico, Gerador de Necessidades e consultas de compra.',
+    'A OC vinculada não será alterada automaticamente nesta versão; somente os PDs listados no plano.',
+    '',
+    'Proteção H6C: se qualquer PD mudar depois deste preview, a execução inteira será recusada e um novo plano será necessário.',
+    'Para executar, confirme no campo de senha mascarado que apareceu abaixo do chat.',
+  ].join('\n');
+}
+
+async function loadCurrentTargets(ids = []) {
+  const { data, error } = await supabase
+    .from('compras_pds')
+    .select('id,numero_pd,numero_oc,ordem_id,pn,nomenclatura,quantidade,status,status_grupo,status_item,ativo,updated_at')
+    .in('id', ids);
+  if (error) throw error;
+  return data || [];
 }
 
 async function buildActionPlan({ pergunta, user }) {
@@ -123,29 +152,21 @@ async function buildActionPlan({ pergunta, user }) {
   }
 
   if (!ALLOWED_ROLES.has(String(user?.role || '').toLowerCase())) {
-    return {
-      blocked: true,
-      resposta: 'Entendi o pedido de alteração, mas somente Admin ou Dono pode executar mudanças no banco pelo Chat Lince.',
-    };
+    return { blocked: true, resposta: 'Entendi o pedido de alteração, mas somente Admin ou Dono pode executar mudanças no banco pelo Chat Lince.' };
   }
 
   const { data: rows, error } = await supabase
     .from('compras_pds')
     .select('id,numero_pd,numero_oc,ordem_id,pn,nomenclatura,quantidade,status,status_grupo,status_item,ativo,updated_at')
     .in('numero_pd', detected.pds);
-
   if (error) throw error;
 
   const foundByPd = new Map((rows || []).map((row) => [normalizeUpper(row.numero_pd), row]));
   const itens = [];
   const naoEncontrados = [];
-
   detected.pds.forEach((pd) => {
     const row = foundByPd.get(normalizeUpper(pd));
-    if (!row) {
-      naoEncontrados.push(pd);
-      return;
-    }
+    if (!row) { naoEncontrados.push(pd); return; }
     const statusAtual = normalizeUpper(row.status_grupo || row.status || '');
     itens.push({
       id: row.id,
@@ -159,19 +180,33 @@ async function buildActionPlan({ pergunta, user }) {
       status_grupo_atual: row.status_grupo,
       status_item_atual: row.status_item,
       ativo: row.ativo,
+      updated_at: row.updated_at,
       valido_para_execucao: !detected.fromStatus || statusAtual === detected.fromStatus,
       ressalva: detected.fromStatus && statusAtual !== detected.fromStatus ? `Status atual é ${statusAtual || 'não informado'}, diferente de ${detected.fromStatus}.` : null,
     });
   });
 
+  const invalidos = itens.filter((item) => item.valido_para_execucao === false);
+  if (naoEncontrados.length || invalidos.length || itens.length !== detected.pds.length) {
+    const motivos = [];
+    if (naoEncontrados.length) motivos.push(`PD(s) não encontrado(s): ${naoEncontrados.join(', ')}`);
+    if (invalidos.length) motivos.push(`PD(s) com estado diferente do solicitado: ${invalidos.map((item) => item.numero_pd).join(', ')}`);
+    return {
+      blocked: true,
+      resposta: `Não vou criar um plano parcialmente executável. ${motivos.join('. ')}. Corrija a seleção ou peça um novo preview.`,
+    };
+  }
+
+  const guard = buildPlanGuard({ detected, user, items: itens });
   const payload = {
     tipo: detected.type,
     pds: detected.pds,
     status_origem_informado: detected.fromStatus || null,
     novo_status: detected.toStatus,
     itens,
-    nao_encontrados: naoEncontrados,
-    regra_segura: 'Plano criado pelo Chat Lince. Execução só após senha mascarada, perfil Admin/Dono e auditoria.',
+    nao_encontrados: [],
+    guard,
+    regra_segura: 'Plano H6C: mesmo solicitante, revalidação do estado antes/depois da senha, perfil Admin/Dono e auditoria.',
   };
 
   const { data: plan, error: insertError } = await supabase
@@ -180,52 +215,54 @@ async function buildActionPlan({ pergunta, user }) {
       action_type: detected.type,
       status: 'PENDENTE_CONFIRMACAO',
       pergunta_original: String(pergunta || '').slice(0, 5000),
-      requested_by_email: user?.email || null,
-      requested_by_role: user?.role || null,
+      requested_by_email: normalizeEmail(user?.email) || null,
+      requested_by_role: String(user?.role || '').toLowerCase() || null,
       plan_payload: payload,
       affected_before: itens,
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     })
     .select('*')
     .single();
-
   if (insertError) throw insertError;
 
-  return {
-    id: plan.id,
-    action_type: plan.action_type,
-    status: plan.status,
-    plan_payload: payload,
-    resposta: formatPlanResponse(plan),
-  };
+  return { id: plan.id, action_type: plan.action_type, status: plan.status, plan_payload: payload, resposta: formatPlanResponse({ ...plan, plan_payload: payload }) };
 }
 
 async function executeActionPlan({ actionId, senha, user }) {
-  const auth = await verifyPassword(user, senha);
-  if (!auth.ok) return { ok: false, statusCode: 401, message: auth.reason };
-
   const { data: plan, error } = await supabase
     .from('chat_lince_action_plans')
     .select('*')
     .eq('id', actionId)
     .maybeSingle();
-
   if (error) throw error;
-  if (!plan) return { ok: false, statusCode: 404, message: 'Plano de ação não encontrado.' };
-  if (plan.status !== 'PENDENTE_CONFIRMACAO') return { ok: false, statusCode: 409, message: `Plano não está pendente. Status atual: ${plan.status}.` };
-  if (new Date(plan.expires_at).getTime() < Date.now()) {
-    await supabase.from('chat_lince_action_plans').update({ status: 'EXPIRADO' }).eq('id', actionId);
-    return { ok: false, statusCode: 409, message: 'Plano expirou. Peça ao Chat Lince para montar um novo plano.' };
+  if (!plan) return { ok: false, statusCode: 404, code: 'ACTION_PLAN_NOT_FOUND', message: 'Plano de ação não encontrado.' };
+
+  const envelope = validatePlanEnvelope(plan, user);
+  if (!envelope.ok) {
+    if (envelope.code === 'ACTION_PLAN_EXPIRED') {
+      await supabase.from('chat_lince_action_plans').update({ status: 'EXPIRADO' }).eq('id', actionId);
+    }
+    return { ok: false, statusCode: envelope.code === 'ACTION_REQUESTER_MISMATCH' ? 403 : 409, code: envelope.code, message: envelope.message };
   }
 
-  const payload = plan.plan_payload || {};
-  if (payload.tipo !== 'ALTERAR_STATUS_PD') return { ok: false, statusCode: 400, message: 'Tipo de ação ainda não habilitado para execução.' };
+  const ids = envelope.targets.map((target) => target.id);
+  const beforeAuthRows = await loadCurrentTargets(ids);
+  const beforeAuth = validateCurrentTargets(envelope.targets, beforeAuthRows);
+  if (!beforeAuth.ok) {
+    return { ok: false, statusCode: 409, code: beforeAuth.code, message: beforeAuth.message, conflicts: beforeAuth.conflicts };
+  }
 
-  const itens = (payload.itens || []).filter((item) => item.valido_para_execucao !== false && item.id);
-  if (!itens.length) return { ok: false, statusCode: 400, message: 'Nenhum PD válido para execução.' };
+  const auth = await verifyPassword(user, senha);
+  if (!auth.ok) return { ok: false, statusCode: 401, code: 'ACTION_REAUTH_FAILED', message: auth.reason };
 
-  const ids = itens.map((item) => item.id);
-  const novoStatus = normalizeUpper(payload.novo_status);
+  // Segunda leitura obrigatória após a reautenticação para reduzir TOCTOU.
+  const afterAuthRows = await loadCurrentTargets(ids);
+  const afterAuth = validateCurrentTargets(envelope.targets, afterAuthRows);
+  if (!afterAuth.ok) {
+    return { ok: false, statusCode: 409, code: afterAuth.code, message: afterAuth.message, conflicts: afterAuth.conflicts };
+  }
+
+  const novoStatus = envelope.newStatus;
   const updatePayload = {
     status: novoStatus,
     status_grupo: novoStatus,
@@ -239,30 +276,77 @@ async function executeActionPlan({ actionId, senha, user }) {
     .update(updatePayload)
     .in('id', ids)
     .select('id,numero_pd,numero_oc,pn,status,status_grupo,status_item,ativo,updated_at');
-
   if (updateError) throw updateError;
+
+  const updatedRows = updated || [];
+  const verificationOk = updatedRows.length === ids.length && updatedRows.every((row) => (
+    normalizeUpper(row.status) === novoStatus
+    && normalizeUpper(row.status_grupo) === novoStatus
+    && normalizeUpper(row.status_item) === novoStatus
+    && row.ativo === (novoStatus !== 'CAN')
+  ));
+
+  if (!verificationOk) {
+    await supabase.from('chat_lince_action_plans').update({
+      status: 'ERRO_POS_EXECUCAO',
+      confirmed_by_email: normalizeEmail(user?.email) || null,
+      confirmed_at: new Date().toISOString(),
+      executed_at: new Date().toISOString(),
+      execution_result: {
+        code: 'ACTION_EXECUTION_VERIFICATION_FAILED',
+        mutation_committed: updatedRows.length > 0,
+        expected_count: ids.length,
+        returned_count: updatedRows.length,
+        rows: updatedRows,
+      },
+    }).eq('id', actionId);
+
+    return {
+      ok: false,
+      statusCode: 500,
+      code: 'ACTION_EXECUTION_VERIFICATION_FAILED',
+      mutationCommitted: updatedRows.length > 0,
+      message: 'A verificação pós-execução não confirmou todos os PDs. Não repita a ação; consulte o log/auditoria e gere um novo diagnóstico.',
+    };
+  }
 
   const executionResult = {
     executado_em: new Date().toISOString(),
-    executado_por: user?.email || null,
+    executado_por: normalizeEmail(user?.email) || null,
+    auth_provider: auth.auth_provider,
+    auth_user_id: auth.auth_user_id,
     novo_status: novoStatus,
-    pds_atualizados: updated || [],
-    pds_ignorados: (payload.itens || []).filter((item) => item.valido_para_execucao === false || !item.id),
-    observacao: 'Execução feita pelo Agente Executor do Chat Lince após confirmação por senha em campo mascarado.',
+    pds_atualizados: updatedRows,
+    pds_ignorados: [],
+    guard_version: plan.plan_payload?.guard?.version || null,
+    revalidacao_pre_auth: 'OK',
+    revalidacao_pos_auth: 'OK',
+    observacao: 'Execução H6C concluída após vínculo ao solicitante, duas revalidações de estado, reautenticação Supabase e verificação pós-update.',
   };
 
-  await supabase
+  const { error: planUpdateError } = await supabase
     .from('chat_lince_action_plans')
     .update({
       status: 'EXECUTADO',
-      confirmed_by_email: user?.email || null,
+      confirmed_by_email: normalizeEmail(user?.email) || null,
       confirmed_at: new Date().toISOString(),
       executed_at: new Date().toISOString(),
       execution_result: executionResult,
     })
     .eq('id', actionId);
 
-  return { ok: true, message: `${(updated || []).length} PD(s) atualizado(s) para ${novoStatus}.`, data: executionResult };
+  if (planUpdateError) {
+    return {
+      ok: false,
+      statusCode: 500,
+      code: 'ACTION_PLAN_RESULT_PERSISTENCE_FAILED',
+      mutationCommitted: true,
+      message: 'Os PDs foram atualizados, mas o registro final do plano falhou. Não repita a ação; consulte a auditoria.',
+      data: executionResult,
+    };
+  }
+
+  return { ok: true, code: 'ACTION_EXECUTED', message: `${updatedRows.length} PD(s) atualizado(s) para ${novoStatus}.`, data: executionResult };
 }
 
 module.exports = {

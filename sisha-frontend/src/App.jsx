@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import {
   LayoutDashboard, PackageSearch, PenTool, Calculator, ShoppingCart,
-  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu, Bot, History
+  Sun, Moon, LogOut, FileUp, AlertTriangle, Database, FileText, Menu, Bot, History, Boxes
 } from 'lucide-react';
 import Cadastro from './pages/Cadastro';
 import ConsultaItens from './pages/ConsultaItens';
@@ -12,7 +12,10 @@ import ServiceBulletins from './pages/ServiceBulletins';
 import OrdensCompras from './pages/OrdensCompras';
 import ChatLince from './pages/ChatLince';
 import HistoricoMovimentacao from './pages/HistoricoMovimentacao';
+import Recebimentos from './pages/Recebimentos';
+import Equipamentos from './pages/Equipamentos';
 import Login from './pages/Login';
+import DefinirSenha from './pages/DefinirSenha';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { apiFetch } from './lib/api';
@@ -24,7 +27,23 @@ const formatDateTime = (value) => {
   return dt.toLocaleString('pt-BR');
 };
 
-const CardStatus = ({ title, value, secondaryValue, secondaryLabel, color, icon: Icon, unitLabel = 'Unidades' }) => (
+const formatBytes = (value) => {
+  const bytes = Number(value || 0);
+  if (!bytes) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+};
+
+const operationStatusClass = (value) => {
+  const status = String(value || '').toUpperCase();
+  if (status.includes('PENDÊNCIA') || status.includes('SEM CONFIRMAÇÃO') || status === 'WARN') return 'text-amber-500';
+  if (status.includes('PROCESSANDO')) return 'text-blue-500';
+  if (status.includes('CONCLUÍDO') || ['SUCESSO', 'INFO', 'AUDIT'].includes(status)) return 'text-green-600';
+  return 'text-red-600';
+};
+
+const CardStatus = ({ title, value, secondaryValue, secondaryLabel, color, icon, unitLabel = 'Unidades' }) => (
   <div className={`bg-white dark:bg-slate-800 p-6 rounded-3xl border-b-8 ${color} shadow-lg border-gray-200 dark:border-slate-700 transition-all hover:translate-y-[-4px]`}>
     <div className="flex justify-between items-start gap-4">
       <div className="flex-1 min-w-0">
@@ -42,35 +61,48 @@ const CardStatus = ({ title, value, secondaryValue, secondaryLabel, color, icon:
         )}
       </div>
       <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 text-slate-400 shrink-0">
-        <Icon size={28} />
+        {React.createElement(icon, { size: 28 })}
       </div>
     </div>
   </div>
 );
 
-const OdcPipelineCard = ({ loading, pipeline = {} }) => {
-  const aguardandoRecursos = Number(pipeline.aguardandoRecursos || 0);
+const PdLifecycleCard = ({ loading, pipeline = {} }) => {
+  const totalAcompanhamento = Number(
+    pipeline.totalAcompanhamento ?? (
+      Number(pipeline.elaboracao || 0) +
+      Number(pipeline.triagemAnalise || 0) +
+      Number(pipeline.cotacaoLpc || 0) +
+      Number(pipeline.semOc || 0) +
+      Number(pipeline.odc || 0) +
+      Number(pipeline.oda || 0) +
+      Number(pipeline.entregaParcial || 0)
+    )
+  );
   const chips = [
     ['ELB', pipeline.elaboracao || 0, 'Elaboração'],
     ['TRI/ANS', pipeline.triagemAnalise || 0, 'Triagem/Análise'],
-    ['COT/PRO', pipeline.cotacao || 0, 'Cotação'],
-    ['LIB/LPC', pipeline.liberadaCotacao || 0, 'Liberado cotação'],
+    ['COT/LPC', pipeline.cotacaoLpc || 0, 'Cotação/Liberação'],
+    ['SEM OC', pipeline.semOc || 0, 'PD sem OC'],
     ['ODC', pipeline.odc || 0, 'OC gerada'],
+    ['ODA', pipeline.oda || 0, 'Aprovada'],
+    ['PARCIAL', pipeline.entregaParcial || 0, 'Entrega parcial'],
+    ['CAN', pipeline.cancelados || 0, 'Cancelado'],
   ];
 
   return (
     <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border-b-8 border-amber-500 shadow-lg border-gray-200 dark:border-slate-700 transition-all hover:translate-y-[-4px]">
       <div className="flex justify-between items-start gap-4">
         <div className="flex-1 min-w-0">
-          <h4 className="text-[11px] uppercase tracking-[0.2em] font-black text-gray-400 dark:text-gray-500 mb-1">PD AGU REC</h4>
+          <h4 className="text-[11px] uppercase tracking-[0.2em] font-black text-gray-400 dark:text-gray-500 mb-1">CICLO DOS PDs</h4>
           <div className="flex items-baseline gap-2 flex-wrap">
             <p className="text-[clamp(1rem,1.2vw,1.8rem)] font-black text-slate-800 dark:text-white whitespace-nowrap leading-none">
-              {loading ? '...' : aguardandoRecursos.toLocaleString('pt-BR')}
+              {loading ? '...' : totalAcompanhamento.toLocaleString('pt-BR')}
             </p>
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-tighter">PDs aguardando recursos</span>
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-tighter">PDs em acompanhamento</span>
           </div>
           <p className="mt-2 text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
-            Não inclui ODA, EMB, REC, FAT ou CAN
+            Cada PD aparece em um único estágio corrente
           </p>
           <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-700/50 grid grid-cols-2 gap-2">
             {chips.map(([sigla, valor, label]) => (
@@ -102,20 +134,19 @@ const DashboardLayout = ({ children }) => {
     document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
 
-  useEffect(() => {
-    setMenuOpen(false);
-  }, [location.pathname]);
 
   const allMenuItems = [
     { path: '/', icon: LayoutDashboard, label: 'Visão Geral', roles: ['dono', 'admin', 'operador'] },
     { path: '/consulta', icon: PackageSearch, label: 'Consulta de Itens', roles: ['dono', 'admin', 'operador'] },
-    { path: '/cadastro', icon: Database, label: 'Central de Inserção', roles: ['dono', 'admin'] },
     { path: '/sb', icon: FileText, label: 'Service Bulletin', roles: ['dono', 'admin'] },
     { path: '/gerador', icon: PenTool, label: 'Gerador de Necessidades', roles: ['dono', 'admin', 'operador'] },
-    { path: '/custo', icon: Calculator, label: 'Custo Operacional', roles: ['dono', 'admin', 'operador'] },
+    { path: '/custo', icon: Calculator, label: 'Central de Custos', roles: ['dono', 'admin', 'operador'] },
     { path: '/compras', icon: ShoppingCart, label: 'Ordens de Compras', roles: ['dono', 'admin', 'operador'] },
+    { path: '/recebimentos', icon: FileText, label: 'Recibos e Recebimentos', roles: ['dono', 'admin', 'operador'] },
+    { path: '/equipamentos', icon: Boxes, label: 'Equipamentos', roles: ['dono', 'admin', 'operador'] },
     { path: '/historico-movimentacao', icon: History, label: 'Histórico de Movimentação', roles: ['dono', 'admin', 'operador'] },
     { path: '/chat-lince', icon: Bot, label: 'Chat Lince', roles: ['dono', 'admin', 'operador'] },
+    { path: '/cadastro', icon: Database, label: 'Atualizar Sistema', roles: ['dono', 'admin'] },
   ];
 
   const menuItems = allMenuItems.filter(item => item.roles.includes(user?.role || 'operador'));
@@ -147,7 +178,7 @@ const DashboardLayout = ({ children }) => {
           </div>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
+        <nav className="flex-1 px-4 space-y-1 overflow-y-auto sisha-scrollbar-hidden">
           {menuItems.map((item) => {
             const isActive = location.pathname === item.path;
             const Icon = item.icon;
@@ -292,7 +323,7 @@ const VisaoGeral = () => {
           color="border-indigo-600"
           icon={FileUp}
         />
-        <OdcPipelineCard
+        <PdLifecycleCard
           loading={loading}
           pipeline={stats.odcPipeline || {}}
         />
@@ -362,18 +393,55 @@ const VisaoGeral = () => {
                 </div>
               ) : null}
 
-              {operations.length > 0 ? operations.map((op, i) => (
-                <div key={`${op.tipo_arquivo}-${op.created_at}-${i}`} className="flex items-center justify-between gap-4 p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-700">
-                  <div className="min-w-0">
-                    <p className="font-black text-slate-700 dark:text-slate-200 truncate">{op.tipo_arquivo || 'Operação'} • {op.nome_arquivo || 'Sem arquivo'}</p>
-                    <p className="text-xs text-slate-400 truncate">{op.uploaded_by_email || 'Sistema'} • {formatDateTime(op.created_at)}</p>
-                    {op.mensagem ? <p className="text-[11px] text-slate-500 truncate">{op.mensagem}</p> : null}
+              {operations.length > 0 ? operations.map((op, i) => {
+                const displayStatus = op.status_exibicao || op.status || 'N/A';
+                const fileMeta = op?.detalhes?.arquivo || {};
+                const certificate = op?.detalhes?.certificado_conclusao || {};
+                const sheetMeta = op?.detalhes?.planilha || {};
+                const hasImportDetails = op.origem_log === 'IMPORTACAO';
+                const hasLineCounts = Number(op.linhas_lidas || 0) > 0 || Number(op.linhas_importadas || 0) > 0 || Number(op.linhas_ignoradas || 0) > 0;
+
+                return (
+                  <div key={`${op.id || op.tipo_arquivo}-${op.created_at}-${i}`} className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-700">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="font-black text-slate-700 dark:text-slate-200 truncate">{op.tipo_arquivo || 'Operação'} • {op.nome_arquivo || 'Sem arquivo'}</p>
+                        <p className="text-xs text-slate-400 truncate">{op.uploaded_by_email || 'Sistema'} • {formatDateTime(op.created_at)}</p>
+                        {op.mensagem ? <p className="text-[11px] text-slate-500 truncate">{op.mensagem}</p> : null}
+                        {hasImportDetails && hasLineCounts ? (
+                          <p className="text-[10px] font-bold text-slate-400 mt-1">
+                            {Number(op.linhas_lidas || 0).toLocaleString('pt-BR')} lidas • {Number(op.linhas_importadas || 0).toLocaleString('pt-BR')} processadas/aplicadas • {Number(op.linhas_ignoradas || 0).toLocaleString('pt-BR')} ignoradas
+                          </p>
+                        ) : null}
+                      </div>
+                      <span className={`text-xs font-black uppercase shrink-0 ${operationStatusClass(displayStatus)}`}>
+                        {displayStatus}
+                      </span>
+                    </div>
+
+                    {hasImportDetails ? (
+                      <details className="mt-3 border-t border-slate-200 dark:border-slate-700 pt-2">
+                        <summary className="cursor-pointer select-none text-[10px] font-black uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                          Ver detalhes da importação
+                        </summary>
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1 text-[10px] text-slate-500 dark:text-slate-400">
+                          <p><span className="font-black">Conclusão:</span> {op.finished_at ? formatDateTime(op.finished_at) : 'sem confirmação de conclusão'}</p>
+                          <p><span className="font-black">Tamanho:</span> {formatBytes(fileMeta.tamanho_bytes)}</p>
+                          <p className="sm:col-span-2 break-all"><span className="font-black">SHA-256:</span> {fileMeta.sha256 || 'não registrado (log legado)'}</p>
+                          {sheetMeta.abas_encontradas !== undefined ? <p><span className="font-black">Abas encontradas:</span> {sheetMeta.abas_encontradas}</p> : null}
+                          {certificate.pendencias_registradas !== undefined ? <p><span className="font-black">Pendências registradas:</span> {certificate.pendencias_registradas}</p> : null}
+                          {certificate.arquivo_recebido_integralmente !== undefined ? (
+                            <p><span className="font-black">Arquivo recebido:</span> {certificate.arquivo_recebido_integralmente ? 'confirmado + hash registrado' : 'sem confirmação'}</p>
+                          ) : null}
+                          {certificate.processamento_finalizado !== undefined ? (
+                            <p><span className="font-black">Parser:</span> {certificate.processamento_finalizado ? 'finalizado' : 'não finalizado'}</p>
+                          ) : null}
+                        </div>
+                      </details>
+                    ) : null}
                   </div>
-                  <span className={`text-xs font-black uppercase shrink-0 ${['SUCESSO', 'INFO', 'AUDIT'].includes(String(op.status || '').toUpperCase()) ? 'text-green-600' : String(op.status || '').toUpperCase() === 'WARN' ? 'text-amber-500' : 'text-red-600'}`}>
-                    {op.status || 'N/A'}
-                  </span>
-                </div>
-              )) : (
+                );
+              }) : (
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-700">
                   <p className="font-black text-slate-700 dark:text-slate-200">Ainda não há operações recentes registradas.</p>
                 </div>
@@ -390,6 +458,7 @@ function AppRoutes() {
     <Router>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/definir-senha" element={<DefinirSenha />} />
 
         <Route
           path="/*"
@@ -404,6 +473,8 @@ function AppRoutes() {
                   <Route path="/gerador" element={<GeradorNecessidades />} />
                   <Route path="/custo" element={<CustoOperacional />} />
                   <Route path="/compras" element={<OrdensCompras />} />
+                  <Route path="/recebimentos" element={<Recebimentos />} />
+                  <Route path="/equipamentos" element={<Equipamentos />} />
                   <Route path="/historico-movimentacao" element={<HistoricoMovimentacao />} />
                   <Route path="/chat-lince" element={<ChatLince />} />
                   <Route path="*" element={<Navigate to="/" replace />} />

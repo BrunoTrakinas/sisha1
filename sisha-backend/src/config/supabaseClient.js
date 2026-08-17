@@ -1,23 +1,21 @@
-// src/config/supabaseClient.js
-const { createClient } = require('@supabase/supabase-js');
-const path = require('path');
-const dotenv = require('dotenv');
+// SISHA1 V2 - cliente de DADOS do Supabase (server-only).
+//
+// H4C4: todo acesso ao schema public passa pelo backend usando a chave
+// administrativa. O SUPABASE_KEY publico fica reservado ao Supabase Auth em
+// supabaseAuthService.js e nao deve ser usado como data-plane do SISHA.
 
-// Caminho absoluto para o .env (sobe de config -> src -> raiz do backend)
-const envPath = path.join(__dirname, '..', '..', '.env');
-dotenv.config({ path: envPath });
+const { getSupabaseAdmin, getSupabaseAdminStatus } = require('./supabaseAdminClient');
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const status = getSupabaseAdminStatus();
 
-// Log de depuração (ajuda a gente a ver se o valor carregou)
-if (!supabaseUrl) {
-    console.error('❌ ERRO: SUPABASE_URL não encontrada no .env');
-    console.log('📍 Procurando em:', envPath);
-} else {
-    console.log('🔗 Conectando ao Supabase em:', supabaseUrl);
+if (!status.configured) {
+  const error = new Error(
+    'Data-plane Supabase server-only nao configurado. Defina SUPABASE_SECRET_KEY no backend.'
+  );
+  error.code = 'SUPABASE_DATA_PLANE_NOT_CONFIGURED';
+  throw error;
 }
 
-const supabase = createClient(supabaseUrl || 'https://placeholder.supabase.co', supabaseKey || 'placeholder');
+console.log(`[SISHA-1 DB] Data-plane Supabase server-only ativo (${status.key_type}).`);
 
-module.exports = supabase;
+module.exports = getSupabaseAdmin();

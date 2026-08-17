@@ -1,50 +1,36 @@
 const xlsx = require('xlsx');
 const supabase = require('../config/supabaseClient');
 const { normalizePn } = require('../utils/importAliases');
+const { loadReferencePriceRows, buildReferencePriceMap } = require('../services/pricingService');
+const { prepareQuoteRequestItems, exportQuoteRequest } = require('../services/quoteRequestService');
+const { resolvePnRelations } = require('../services/pnRelationsService');
+const { ACTIVE_AIRCRAFT_CODES, WORKSHOP_MAP, parseOsDomain, isMtCode } = require('../services/osDomainService');
+const { buildAircraftAvailabilityMap, buildMtAvailabilityDecision } = require('../services/mtNeedPolicyService');
+const { loadCurrentAvailabilityRows, loadCurrentMaintenanceIndicators } = require('../services/aircraftAvailabilityService');
+const { loadGeneratorOperationalRows, classifyMaintenanceIndicatorSemantic } = require('../services/aircraftOperationalStateService');
+const { loadMaintenanceProgram } = require('../services/maintenancePlanningService');
+const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
 
 const PAGE_SIZE = 1000;
-const ANV_CODES = ['4001', '4003', '4004', '4005', '4010', '4012'];
-const OFICINA_MAP = {
-  HV: 'OFICINA DE HV',
-  MV: 'OFICINA DE MV',
-  SV: 'OFICINA DE SV',
-  VN: 'OFICINA DE VN',
-  PA: 'OFICINA DE PA',
-  MT: 'MANUTENÇÃO',
-};
+const ANV_CODES = ACTIVE_AIRCRAFT_CODES;
+const OFICINA_MAP = WORKSHOP_MAP;
 const ORIGEM_ALLOWED_ORDER = [
   { tipo: 'OFICINA', codigo: 'HV', descricao: OFICINA_MAP.HV },
   { tipo: 'OFICINA', codigo: 'MV', descricao: OFICINA_MAP.MV },
   { tipo: 'OFICINA', codigo: 'SV', descricao: OFICINA_MAP.SV },
   { tipo: 'OFICINA', codigo: 'VN', descricao: OFICINA_MAP.VN },
   { tipo: 'OFICINA', codigo: 'PA', descricao: OFICINA_MAP.PA },
+  { tipo: 'OFICINA', codigo: 'MTVN', descricao: OFICINA_MAP.MTVN },
+  { tipo: 'OFICINA', codigo: 'MTMV', descricao: OFICINA_MAP.MTMV },
+  { tipo: 'OFICINA', codigo: 'MTHV', descricao: OFICINA_MAP.MTHV },
+  { tipo: 'OFICINA', codigo: 'MTAP', descricao: OFICINA_MAP.MTAP },
+  { tipo: 'OFICINA', codigo: 'MTSV', descricao: OFICINA_MAP.MTSV },
+  { tipo: 'OFICINA', codigo: 'MTPA', descricao: OFICINA_MAP.MTPA },
+  { tipo: 'OFICINA', codigo: 'MTVA', descricao: OFICINA_MAP.MTVA },
   { tipo: 'OFICINA', codigo: 'MT', descricao: OFICINA_MAP.MT },
-  { tipo: 'ANV', codigo: '4001', descricao: 'AERONAVE 4001' },
-  { tipo: 'ANV', codigo: '4003', descricao: 'AERONAVE 4003' },
-  { tipo: 'ANV', codigo: '4004', descricao: 'AERONAVE 4004' },
-  { tipo: 'ANV', codigo: '4005', descricao: 'AERONAVE 4005' },
-  { tipo: 'ANV', codigo: '4010', descricao: 'AERONAVE 4010' },
-  { tipo: 'ANV', codigo: '4012', descricao: 'AERONAVE 4012' },
+  ...ANV_CODES.map((codigo) => ({ tipo: 'ANV', codigo, descricao: `AERONAVE ${codigo}` })),
 ];
 
-const PPU_LOCATIONS_EXCLUDED_FROM_GENERATOR = [
-  'WORK ORDER',
-  'VN',
-  'SV',
-  'MV',
-  'HV',
-  'RECEX',
-  'CAIXA',
-  'LEONARDO',
-  'ITENS DEVOLVIDOS',
-  'GRFLINX',
-  'GERENCIA',
-  'GANM',
-  'FLIR',
-  'EXTERIOR',
-  'DIV',
-  'BANCADA',
-];
 
 const CONTEXT_TTL_MS = 15000;
 const needsCache = {
@@ -79,6 +65,168 @@ function normalizeKey(value) {
 function toNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
+}
+
+function getCeimspaQuantity(context, pn, pis = []) {
+  const pnKey = normalizeKey(pn);
+  const piSet = new Set((pis || []).map(normalizeUpper).filter(Boolean));
+  return (context.ceimspaRows || []).reduce((sum, row) => {
+    const rowPn = normalizeKey(row.pn);
+    const rowPi = normalizeUpper(row.pi);
+    const directPnMatch = rowPn && rowPn === pnKey;
+    const manualPiMatch = !rowPn && rowPi && piSet.has(rowPi);
+    return directPnMatch || manualPiMatch ? sum + toNumber(row.quantidade) : sum;
+  }, 0);
+}
+
+function roundQuantity(value) {
+  return Number(toNumber(value).toFixed(2));
+}
+
+function formatPpuLocationReference(ppuInfo) {
+  if (!ppuInfo?.locais) return '';
+  if (ppuInfo.locais instanceof Map) {
+    return Array.from(ppuInfo.locais.entries())
+      .sort(([a], [b]) => String(a).localeCompare(String(b), 'pt-BR'))
+      .map(([local, quantidade]) => `${local} (${roundQuantity(quantidade)})`)
+      .join(' | ');
+  }
+  return Array.from(ppuInfo.locais).join(' | ');
+}
+
+function buildAvailabilitySections(baseRows = [], context) {
+  const sections = { ppu: [], ceimspa: [], oda: [], pricelist: [], odc: [], comprar: [] };
+  let totalPpu = 0;
+  let totalCeimspa = 0;
+  let totalOda = 0;
+  let totalOdc = 0;
+  let totalComprar = 0;
+  let valorComprar = 0;
+
+  baseRows.forEach((row) => {
+    const necessidade = toNumber(row.necessidade_total);
+    let faltam = necessidade;
+
+    const ppuInfo = context.ppuMap.get(row.pn);
+    const disponivelPpu = Math.max(0, toNumber(ppuInfo?.quantidade));
+    faltam = Math.max(0, faltam - disponivelPpu);
+    totalPpu += disponivelPpu;
+    if (disponivelPpu > 0) {
+      sections.ppu.push({
+        ...row,
+        disponivel_etapa: roundQuantity(disponivelPpu),
+        faltam_apos_etapa: roundQuantity(faltam),
+        cobertura_etapa: roundQuantity(disponivelPpu),
+        saldo_apos_etapa: roundQuantity(faltam),
+        documento_referencia: formatPpuLocationReference(ppuInfo),
+        row_tone: faltam <= 0 ? 'full' : 'partial',
+      });
+    }
+
+    const pis = Array.from(context.pnPiMap.get(row.pn) || []);
+    const disponivelCeimspa = Math.max(0, getCeimspaQuantity(context, row.pn, pis));
+    faltam = Math.max(0, faltam - disponivelCeimspa);
+    totalCeimspa += disponivelCeimspa;
+    if (disponivelCeimspa > 0) {
+      sections.ceimspa.push({
+        ...row,
+        disponivel_etapa: roundQuantity(disponivelCeimspa),
+        faltam_apos_etapa: roundQuantity(faltam),
+        cobertura_etapa: roundQuantity(disponivelCeimspa),
+        saldo_apos_etapa: roundQuantity(faltam),
+        documento_referencia: pis.join(' | '),
+        row_tone: faltam <= 0 ? 'full' : 'partial',
+      });
+    }
+
+    const odaInfo = context.odaMap.get(row.pn);
+    const disponivelOda = Math.max(0, toNumber(odaInfo?.quantidade));
+    faltam = Math.max(0, faltam - disponivelOda);
+    totalOda += disponivelOda;
+    if (disponivelOda > 0) {
+      sections.oda.push({
+        ...row,
+        disponivel_etapa: roundQuantity(disponivelOda),
+        faltam_apos_etapa: roundQuantity(faltam),
+        cobertura_etapa: roundQuantity(disponivelOda),
+        saldo_apos_etapa: roundQuantity(faltam),
+        documento_referencia: odaInfo?.docs ? Array.from(odaInfo.docs).join(' | ') : '',
+        row_tone: faltam <= 0 ? 'full' : 'partial',
+      });
+    }
+
+    const priceInfo = context.costRefMap.get(row.pn) || context.priceMap.get(row.pn);
+    if (faltam > 0 && priceInfo) {
+      const valorUnit = toNumber(priceInfo.valor_unitario);
+      const priceMeta = buildPricePresentation(priceInfo);
+      sections.pricelist.push({
+        ...row,
+        ...priceMeta,
+        disponivel_etapa: '',
+        faltam_apos_etapa: roundQuantity(faltam),
+        cobertura_etapa: '',
+        saldo_apos_etapa: roundQuantity(faltam),
+        valor_unitario_gbp: valorUnit,
+        valor_total_gbp: Number((valorUnit * faltam).toFixed(2)),
+        observacao: priceMeta.preco_estimativa
+          ? `ESTIMATIVA por ${priceMeta.fonte_exibicao || 'fonte histórica'} — requer atualização de cotação; não altera o que falta.`
+          : `Referência de preço (${priceMeta.fonte_exibicao || 'PRICE LIST'}) — não altera o que falta.`,
+        row_tone: 'info',
+      });
+    }
+
+    const odcInfo = context.odcMap.get(row.pn);
+    const disponivelOdc = Math.max(0, toNumber(odcInfo?.quantidade));
+    faltam = Math.max(0, faltam - disponivelOdc);
+    totalOdc += disponivelOdc;
+    if (disponivelOdc > 0) {
+      sections.odc.push({
+        ...row,
+        disponivel_etapa: roundQuantity(disponivelOdc),
+        faltam_apos_etapa: roundQuantity(faltam),
+        cobertura_etapa: roundQuantity(disponivelOdc),
+        saldo_apos_etapa: roundQuantity(faltam),
+        documento_referencia: odcInfo?.docs ? Array.from(odcInfo.docs).join(' | ') : '',
+        row_tone: faltam <= 0 ? 'full' : 'partial',
+      });
+    }
+
+    if (faltam > 0) {
+      const valorUnit = toNumber(priceInfo?.valor_unitario);
+      const valorTotal = valorUnit > 0 ? Number((valorUnit * faltam).toFixed(2)) : 0;
+      totalComprar += faltam;
+      valorComprar += valorTotal;
+      const priceMeta = buildPricePresentation(priceInfo || null);
+      sections.comprar.push({
+        ...row,
+        ...priceMeta,
+        disponivel_etapa: '',
+        faltam_apos_etapa: roundQuantity(faltam),
+        cobertura_etapa: '',
+        saldo_apos_etapa: roundQuantity(faltam),
+        valor_unitario_gbp: valorUnit || null,
+        valor_total_gbp: valorTotal || null,
+        observacao: priceInfo
+          ? (priceMeta.preco_estimativa
+            ? `Comprar — ESTIMATIVA por ${priceMeta.fonte_exibicao || 'fonte histórica'}; solicitar nova cotação.`
+            : `Comprar — preço por ${priceMeta.fonte_exibicao || 'PRICE LIST'}.`)
+          : 'Comprar — sem referência de valor; solicitar cotação.',
+        row_tone: 'buy',
+      });
+    }
+  });
+
+  return {
+    sections,
+    totals: {
+      ppu: roundQuantity(totalPpu),
+      ceimspa: roundQuantity(totalCeimspa),
+      oda: roundQuantity(totalOda),
+      odc: roundQuantity(totalOdc),
+      comprar: roundQuantity(totalComprar),
+      valorComprar: Number(valorComprar.toFixed(2)),
+    },
+  };
 }
 
 function firstExistingKey(obj = {}, candidates = []) {
@@ -136,27 +284,61 @@ function parseDateInput(value) {
 }
 
 function parseOsOrigem(osVinculada) {
-  const raw = normalizeUpper(osVinculada);
-  if (!raw) {
-    return { origem_tipo: 'OUTROS', origem_codigo: null, origem_descricao: 'SEM OS' };
-  }
+  const parsed = parseOsDomain(osVinculada);
+  return {
+    origem_tipo: parsed.tipo,
+    origem_codigo: parsed.codigo,
+    origem_descricao: parsed.descricao,
+  };
+}
 
-  const anv = ANV_CODES.find((code) => raw.startsWith(code));
-  if (anv) {
-    return { origem_tipo: 'ANV', origem_codigo: anv, origem_descricao: `AERONAVE ${anv}` };
-  }
+function isMtOrigem(row = {}) {
+  return normalizeUpper(row.origem_tipo) === 'OFICINA' && isMtCode(row.origem_codigo);
+}
 
-  const prefixosOficina = ['HV', 'MV', 'SV', 'VN', 'PA', 'MT'];
-  const prefixo = prefixosOficina.find((item) => raw.startsWith(item));
-  if (prefixo) {
+function collectSelectedPimRows(pimRows = [], selectedOrigemSet = new Set()) {
+  return (pimRows || []).map((row) => {
+    const origem = resolvePimOrigem(row);
+    const origemKey = buildOrigemKey(origem);
     return {
-      origem_tipo: 'OFICINA',
-      origem_codigo: prefixo,
-      origem_descricao: OFICINA_MAP[prefixo] || `OFICINA DE ${prefixo}`,
+      row,
+      origem,
+      origemKey,
+      pn: normalizeKey(row.pn),
+      isMt: isMtOrigem(origem),
+      isAircraft: normalizeUpper(origem.origem_tipo) === 'ANV',
+    };
+  }).filter(({ row, origemKey }) => {
+    if (!normalizeKey(row.pn)) return false;
+    return selectedOrigemSet.size === 0 || selectedOrigemSet.has(origemKey);
+  });
+}
+
+function buildPricePresentation(priceInfo = null) {
+  if (!priceInfo) {
+    return {
+      fonte_valor: null,
+      fonte_exibicao: null,
+      documento_fonte: null,
+      data_referencia: null,
+      validade_preco: null,
+      preco_vigente: false,
+      preco_estimativa: false,
+      necessita_cotacao: true,
+      status_preco: 'SEM_PRECO',
     };
   }
-
-  return { origem_tipo: 'OUTROS', origem_codigo: null, origem_descricao: raw };
+  return {
+    fonte_valor: priceInfo.fonte_preco || priceInfo.fonte || null,
+    fonte_exibicao: priceInfo.fonte_exibicao || priceInfo.fonte_preco || priceInfo.fonte || null,
+    documento_fonte: priceInfo.documento_fonte || null,
+    data_referencia: priceInfo.data_referencia || null,
+    validade_preco: priceInfo.validade || null,
+    preco_vigente: priceInfo.vigente === true,
+    preco_estimativa: Boolean(priceInfo.estimativa),
+    necessita_cotacao: Boolean(priceInfo.necessita_cotacao),
+    status_preco: priceInfo.status_preco || null,
+  };
 }
 
 function resolvePimOrigem(row = {}) {
@@ -229,20 +411,14 @@ function normalizeOrigemDisplay(row = {}) {
   };
 }
 
-function shouldExcludePpuLocationFromGenerator(location) {
-  const normalized = normalizeUpper(location);
-  if (!normalized) return false;
-  return PPU_LOCATIONS_EXCLUDED_FROM_GENERATOR.some((prefix) => normalized.startsWith(prefix));
-}
-
 function formatWorkbookRows(rows = []) {
   return rows.map((row) => ({
     PN: row.pn,
     NSN: row.nsn || '',
     Nomenclatura: row.nomenclatura || '',
     Necessidade_Total: row.necessidade_total,
-    Cobertura_Etapa: row.cobertura_etapa ?? '',
-    Saldo_Apos_Etapa: row.saldo_apos_etapa ?? '',
+    Disponivel_na_Etapa: row.disponivel_etapa ?? row.cobertura_etapa ?? '',
+    Faltam_Apos_Etapa: row.faltam_apos_etapa ?? row.saldo_apos_etapa ?? '',
     Usado_em_Receita: row.usado_em_receita || (row.receitas_texto ? 'SIM' : ''),
     Receitas: row.receitas_texto || '',
     Receita_Qtd_Por_Ciclo: row.receita_qtd_por_ciclo_texto || '',
@@ -254,6 +430,13 @@ function formatWorkbookRows(rows = []) {
     Documento_Ref: row.documento_referencia || '',
     Valor_Unitario_GBP: row.valor_unitario_gbp ?? '',
     Valor_Total_GBP: row.valor_total_gbp ?? '',
+    Fonte_Preco: row.fonte_exibicao || row.fonte_valor || '',
+    Documento_Preco: row.documento_fonte || '',
+    Data_Preco: row.data_referencia || '',
+    Validade_Preco: row.validade_preco || '',
+    Status_Preco: row.status_preco || '',
+    Estimativa: row.preco_estimativa ? 'SIM' : 'NÃO',
+    Necessita_Cotacao: row.necessita_cotacao ? 'SIM' : 'NÃO',
   }));
 }
 
@@ -310,7 +493,42 @@ function splitRecipePnList(value) {
     .filter(Boolean);
 }
 
-function buildRecipeApplicationMap(receitaRows = []) {
+function buildPnAlternativeMap(dicRows = [], altDocRows = []) {
+  const map = new Map();
+  const families = new Map();
+
+  const add = (pn, related) => {
+    const key = normalizeKey(pn);
+    const alt = normalizeKey(related);
+    if (!key || !alt || key === alt) return;
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(alt);
+  };
+
+  (dicRows || []).forEach((row) => {
+    const dmc = String(row.dmc || '').trim();
+    const item = String(row.item_num || '').trim();
+    const pn = normalizeKey(row.pn);
+    if (!dmc || !item || !pn) return;
+    const familyKey = `${dmc}|${item}`;
+    if (!families.has(familyKey)) families.set(familyKey, new Set());
+    families.get(familyKey).add(pn);
+  });
+
+  families.forEach((members) => {
+    const list = Array.from(members);
+    list.forEach((pn) => list.forEach((alt) => add(pn, alt)));
+  });
+
+  (altDocRows || []).forEach((row) => {
+    add(row.pn, row.pn_alt);
+    add(row.pn_alt, row.pn);
+  });
+
+  return map;
+}
+
+function buildRecipeApplicationMap(receitaRows = [], alternativeMap = new Map()) {
   const map = new Map();
   const seen = new Set();
 
@@ -342,6 +560,10 @@ function buildRecipeApplicationMap(receitaRows = []) {
 
     splitRecipePnList(row.pn_alt).forEach((pnAlt) => {
       if (pnAlt && pnAlt !== pnReceita) addApplication(pnAlt, row, 'PN ALTERNATIVO DA RECEITA');
+    });
+
+    Array.from(alternativeMap.get(pnReceita) || []).forEach((pnAlt) => {
+      if (pnAlt && pnAlt !== pnReceita) addApplication(pnAlt, row, 'PN ALTERNATIVO CONSOLIDADO (CIETP/DOCUMENTO)');
     });
   });
 
@@ -410,47 +632,17 @@ async function buscarPnAlternativoAutomatico(pn) {
   if (!pnNorm) return null;
 
   try {
-    const { data: base } = await supabase
-      .from('dicionario_mestre')
-      .select('dmc, item_num')
-      .eq('pn', pnNorm)
-      .limit(1)
-      .maybeSingle();
-
-    if (base?.dmc && base?.item_num) {
-      const { data: siblings } = await supabase
-        .from('dicionario_mestre')
-        .select('pn')
-        .eq('dmc', base.dmc)
-        .eq('item_num', base.item_num);
-
-      const alternativos = [...new Set((siblings || [])
-        .map((row) => normalizePn(row.pn))
-        .filter((alt) => alt && alt !== pnNorm))];
-
-      if (alternativos.length > 0) {
-        return alternativos.join(' | ');
-      }
-    }
-  } catch (_) {}
-
-  try {
-    const { data } = await supabase
-      .from('pn_equivalencia')
-      .select('*')
-      .or(`pn.eq.${pnNorm},pn_alt.eq.${pnNorm}`)
-      .limit(30);
-
-    const alternativos = [...new Set((data || []).flatMap((row) => [row.pn, row.pn_alt])
-      .map((item) => normalizePn(item))
+    // 28.11: uma única regra para CIETP + biblioteca documental.
+    // Evolução RFQ permanece direcional e não é achatada em receita_itens.pn_alt.
+    const relations = await resolvePnRelations(pnNorm, { includeRfq: false });
+    const alternativos = [...new Set((relations.alternativos || [])
+      .map((row) => normalizePn(row.pn_relacionado))
       .filter((alt) => alt && alt !== pnNorm))];
-
     return alternativos.length > 0 ? alternativos.join(' | ') : null;
   } catch (_) {
     return null;
   }
 }
-
 
 function parseRfQEndDate(validade) {
   const text = String(validade || '').trim();
@@ -631,7 +823,6 @@ async function loadGeneratorContext(force = false) {
     return needsCache.full;
   }
 
-  const today = new Date();
   const [
     receitaRows,
     politicaRows,
@@ -641,42 +832,50 @@ async function loadGeneratorContext(force = false) {
     odcRows,
     priceRows,
     dicRows,
+    altDocRows,
     ceimspaRows,
-    rfqRows,
-    receiptRows,
+    referencePriceRows,
     itemRows,
     sbRows,
     sbItemRows,
+    aircraftAvailabilityRows,
+    maintenanceProgram,
   ] = await Promise.all([
     fetchAllRows('receita_itens', '*').catch(() => []),
     fetchAllRows('politica_estoque_tarefas', '*').catch(() => []),
     fetchAllRows('pim_demandas', '*').catch(() => []),
-    fetchAllRows('estoque_ppu', 'pn, quantidade, localizacao').catch(() => []),
+    loadAllEffectivePpuRows().catch(() => []),
     fetchAllRows('leonardo_spares', 'pn, qtd_pendente, documento_referencia').catch(() => []),
     fetchOdcRows(),
     fetchAllRows('price_list', 'pn, valor_unitario, nomenclatura, nsn').catch(() => []),
-    fetchAllRows('dicionario_mestre', 'pn, pi, nsn, nomenclatura').catch(() => []),
-    fetchAllRows('estoque_ceimspa', 'pi, quantidade, nomenclatura').catch(() => []),
-    fetchAllRows('rfq_cotacoes', 'pn, valor_unitario, validade, data_insercao').catch(() => []),
-    fetchAllRows('recebimento_itens', 'pn, valor_unitario, created_at').catch(() => []),
+    fetchAllRows('dicionario_mestre', 'pn, pi, nsn, nomenclatura, dmc, item_num, sub_item').catch(() => []),
+    fetchAllRows('pn_alternativos_documento', 'pn, pn_alt, pi, fonte, ativo').then((rows) => (rows || []).filter((row) => row.ativo !== false)).catch(() => []),
+    fetchAllRows('v_sisha_ceimspa_disponibilidade', 'pn, pi, quantidade, nomenclatura, origem_saldo, numero_recibo').catch(() => []),
+    loadReferencePriceRows().catch(() => []),
     fetchAllRows('items', 'pn, nomenclatura, nsn').catch(() => []),
     fetchAllRows('service_bulletins', 'sb_numero, titulo, tipo_sb, status_acao, data_publicacao, observacao, fonte_documento, updated_at').catch(() => []),
     fetchAllRows('service_bulletin_items', 'sb_numero, pn, nsn, nomenclatura, qtd, capitulo, item_num, aplicabilidade').catch(() => []),
+    loadGeneratorOperationalRows().catch(() => []),
+    loadMaintenanceProgram().catch(() => ({ rows: [], scheduled_needs: [], summary: { indicators: 0, bound: 0, blocked: 0, planned: 0, overdue: 0 } })),
   ]);
 
   const receitaOptions = buildReceitaOptions(receitaRows, politicaRows);
   const origemOptions = buildOrigemOptions(pimRows);
-  const recipeApplicationMap = buildRecipeApplicationMap(receitaRows);
+  const pnAlternativeMap = buildPnAlternativeMap(dicRows, altDocRows);
+  const recipeApplicationMap = buildRecipeApplicationMap(receitaRows, pnAlternativeMap);
 
   const ppuMap = new Map();
   (ppuRows || []).forEach((row) => {
     const pn = normalizeKey(row.pn);
     if (!pn) return;
-    if (shouldExcludePpuLocationFromGenerator(row.localizacao)) return;
-    if (!ppuMap.has(pn)) ppuMap.set(pn, { quantidade: 0, locais: new Set() });
+    if (!ppuMap.has(pn)) ppuMap.set(pn, { quantidade: 0, locais: new Map() });
     const ref = ppuMap.get(pn);
-    ref.quantidade += toNumber(row.quantidade);
-    if (row.localizacao) ref.locais.add(row.localizacao);
+    const quantidade = toNumber(row.quantidade);
+    ref.quantidade += quantidade;
+    if (row.localizacao) {
+      const local = String(row.localizacao).trim();
+      ref.locais.set(local, toNumber(ref.locais.get(local)) + quantidade);
+    }
   });
 
   const odaMap = new Map();
@@ -724,7 +923,7 @@ async function loadGeneratorContext(force = false) {
   });
 
   const priceMap = new Map();
-  const costRefMap = new Map();
+  const costRefMap = buildReferencePriceMap(referencePriceRows || []);
   (priceRows || []).forEach((row) => {
     const pn = normalizeKey(row.pn);
     if (!pn) return;
@@ -732,39 +931,16 @@ async function loadGeneratorContext(force = false) {
       valor_unitario: toNumber(row.valor_unitario),
       nomenclatura: safeString(row.nomenclatura),
       nsn: safeString(row.nsn),
+      fonte: 'PRICE_LIST',
     };
-    if (!priceMap.has(pn)) priceMap.set(pn, info);
+    // Preço zero não é referência de preço. O PN continua sendo usado para
+    // enriquecer nomenclatura/NSN via pnMetaMap, mas será tratado como SEM PREÇO.
+    if (info.valor_unitario > 0 && !priceMap.has(pn)) priceMap.set(pn, info);
     const currentMeta = pnMetaMap.get(pn) || {};
     pnMetaMap.set(pn, {
       nsn: currentMeta.nsn || info.nsn,
       nomenclatura: currentMeta.nomenclatura || info.nomenclatura,
     });
-  });
-
-  receiptRows
-    .filter((row) => toNumber(row.valor_unitario) > 0)
-    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
-    .forEach((row) => {
-      const pn = normalizeKey(row.pn);
-      if (!pn || costRefMap.has(pn)) return;
-      costRefMap.set(pn, { valor_unitario: toNumber(row.valor_unitario), fonte: 'RECIBO' });
-    });
-
-  (rfqRows || [])
-    .filter((row) => toNumber(row.valor_unitario) > 0)
-    .map((row) => ({ ...row, endDate: parseRfQEndDate(row.validade) }))
-    .filter((row) => row.endDate && row.endDate >= today)
-    .sort((a, b) => new Date(b.data_insercao || 0) - new Date(a.data_insercao || 0))
-    .forEach((row) => {
-      const pn = normalizeKey(row.pn);
-      if (!pn || costRefMap.has(pn)) return;
-      costRefMap.set(pn, { valor_unitario: toNumber(row.valor_unitario), fonte: 'RFQ VÁLIDA' });
-    });
-
-  (priceRows || []).forEach((row) => {
-    const pn = normalizeKey(row.pn);
-    if (!pn || costRefMap.has(pn) || toNumber(row.valor_unitario) <= 0) return;
-    costRefMap.set(pn, { valor_unitario: toNumber(row.valor_unitario), fonte: 'PRICE LIST' });
   });
 
   const ceimspaMap = new Map();
@@ -803,6 +979,7 @@ async function loadGeneratorContext(force = false) {
     sbItemRows,
     sbItemsByNumero,
     recipeApplicationMap,
+    pnAlternativeMap,
     ppuMap,
     odaMap,
     odcMap,
@@ -811,6 +988,10 @@ async function loadGeneratorContext(force = false) {
     pnPiMap,
     pnMetaMap,
     ceimspaMap,
+    ceimspaRows,
+    aircraftAvailabilityRows,
+    aircraftAvailabilityMap: buildAircraftAvailabilityMap(aircraftAvailabilityRows),
+    maintenanceProgram,
   };
 
   needsCache.full = context;
@@ -840,7 +1021,7 @@ function buildSbCoverageItem(item = {}, context) {
   const quantidadeReferencial = qtyRaw > 0 ? qtyRaw : 1;
   const pis = Array.from(context.pnPiMap.get(pn) || []);
   const ppu = toNumber(context.ppuMap.get(pn)?.quantidade);
-  const ceimspa = pis.reduce((acc, pi) => acc + toNumber(context.ceimspaMap.get(pi)?.quantidade), 0);
+  const ceimspa = getCeimspaQuantity(context, pn, pis);
   const oda = toNumber(context.odaMap.get(pn)?.quantidade);
   const odc = toNumber(context.odcMap.get(pn)?.quantidade);
   const coberturaTotal = ppu + ceimspa + oda + odc;
@@ -860,7 +1041,10 @@ function buildSbCoverageItem(item = {}, context) {
     odc_qtd: odc,
     saldo_pos_cascata: Number(saldo.toFixed(2)),
     price_ref_gbp: priceInfo ? toNumber(priceInfo.valor_unitario) : null,
-    price_ref_fonte: priceInfo?.fonte || (context.priceMap.has(pn) ? 'PRICE LIST' : null),
+    price_ref_fonte: priceInfo?.fonte_exibicao || priceInfo?.fonte_preco || priceInfo?.fonte || (context.priceMap.has(pn) ? 'PRICE LIST' : null),
+    price_ref_estimativa: Boolean(priceInfo?.estimativa),
+    price_ref_necessita_cotacao: priceInfo ? Boolean(priceInfo.necessita_cotacao) : true,
+    price_ref_status: priceInfo?.status_preco || (priceInfo ? null : 'SEM_PRECO'),
     precisa_cadastro: precisaCadastro,
     cobertura_status: saldo <= 0 ? 'COBERTO' : (coberturaTotal > 0 ? 'PARCIAL' : 'SEM_COBERTURA'),
     aplicabilidade: item.aplicabilidade || null,
@@ -870,7 +1054,7 @@ function buildSbCoverageItem(item = {}, context) {
 }
 
 function buildGeneratorPreview(selection, context) {
-  const { mode = 'prioritized', receitas = [], origens = [], incluirPims = true, sbMode = 'none', sbs = [] } = selection || {};
+  const { mode = 'prioritized', receitas = [], origens = [], incluirPims = true, incluirProgramadas = false, sbMode = 'none', sbs = [] } = selection || {};
   const selectedReceitas = resolveSelectedReceitas(mode, context.receitaOptions, receitas);
   const selectedSbs = resolveSelectedSbs(sbMode, context.sbOptions, sbs);
   const selectedOrigemSet = new Set((origens || []).map((item) => String(item || '').trim()).filter(Boolean));
@@ -902,19 +1086,47 @@ function buildGeneratorPreview(selection, context) {
   });
 
   if (incluirPims) {
-    (context.pimRows || []).forEach((row) => {
-      const origemNormalizada = resolvePimOrigem(row);
-      const origemKey = buildOrigemKey(origemNormalizada);
-      if (selectedOrigemSet.size > 0 && !selectedOrigemSet.has(origemKey)) return;
+    const selectedPimRows = collectSelectedPimRows(context.pimRows, selectedOrigemSet);
 
+    selectedPimRows.forEach((item) => {
+      const { row, origem } = item;
+      const quantidadeOriginal = toNumber(row.quantidade);
+      const mtDecision = buildMtAvailabilityDecision(item, selectedPimRows, context.aircraftAvailabilityMap || new Map());
       appendNeed(needMap, {
         pn: row.pn,
         nsn: row.nsn,
         nomenclatura: row.nomenclatura,
-        quantidade: toNumber(row.quantidade),
+        quantidade: mtDecision.blocked ? 0 : quantidadeOriginal,
         pims: [row.pim],
-        origens: [buildOrigemLabel(origemNormalizada)],
-        observacoes: [`PIM x1 • OS ${row.os_vinculada}`],
+        origens: [buildOrigemLabel(origem)],
+        observacoes: [
+          `PIM x1 • OS ${row.os_vinculada}`,
+          item.isMt ? `Demanda MT de material x${quantidadeOriginal}.` : null,
+          mtDecision.additive
+            ? `MT somada como demanda adicional: aeronave(s) relacionada(s) indisponível(is) ${mtDecision.unavailableAircraft.join(', ')}.`
+            : null,
+          mtDecision.blocked
+            ? `MT preservada como alerta: ${mtDecision.relatedAircraft.join(', ') || 'ANV relacionada'} sem evidência estruturada atual de indisponibilidade (I).`
+            : null,
+        ].filter(Boolean),
+      });
+    });
+  }
+
+  if (incluirProgramadas) {
+    (context.maintenanceProgram?.scheduled_needs || []).forEach((item) => {
+      appendNeed(needMap, {
+        pn: item.pn,
+        nomenclatura: item.nomenclatura,
+        quantidade: toNumber(item.quantidade || 1),
+        origens: [`MANUTENÇÃO PROGRAMADA • ANV ${item.aircraft_code}`],
+        observacoes: [
+          `${item.maintenance_action || 'MANUTENÇÃO'} • ${item.indicator_label || item.indicator_key}`,
+          item.planning_status === 'OVERDUE' ? 'Indicador vencido.' : 'Indicador futuro confirmado para planejamento.',
+          item.trigger?.due_date ? `Vencimento ${item.trigger.due_date}` : null,
+          item.trigger?.value !== null && item.trigger?.value !== undefined && Number.isFinite(Number(item.trigger.value)) ? `Restante ${item.trigger.value} ${item.trigger.unit || ''}` : null,
+          item.sn ? `SN ${item.sn}` : 'Necessidade vinculada ao PN sem SN específico.',
+        ].filter(Boolean),
       });
     });
   }
@@ -948,124 +1160,26 @@ function buildGeneratorPreview(selection, context) {
     };
   });
 
-  const sections = {
-    ppu: [],
-    ceimspa: [],
-    oda: [],
-    pricelist: [],
-    odc: [],
-    comprar: [],
-  };
-
-  let totalPpu = 0;
-  let totalCeimspa = 0;
-  let totalOda = 0;
-  let totalOdc = 0;
-  let totalComprar = 0;
-  let valorComprar = 0;
-
-  baseRows.forEach((row) => {
-    const necessidade = toNumber(row.necessidade_total);
-    let saldo = necessidade;
-
-    const ppuInfo = context.ppuMap.get(row.pn);
-    const coberturaPpu = Math.min(saldo, toNumber(ppuInfo?.quantidade));
-    saldo -= coberturaPpu;
-    totalPpu += coberturaPpu;
-    sections.ppu.push({
-      ...row,
-      cobertura_etapa: Number(coberturaPpu.toFixed(2)),
-      saldo_apos_etapa: Number(saldo.toFixed(2)),
-      documento_referencia: ppuInfo?.locais ? Array.from(ppuInfo.locais).join(' | ') : '',
-      row_tone: coberturaPpu >= necessidade && necessidade > 0 ? 'full' : (coberturaPpu > 0 ? 'partial' : 'none'),
-    });
-
-    const pis = Array.from(context.pnPiMap.get(row.pn) || []);
-    const ceimspaDisponivel = pis.reduce((acc, pi) => acc + toNumber(context.ceimspaMap.get(pi)?.quantidade), 0);
-    const coberturaCeimspa = Math.min(saldo, ceimspaDisponivel);
-    if (coberturaCeimspa > 0) {
-      saldo -= coberturaCeimspa;
-      totalCeimspa += coberturaCeimspa;
-      sections.ceimspa.push({
-        ...row,
-        cobertura_etapa: Number(coberturaCeimspa.toFixed(2)),
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        documento_referencia: pis.join(' | '),
-        row_tone: coberturaCeimspa >= Math.max(necessidade - coberturaPpu, 0) && (necessidade - coberturaPpu) > 0 ? 'full' : 'partial',
-      });
-    }
-
-    const odaInfo = context.odaMap.get(row.pn);
-    const coberturaOda = Math.min(saldo, toNumber(odaInfo?.quantidade));
-    if (coberturaOda > 0) {
-      saldo -= coberturaOda;
-      totalOda += coberturaOda;
-      sections.oda.push({
-        ...row,
-        cobertura_etapa: Number(coberturaOda.toFixed(2)),
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        documento_referencia: odaInfo?.docs ? Array.from(odaInfo.docs).join(' | ') : '',
-        row_tone: 'partial',
-      });
-    }
-
-    const priceInfo = context.costRefMap.get(row.pn) || context.priceMap.get(row.pn);
-    if (saldo > 0 && priceInfo) {
-      const valorUnit = toNumber(priceInfo.valor_unitario);
-      sections.pricelist.push({
-        ...row,
-        cobertura_etapa: '',
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        valor_unitario_gbp: valorUnit,
-        valor_total_gbp: Number((valorUnit * saldo).toFixed(2)),
-        observacao: `Referência de preço (${priceInfo.fonte || 'PRICE LIST'}) — não consome saldo.`,
-        row_tone: 'info',
-      });
-    }
-
-    const odcInfo = context.odcMap.get(row.pn);
-    const coberturaOdc = Math.min(saldo, toNumber(odcInfo?.quantidade));
-    if (coberturaOdc > 0) {
-      saldo -= coberturaOdc;
-      totalOdc += coberturaOdc;
-      sections.odc.push({
-        ...row,
-        cobertura_etapa: Number(coberturaOdc.toFixed(2)),
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        documento_referencia: odcInfo?.docs ? Array.from(odcInfo.docs).join(' | ') : '',
-        row_tone: 'partial',
-      });
-    }
-
-    if (saldo > 0) {
-      const valorUnit = toNumber(priceInfo?.valor_unitario);
-      const valorTotal = valorUnit > 0 ? Number((valorUnit * saldo).toFixed(2)) : 0;
-      totalComprar += saldo;
-      valorComprar += valorTotal;
-      sections.comprar.push({
-        ...row,
-        cobertura_etapa: '',
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        valor_unitario_gbp: valorUnit || null,
-        valor_total_gbp: valorTotal || null,
-        observacao: priceInfo ? `Comprar — valor estimado por ${priceInfo.fonte || 'PRICE LIST'}.` : 'Comprar — sem referência vigente de valor.',
-        row_tone: 'buy',
-      });
-    }
-  });
+  const availability = buildAvailabilitySections(baseRows, context);
+  const { sections, totals } = availability;
 
   const summary = {
     receitas_selecionadas: selectedReceitas.length,
     sbs_selecionadas: selectedSbs.length,
     origens_selecionadas: selectedOrigemSet.size,
+    programadas_selecionadas: incluirProgramadas ? (context.maintenanceProgram?.scheduled_needs || []).length : 0,
     linhas_base: baseRows.length,
     necessidade_total: Number(baseRows.reduce((acc, row) => acc + toNumber(row.necessidade_total), 0).toFixed(2)),
-    coberto_ppu: Number(totalPpu.toFixed(2)),
-    coberto_ceimspa: Number(totalCeimspa.toFixed(2)),
-    coberto_oda: Number(totalOda.toFixed(2)),
-    coberto_odc: Number(totalOdc.toFixed(2)),
-    comprar_qtd: Number(totalComprar.toFixed(2)),
-    comprar_valor_gbp: Number(valorComprar.toFixed(2)),
+    disponivel_ppu: totals.ppu,
+    disponivel_ceimspa: totals.ceimspa,
+    disponivel_oda: totals.oda,
+    disponivel_odc: totals.odc,
+    coberto_ppu: totals.ppu,
+    coberto_ceimspa: totals.ceimspa,
+    coberto_oda: totals.oda,
+    coberto_odc: totals.odc,
+    comprar_qtd: totals.comprar,
+    comprar_valor_gbp: totals.valorComprar,
   };
 
   return {
@@ -1076,6 +1190,7 @@ function buildGeneratorPreview(selection, context) {
       sbs: selectedSbs,
       origens: Array.from(selectedOrigemSet),
       incluirPims: !!incluirPims,
+      incluirProgramadas: !!incluirProgramadas,
     },
     summary,
     base: baseRows,
@@ -1164,22 +1279,27 @@ function buildOperationalCostPreview(selection, context) {
   });
 
   if (incluirPims) {
-    (context.pimRows || []).forEach((row) => {
-      const origemNormalizada = resolvePimOrigem(row);
-      const origemKey = buildOrigemKey(origemNormalizada);
-      if (selectedOrigemSet.size > 0 && !selectedOrigemSet.has(origemKey)) return;
+    const selectedPimRows = collectSelectedPimRows(context.pimRows, selectedOrigemSet);
+
+    selectedPimRows.forEach((item) => {
+      const { row, origem } = item;
       const quantidade = toNumber(row.quantidade);
       if (quantidade <= 0) return;
+      const mtDecision = buildMtAvailabilityDecision(item, selectedPimRows, context.aircraftAvailabilityMap || new Map());
       addCostLine({
         pn: row.pn,
         nsn: row.nsn,
         nomenclatura: row.nomenclatura,
-        qtdUnitaria: quantidade,
-        qtdPlanejada: quantidade,
+        qtdUnitaria: mtDecision.blocked ? 0 : quantidade,
+        qtdPlanejada: mtDecision.blocked ? 0 : quantidade,
         pim: row.pim,
-        origem: buildOrigemLabel(origemNormalizada),
+        origem: buildOrigemLabel(origem),
         fator: 1,
-        observacao: `PIM avulsa x${quantidade} • OS ${row.os_vinculada}`,
+        observacao: mtDecision.blocked
+          ? `MT ${row.os_vinculada || ''} x${quantidade} preservada como alerta; ${mtDecision.relatedAircraft.join(', ') || 'ANV relacionada'} sem evidência atual de situação I.`
+          : mtDecision.additive
+            ? `Demanda MT x${quantidade} somada por indisponibilidade comprovada de ${mtDecision.unavailableAircraft.join(', ')} • OS ${row.os_vinculada}`
+            : `${item.isMt ? 'Demanda MT' : 'PIM avulsa'} x${quantidade} • OS ${row.os_vinculada}`,
       });
     });
   }
@@ -1229,7 +1349,7 @@ function buildOperationalCostPreview(selection, context) {
         valor_planejado_gbp: valorPlanejado,
         // Compatibilidade com a tela antiga: agora o valor_total_gbp representa 1 execução, não a projeção.
         valor_total_gbp: valorExecucao,
-        fonte_valor: priceInfo?.fonte || null,
+        ...buildPricePresentation(priceInfo),
       };
     })
     .sort((a, b) => a.pn.localeCompare(b.pn));
@@ -1241,6 +1361,8 @@ function buildOperationalCostPreview(selection, context) {
     linhas: linhas.length,
     pns_com_valor: linhas.filter((row) => row.valor_unitario_gbp != null).length,
     pns_sem_valor: linhas.filter((row) => row.valor_unitario_gbp == null).length,
+    pns_com_estimativa: linhas.filter((row) => row.preco_estimativa).length,
+    pns_precisam_cotacao: linhas.filter((row) => row.necessita_cotacao || row.valor_unitario_gbp == null).length,
     qtd_unitaria_total: Number(linhas.reduce((acc, row) => acc + toNumber(row.qtd_unitaria), 0).toFixed(2)),
     qtd_planejada_total: Number(linhas.reduce((acc, row) => acc + toNumber(row.qtd_planejada), 0).toFixed(2)),
     custo_execucao_gbp: Number(linhas.reduce((acc, row) => acc + toNumber(row.valor_execucao_gbp), 0).toFixed(2)),
@@ -1544,6 +1666,37 @@ exports.deletePolitica = async (req, res) => {
   }
 };
 
+exports.getAircraftAvailabilityCurrent = async (req, res) => {
+  try {
+    const rows = await loadCurrentAvailabilityRows();
+    return res.status(200).json({
+      status: 'success',
+      data: rows,
+      source: 'v_sisha_aircraft_current_availability',
+    });
+  } catch (error) {
+    return res.status(500).json({ status: 'error', message: `Falha ao consultar disponibilidade da frota: ${error.message}` });
+  }
+};
+
+exports.getAircraftMaintenanceIndicators = async (req, res) => {
+  try {
+    const aircraft = normalizeUpper(req.params?.aircraft);
+    if (!/^\d{4}$/.test(aircraft)) {
+      return res.status(400).json({ status: 'error', message: 'Informe uma aeronave com 4 dígitos.' });
+    }
+    const rows = await loadCurrentMaintenanceIndicators([aircraft]);
+    return res.status(200).json({
+      status: 'success',
+      aircraft,
+      data: rows.map((row) => ({ ...row, ...classifyMaintenanceIndicatorSemantic(row) })),
+      source: 'v_sisha_aircraft_current_maintenance_indicators',
+    });
+  } catch (error) {
+    return res.status(500).json({ status: 'error', message: `Falha ao consultar indicadores da aeronave: ${error.message}` });
+  }
+};
+
 exports.getFoundationSnapshot = async (req, res) => {
   try {
     const [{ count: receitasCount }, { count: pimCount }, { count: politicaCount }] = await Promise.all([
@@ -1605,6 +1758,7 @@ const BATCH_QTY_HEADERS = [
   'quantidade',
   'qtd',
   'qtde',
+  'qte',
   'qtd.',
   'qtde.',
   'qty',
@@ -1793,103 +1947,8 @@ function buildBatchQueryPreview(parsedFile, context) {
     return enrichBatchRowWithRecipeApplications(base, context);
   });
 
-  const sections = { ppu: [], ceimspa: [], oda: [], pricelist: [], odc: [], comprar: [] };
-  let totalPpu = 0;
-  let totalCeimspa = 0;
-  let totalOda = 0;
-  let totalOdc = 0;
-  let totalComprar = 0;
-  let valorComprar = 0;
-
-  inputRows.forEach((row) => {
-    const necessidade = toNumber(row.necessidade_total);
-    let saldo = necessidade;
-
-    const ppuInfo = context.ppuMap.get(row.pn);
-    const coberturaPpu = Math.min(saldo, toNumber(ppuInfo?.quantidade));
-    saldo -= coberturaPpu;
-    totalPpu += coberturaPpu;
-    sections.ppu.push({
-      ...row,
-      cobertura_etapa: Number(coberturaPpu.toFixed(2)),
-      saldo_apos_etapa: Number(saldo.toFixed(2)),
-      documento_referencia: ppuInfo?.locais ? Array.from(ppuInfo.locais).join(' | ') : '',
-      row_tone: coberturaPpu >= necessidade && necessidade > 0 ? 'full' : (coberturaPpu > 0 ? 'partial' : 'none'),
-    });
-
-    const pis = Array.from(context.pnPiMap.get(row.pn) || []);
-    const ceimspaDisponivel = pis.reduce((acc, pi) => acc + toNumber(context.ceimspaMap.get(pi)?.quantidade), 0);
-    const coberturaCeimspa = Math.min(saldo, ceimspaDisponivel);
-    if (coberturaCeimspa > 0) {
-      saldo -= coberturaCeimspa;
-      totalCeimspa += coberturaCeimspa;
-      sections.ceimspa.push({
-        ...row,
-        cobertura_etapa: Number(coberturaCeimspa.toFixed(2)),
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        documento_referencia: pis.join(' | '),
-        row_tone: coberturaCeimspa >= Math.max(necessidade - coberturaPpu, 0) && (necessidade - coberturaPpu) > 0 ? 'full' : 'partial',
-      });
-    }
-
-    const odaInfo = context.odaMap.get(row.pn);
-    const coberturaOda = Math.min(saldo, toNumber(odaInfo?.quantidade));
-    if (coberturaOda > 0) {
-      saldo -= coberturaOda;
-      totalOda += coberturaOda;
-      sections.oda.push({
-        ...row,
-        cobertura_etapa: Number(coberturaOda.toFixed(2)),
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        documento_referencia: odaInfo?.docs ? Array.from(odaInfo.docs).join(' | ') : '',
-        row_tone: 'partial',
-      });
-    }
-
-    const priceInfo = context.costRefMap.get(row.pn) || context.priceMap.get(row.pn);
-    if (saldo > 0 && priceInfo) {
-      const valorUnit = toNumber(priceInfo.valor_unitario);
-      sections.pricelist.push({
-        ...row,
-        cobertura_etapa: '',
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        valor_unitario_gbp: valorUnit,
-        valor_total_gbp: Number((valorUnit * saldo).toFixed(2)),
-        observacao: `Referência de preço (${priceInfo.fonte || 'PRICE LIST'}) — não consome saldo.`,
-        row_tone: 'info',
-      });
-    }
-
-    const odcInfo = context.odcMap.get(row.pn);
-    const coberturaOdc = Math.min(saldo, toNumber(odcInfo?.quantidade));
-    if (coberturaOdc > 0) {
-      saldo -= coberturaOdc;
-      totalOdc += coberturaOdc;
-      sections.odc.push({
-        ...row,
-        cobertura_etapa: Number(coberturaOdc.toFixed(2)),
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        documento_referencia: odcInfo?.docs ? Array.from(odcInfo.docs).join(' | ') : '',
-        row_tone: 'partial',
-      });
-    }
-
-    if (saldo > 0) {
-      const valorUnit = toNumber(priceInfo?.valor_unitario);
-      const valorTotal = valorUnit > 0 ? Number((valorUnit * saldo).toFixed(2)) : 0;
-      totalComprar += saldo;
-      valorComprar += valorTotal;
-      sections.comprar.push({
-        ...row,
-        cobertura_etapa: '',
-        saldo_apos_etapa: Number(saldo.toFixed(2)),
-        valor_unitario_gbp: valorUnit || null,
-        valor_total_gbp: valorTotal || null,
-        observacao: priceInfo ? `Comprar — valor estimado por ${priceInfo.fonte || 'PRICE LIST'}.` : 'Comprar — sem referência vigente de valor.',
-        row_tone: 'buy',
-      });
-    }
-  });
+  const availability = buildAvailabilitySections(inputRows, context);
+  const { sections, totals } = availability;
 
   return {
     arquivo: {
@@ -1914,12 +1973,16 @@ function buildBatchQueryPreview(parsedFile, context) {
     summary: {
       linhas_base: inputRows.length,
       necessidade_total: Number(inputRows.reduce((acc, row) => acc + toNumber(row.necessidade_total), 0).toFixed(2)),
-      coberto_ppu: Number(totalPpu.toFixed(2)),
-      coberto_ceimspa: Number(totalCeimspa.toFixed(2)),
-      coberto_oda: Number(totalOda.toFixed(2)),
-      coberto_odc: Number(totalOdc.toFixed(2)),
-      comprar_qtd: Number(totalComprar.toFixed(2)),
-      comprar_valor_gbp: Number(valorComprar.toFixed(2)),
+      disponivel_ppu: totals.ppu,
+      disponivel_ceimspa: totals.ceimspa,
+      disponivel_oda: totals.oda,
+      disponivel_odc: totals.odc,
+      coberto_ppu: totals.ppu,
+      coberto_ceimspa: totals.ceimspa,
+      coberto_oda: totals.oda,
+      coberto_odc: totals.odc,
+      comprar_qtd: totals.comprar,
+      comprar_valor_gbp: totals.valorComprar,
       itens_usados_em_receita: inputRows.filter((row) => row.usado_em_receita === 'SIM').length,
       itens_sem_receita: inputRows.filter((row) => row.usado_em_receita !== 'SIM').length,
     },
@@ -1997,10 +2060,10 @@ exports.exportBatchQueryXlsx = async (req, res) => {
       { Indicador: 'Linhas lidas', Valor: preview.arquivo.linhas_lidas },
       { Indicador: 'Linhas base', Valor: preview.summary.linhas_base },
       { Indicador: 'Necessidade total', Valor: preview.summary.necessidade_total },
-      { Indicador: 'Coberto PPU', Valor: preview.summary.coberto_ppu },
-      { Indicador: 'Coberto CeIMSPA', Valor: preview.summary.coberto_ceimspa },
-      { Indicador: 'Coberto ODA', Valor: preview.summary.coberto_oda },
-      { Indicador: 'Coberto ODC', Valor: preview.summary.coberto_odc },
+      { Indicador: 'Disponível PPU + recibos pendentes', Valor: preview.summary.disponivel_ppu ?? preview.summary.coberto_ppu },
+      { Indicador: 'Disponível CeIMSPA', Valor: preview.summary.disponivel_ceimspa ?? preview.summary.coberto_ceimspa },
+      { Indicador: 'Disponível ODA', Valor: preview.summary.disponivel_oda ?? preview.summary.coberto_oda },
+      { Indicador: 'Disponível ODC', Valor: preview.summary.disponivel_odc ?? preview.summary.coberto_odc },
       { Indicador: 'Comprar qtd', Valor: preview.summary.comprar_qtd },
       { Indicador: 'Comprar valor GBP', Valor: preview.summary.comprar_valor_gbp },
       { Indicador: 'Itens usados em receita', Valor: preview.summary.itens_usados_em_receita },
@@ -2013,7 +2076,7 @@ exports.exportBatchQueryXlsx = async (req, res) => {
       ['01_PPU', preview.sections.ppu],
       ['02_CEIMSPA', preview.sections.ceimspa],
       ['03_ODA', preview.sections.oda],
-      ['04_PRICELIST', preview.sections.pricelist],
+      ['04_BANCO_PRECOS', preview.sections.pricelist],
       ['05_ODC', preview.sections.odc],
       ['06_COMPRAR', preview.sections.comprar],
     ].forEach(([name, rows]) => {
@@ -2053,7 +2116,7 @@ exports.exportGeneratorXlsx = async (req, res) => {
       ['01_PPU', preview.sections.ppu],
       ['02_CEIMSPA', preview.sections.ceimspa],
       ['03_ODA', preview.sections.oda],
-      ['04_PRICELIST', preview.sections.pricelist],
+      ['04_BANCO_PRECOS', preview.sections.pricelist],
       ['05_ODC', preview.sections.odc],
       ['06_COMPRAR', preview.sections.comprar],
     ];
@@ -2090,6 +2153,34 @@ exports.previewOperationalCost = async (req, res) => {
     return res.status(200).json({ status: 'success', data: preview });
   } catch (_) {
     return res.status(500).json({ status: 'error', message: 'Falha ao calcular custo operacional.' });
+  }
+};
+
+exports.prepareQuoteRequest = async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const data = await prepareQuoteRequestItems(items);
+    return res.status(200).json({ status: 'success', data });
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    return res.status(statusCode).json({ status: 'error', message: error?.message || 'Falha ao preparar a solicitação de cotação.' });
+  }
+};
+
+exports.exportQuoteRequestXlsx = async (req, res) => {
+  try {
+    const result = await exportQuoteRequest({
+      items: Array.isArray(req.body?.items) ? req.body.items : [],
+      source: req.body?.source || 'SISHA',
+      user: req.user || null,
+    });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.setHeader('X-SISHA-Cotacao-Ref', result.ref);
+    return res.status(200).send(result.buffer);
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    return res.status(statusCode).json({ status: 'error', message: error?.message || 'Falha ao exportar a solicitação de cotação.' });
   }
 };
 
