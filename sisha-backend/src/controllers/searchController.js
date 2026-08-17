@@ -5,6 +5,7 @@ const { getSubItemPriority } = require('../services/pnRelationsService');
 const { buildWtpReferences, buildWtpTextReferences } = require('../services/wtpReferenceService');
 const { loadTrackingRowsByPns } = require('../services/ppuLocationPolicyService');
 const { loadEffectivePpuRowsByPns } = require('../services/ppuEffectiveAvailabilityService');
+const { buildRadarOrFilter, normalizeRadarSearchTerm } = require('../services/radarSearchPolicyService');
 
 function addUndirectedEdge(graph, a, b) {
     if (!a || !b || a === b) return;
@@ -346,7 +347,7 @@ exports.searchItems = async (req, res) => {
         const { q } = req.query;
         if (!q) return res.status(400).json({ status: 'error', message: 'Termo de busca vazio.' });
 
-        const query = q.toUpperCase().trim();
+        const query = normalizeRadarSearchTerm(q);
 
         let pnsEncontrados = new Set();
         let baseNomes = {};
@@ -358,27 +359,27 @@ exports.searchItems = async (req, res) => {
         // ---------------------------------------------------------
         // FASE 1: VARREDURA PARALELA (À PROVA DE FALHAS E HIPER-RÁPIDA)
         // ---------------------------------------------------------
-        const p1 = supabase.from('items').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p2 = supabase.from('dicionario_mestre').select('pn, nomenclatura, nsn, pi').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p3 = supabase.from('v_sisha_ppu_disponibilidade').select('pn, nomenclatura, nsn_pi, sn').or(`pn.ilike.%${query}%,nsn_pi.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p4 = supabase.from('lisde').select('pn, nomenclatura').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(50);
-        const p5 = supabase.from('price_list').select('pn, nomenclatura, nsn').or(`pn.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(20);
-        const p6 = supabase.from('v_sisha_ceimspa_disponibilidade').select('pn, pi, nomenclatura, quantidade, sj, uf, origem_saldo, numero_recibo, recebimento_id, recebimento_item_id, fonte_identificacao').or(`pn.ilike.%${query}%,pi.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(80);
-        const p7 = supabase.from('rfq_cotacoes').select('pn,pn_relacionado,tipo_relacao_pn,nomenclatura,nsn,ativo').eq('ativo', true).or(`pn.ilike.%${query}%,pn_relacionado.ilike.%${query}%,nsn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(40);
-        const p8 = supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').eq('ativo', true).or(`pn.ilike.%${query}%,pi.ilike.%${query}%,pn_alt.ilike.%${query}%`).limit(100);
-        const p9 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura').or(`pn.ilike.%${query}%`).limit(80);
-        const p10 = supabase.from('service_bulletins').select('sb_numero, titulo').or(`sb_numero.ilike.%${query}%,titulo.ilike.%${query}%`).limit(30);
-        const p11 = supabase.from('item_apelidos').select('pn, apelido, descricao_oficial').eq('ativo', true).or(`pn.ilike.%${query}%,apelido.ilike.%${query}%,descricao_oficial.ilike.%${query}%`).limit(50);
-        const p12 = supabase.from('leonardo_spares').select('pn,descricao,documento_referencia,oc_referencia,status_categoria').or(`pn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%,oc_referencia.ilike.%${query}%,status_categoria.ilike.%${query}%`).limit(80);
-        const p13 = supabase.from('leonardo_foc_spares').select('pn,descricao,documento_referencia').or(`pn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%`).limit(80);
-        const p14 = supabase.from('leonardo_repairs').select('pn,sn,descricao,tipo,documento_referencia,status').or(`pn.ilike.%${query}%,sn.ilike.%${query}%,descricao.ilike.%${query}%,documento_referencia.ilike.%${query}%,status.ilike.%${query}%,tipo.ilike.%${query}%`).limit(120);
-        const p15 = supabase.from('leonardo_admin_docs').select('tipo_doc,numero_doc,assunto_pn,status').or(`numero_doc.ilike.%${query}%,assunto_pn.ilike.%${query}%,status.ilike.%${query}%`).limit(80);
-        const p16 = supabase.from('v_sisha_equipamentos_search').select('id,pn,sn,nomenclatura,local_atual,categoria_local_atual,condicao_atual,anv_atual,garantia_vencimento,ultima_evidencia_documento,search_text').ilike('search_text', `%${query}%`).limit(120);
-        const p17 = supabase.from('v_sisha_manual_pn_aplicacao').select('manual_id,manual_codigo,tipo_manual,manual_titulo,fabricante,ata_dmc,revisao,data_revisao,pn,fig,item,nomenclatura,usage_code,units_per_assy,tipo_vinculo,page_ref,storage_status').or(`pn.ilike.%${query}%,nomenclatura.ilike.%${query}%,manual_codigo.ilike.%${query}%`).limit(120);
+        const p1 = supabase.from('items').select('pn, nomenclatura, nsn').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn'], textFields: ['nomenclatura'] })).limit(50);
+        const p2 = supabase.from('dicionario_mestre').select('pn, nomenclatura, nsn, pi').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn', 'pi'], textFields: ['nomenclatura'] })).limit(50);
+        const p3 = supabase.from('v_sisha_ppu_disponibilidade').select('pn, nomenclatura, nsn_pi, sn').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_pi', 'sn'], textFields: ['nomenclatura'] })).limit(50);
+        const p4 = supabase.from('lisde').select('pn, nomenclatura').or(buildRadarOrFilter(query, { prefixFields: ['pn'], textFields: ['nomenclatura'] })).limit(50);
+        const p5 = supabase.from('price_list').select('pn, nomenclatura, nsn').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn'], textFields: ['nomenclatura'] })).limit(20);
+        const p6 = supabase.from('v_sisha_ceimspa_disponibilidade').select('pn, pi, nomenclatura, quantidade, sj, uf, origem_saldo, numero_recibo, recebimento_id, recebimento_item_id, fonte_identificacao').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'pi'], textFields: ['nomenclatura'] })).limit(80);
+        const p7 = supabase.from('rfq_cotacoes').select('pn,pn_relacionado,tipo_relacao_pn,nomenclatura,nsn,ativo').eq('ativo', true).or(buildRadarOrFilter(query, { prefixFields: ['pn', 'pn_relacionado', 'nsn'], textFields: ['nomenclatura'] })).limit(40);
+        const p8 = supabase.from('pn_alternativos_documento').select('pn, pi, pn_alt, fonte').eq('ativo', true).or(buildRadarOrFilter(query, { prefixFields: ['pn', 'pi', 'pn_alt'] })).limit(100);
+        const p9 = supabase.from('service_bulletin_items').select('sb_numero, pn, nsn, nomenclatura').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn'] })).limit(80);
+        const p10 = supabase.from('service_bulletins').select('sb_numero, titulo').or(buildRadarOrFilter(query, { prefixFields: ['sb_numero'], textFields: ['titulo'] })).limit(30);
+        const p11 = supabase.from('item_apelidos').select('pn, apelido, descricao_oficial').eq('ativo', true).or(buildRadarOrFilter(query, { prefixFields: ['pn'], textFields: ['apelido', 'descricao_oficial'] })).limit(50);
+        const p12 = supabase.from('leonardo_spares').select('pn,descricao,documento_referencia,oc_referencia,status_categoria').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'documento_referencia', 'oc_referencia'], textFields: ['descricao', 'status_categoria'] })).limit(80);
+        const p13 = supabase.from('leonardo_foc_spares').select('pn,descricao,documento_referencia').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'documento_referencia'], textFields: ['descricao'] })).limit(80);
+        const p14 = supabase.from('leonardo_repairs').select('pn,sn,descricao,tipo,documento_referencia,status').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'sn', 'documento_referencia'], textFields: ['descricao', 'status', 'tipo'] })).limit(120);
+        const p15 = supabase.from('leonardo_admin_docs').select('tipo_doc,numero_doc,assunto_pn,status').or(buildRadarOrFilter(query, { prefixFields: ['numero_doc', 'assunto_pn'], textFields: ['status'] })).limit(80);
+        const p16 = supabase.from('v_sisha_equipamentos_search').select('id,pn,sn,nomenclatura,local_atual,categoria_local_atual,condicao_atual,anv_atual,garantia_vencimento,ultima_evidencia_documento,search_text').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'sn'], textFields: ['nomenclatura', 'search_text'] })).limit(120);
+        const p17 = supabase.from('v_sisha_manual_pn_aplicacao').select('manual_id,manual_codigo,tipo_manual,manual_titulo,fabricante,ata_dmc,revisao,data_revisao,pn,fig,item,nomenclatura,usage_code,units_per_assy,tipo_vinculo,page_ref,storage_status').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'manual_codigo'], textFields: ['nomenclatura'] })).limit(120);
         // Inventário físico bruto do PPU: usado apenas para localizar itens/SNs que estejam
         // em uma LOC excluída da disponibilidade. A quantidade NÃO entra no card PPU por esta consulta.
-        const p18 = supabase.from('estoque_ppu').select('id,pn,nomenclatura,nsn_pi,sn,quantidade,localizacao').or(`pn.ilike.%${query}%,nsn_pi.ilike.%${query}%,sn.ilike.%${query}%,nomenclatura.ilike.%${query}%`).limit(120);
-        const p19 = supabase.from('v_sisha_ppu_custodia_externa_atual').select('pn,nomenclature,nsn_normalized,nsn_original,sn,quantity,box_code,original_location').or(`pn.ilike.%${query}%,nsn_normalized.ilike.%${query}%,nsn_original.ilike.%${query}%,sn.ilike.%${query}%,nomenclature.ilike.%${query}%`).limit(120);
+        const p18 = supabase.from('estoque_ppu').select('id,pn,nomenclatura,nsn_pi,sn,quantidade,localizacao').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_pi', 'sn'], textFields: ['nomenclatura'] })).limit(120);
+        const p19 = supabase.from('v_sisha_ppu_custodia_externa_atual').select('pn,nomenclature,nsn_normalized,nsn_original,sn,quantity,box_code,original_location').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_normalized', 'nsn_original', 'sn'], textFields: ['nomenclature'] })).limit(120);
 
         const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19]);
         const getRes = (index) => results[index].status === 'fulfilled' ? results[index].value.data : null;

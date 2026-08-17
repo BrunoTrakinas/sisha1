@@ -329,6 +329,42 @@ function confidenceTone(value) {
   return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
 }
 
+function emptyOperationalFilters() {
+  return {
+    location_category: '',
+    location: '',
+    condition: '',
+    status: '',
+    reason: '',
+    source: '',
+    repair_state: '',
+    priority: '',
+    critical: '',
+    emergency: '',
+    conflict: '',
+    ppu: '',
+    min_days: '',
+  };
+}
+
+function priorityTone(value) {
+  const key = normalizeUpper(value);
+  if (key === 'CRITICA') return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300';
+  if (key === 'ALTA') return 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300';
+  if (key === 'MEDIA') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300';
+  if (key === 'INDETERMINADA') return 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200';
+  return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300';
+}
+
+function repairStateLabel(value) {
+  const key = normalizeUpper(value);
+  if (key === 'AGUARDANDO_ENVIO_AVALIACAO') return 'Aguardando envio / avaliação';
+  if (key === 'EM_REPARO') return 'Em reparo';
+  if (key === 'RETORNADO') return 'Retornado';
+  if (key === 'INDETERMINADA') return 'Indeterminada';
+  return 'Sem indicação de reparo';
+}
+
 
 function inventoryRowIssues(rows = []) {
   const counts = new Map();
@@ -395,6 +431,9 @@ export default function Equipamentos() {
   const { user, token } = useAuth();
   const canEdit = ['dono', 'admin'].includes(user?.role);
   const [query, setQuery] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [operationalFilters, setOperationalFilters] = useState(emptyOperationalFilters());
+  const [operationalMeta, setOperationalMeta] = useState(null);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -466,6 +505,67 @@ export default function Equipamentos() {
       setLoading(false);
     }
   }, [token]);
+
+  const loadOperational = useCallback(async (filters = {}, term = '') => {
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams();
+      if (String(term || '').trim()) params.set('q', String(term || '').trim());
+      Object.entries(filters || {}).forEach(([key, value]) => {
+        if (String(value ?? '').trim()) params.set(key, String(value).trim());
+      });
+      params.set('result_limit', '2000');
+      const response = await apiFetch(`/equipments/operational-search?${params.toString()}`, {}, token);
+      const json = await response.json();
+      if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao montar pesquisa operacional.');
+      setItems(json.data || []);
+      setOperationalMeta(json.meta || null);
+    } catch (err) {
+      setError(err.message || 'Falha ao montar pesquisa operacional.');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  const refreshEquipmentList = useCallback(async () => {
+    if (advancedOpen) return loadOperational(operationalFilters, query);
+    setOperationalMeta(null);
+    return load(query);
+  }, [advancedOpen, load, loadOperational, operationalFilters, query]);
+
+  const openOperationalSearch = async () => {
+    setAdvancedOpen(true);
+    await loadOperational(operationalFilters, query);
+  };
+
+  const closeOperationalSearch = async () => {
+    setAdvancedOpen(false);
+    setOperationalMeta(null);
+    await load(query);
+  };
+
+  const clearOperationalSearch = async () => {
+    const clean = emptyOperationalFilters();
+    setOperationalFilters(clean);
+    setQuery('');
+    setAdvancedOpen(true);
+    await loadOperational(clean, '');
+  };
+
+  const quickOperationalSearch = async (patch) => {
+    const clean = { ...emptyOperationalFilters(), ...patch };
+    setOperationalFilters(clean);
+    setQuery('');
+    setAdvancedOpen(true);
+    await loadOperational(clean, '');
+  };
+
+  const runMainSearch = async () => {
+    if (advancedOpen) return loadOperational(operationalFilters, query);
+    setOperationalMeta(null);
+    return load(query);
+  };
 
   const loadLocationConflicts = useCallback(async () => {
     if (!canEdit) {
@@ -540,7 +640,7 @@ export default function Equipamentos() {
       setStcMode('list');
       setStcForm(emptyStcForm());
       await loadStcCards(query);
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
     } catch (err) {
       setError(err.message || 'Falha ao salvar STC.');
@@ -565,7 +665,7 @@ export default function Equipamentos() {
       if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao cancelar STC.');
       setNotice('STC cancelada sem apagar o histórico do equipamento.');
       await loadStcCards(query);
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
     } catch (err) {
       setError(err.message || 'Falha ao cancelar STC.');
@@ -657,7 +757,7 @@ export default function Equipamentos() {
       setOsPimMode('list');
       setOsPimForm(emptyOsPimForm());
       await loadOsPimData(query);
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
     } catch (err) {
       setError(err.message || 'Falha ao salvar movimentação OS/PIM.');
@@ -682,7 +782,7 @@ export default function Equipamentos() {
       if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao cancelar movimentação OS/PIM.');
       setNotice(json.message || 'Movimentação cancelada sem apagar o histórico.');
       await loadOsPimData(query);
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
     } catch (err) {
       setError(err.message || 'Falha ao cancelar movimentação OS/PIM.');
@@ -769,7 +869,7 @@ export default function Equipamentos() {
       if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao salvar equipamento.');
       setNotice(isEdit ? 'Cadastro técnico/garantia atualizado.' : 'Equipamento cadastrado com sucesso.');
       setEquipmentModal(null);
-      await load(query);
+      await refreshEquipmentList();
       if (dossierOpen && selected?.id) await refreshSelected();
     } catch (err) {
       setError(err.message || 'Falha ao salvar equipamento.');
@@ -795,7 +895,7 @@ export default function Equipamentos() {
       setDeleteEquipment(null);
       setDossierOpen(false);
       setSelected(null);
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
     } catch (err) {
       setError(err.message || 'Falha ao excluir/arquivar equipamento.');
@@ -863,7 +963,7 @@ export default function Equipamentos() {
       setMasterModal(false);
       setMasterDraft(null);
       setMasterFile(null);
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
       if (Number(data.conflitos_localizacao || 0) > 0) setConflictsOpen(true);
     } catch (err) {
@@ -891,7 +991,7 @@ export default function Equipamentos() {
       if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao reconciliar localização.');
       setNotice('Localização confirmada. A outra evidência permanece no Livro como informação histórica invalidada.');
       setConflictReasons((current) => ({ ...current, [conflict.id]: '' }));
-      await load(query);
+      await refreshEquipmentList();
       await loadLocationConflicts();
       if (selected?.id === conflict.equipamento_id) await refreshSelected();
     } catch (err) {
@@ -926,7 +1026,7 @@ export default function Equipamentos() {
       setNotice('Movimentação registrada. A localização atual foi recalculada pelo histórico.');
       setSelected(json.data);
       setEventModal(false);
-      await load(query);
+      await refreshEquipmentList();
     } catch (err) {
       setError(err.message || 'Falha ao registrar movimentação.');
     } finally {
@@ -953,7 +1053,7 @@ export default function Equipamentos() {
       setInvalidateEvent(null);
       setInvalidateReason('');
       setNotice('Evento invalidado sem ser apagado. A localização atual foi recomposta.');
-      await load(query);
+      await refreshEquipmentList();
     } catch (err) {
       setError(err.message || 'Falha ao invalidar evento.');
     } finally {
@@ -1024,7 +1124,7 @@ export default function Equipamentos() {
       setInventoryModal(false);
       setInventoryDraft(null);
       setInventoryFile(null);
-      await load(query);
+      await refreshEquipmentList();
     } catch (err) {
       setError(err.message || 'Falha ao aplicar inventário de equipamentos.');
     } finally {
@@ -1052,7 +1152,15 @@ export default function Equipamentos() {
   const exportData = async () => {
     setError('');
     try {
-      const response = await fetch(`${API_BASE_URL}/equipments/export?q=${encodeURIComponent(query || '')}`, {
+      const params = new URLSearchParams();
+      if (String(query || '').trim()) params.set('q', String(query).trim());
+      if (advancedOpen) {
+        Object.entries(operationalFilters || {}).forEach(([key, value]) => {
+          if (String(value ?? '').trim()) params.set(key, String(value).trim());
+        });
+      }
+      const exportPath = advancedOpen ? '/equipments/operational-search/export' : '/equipments/export';
+      const response = await fetch(`${API_BASE_URL}${exportPath}?${params.toString()}`, {
         headers: buildAuthHeaders(token),
       });
       if (!response.ok) {
@@ -1063,7 +1171,7 @@ export default function Equipamentos() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = 'SISHA_Rastreabilidade_Equipamentos.xlsx';
+      anchor.download = advancedOpen ? 'SISHA_Pesquisa_Operacional_Equipamentos.xlsx' : 'SISHA_Rastreabilidade_Equipamentos.xlsx';
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -1086,6 +1194,10 @@ export default function Equipamentos() {
           <div className="flex flex-wrap items-start gap-2">
             <button onClick={exportData} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-700 text-white font-black text-sm hover:bg-slate-600">
               <Download size={17} /> Exportar
+            </button>
+
+            <button onClick={advancedOpen ? closeOperationalSearch : openOperationalSearch} className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-sm ${advancedOpen ? 'bg-cyan-700 text-white hover:bg-cyan-800' : 'bg-cyan-50 dark:bg-cyan-950/30 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-900 hover:bg-cyan-100 dark:hover:bg-cyan-950/50'}`}>
+              <Settings2 size={17} /> {advancedOpen ? 'Pesquisa operacional ativa' : 'Pesquisa operacional'}
             </button>
 
             {canEdit ? (
@@ -1133,7 +1245,7 @@ export default function Equipamentos() {
           </div>
         </div>
 
-        <form onSubmit={(event) => { event.preventDefault(); load(query); }} className="mt-5 flex flex-col sm:flex-row gap-2">
+        <form onSubmit={(event) => { event.preventDefault(); runMainSearch(); }} className="mt-5 flex flex-col sm:flex-row gap-2">
           <div className="relative flex-1">
             <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -1146,10 +1258,49 @@ export default function Equipamentos() {
           <button className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-black inline-flex items-center justify-center gap-2">
             <Search size={17} /> Buscar
           </button>
-          <button type="button" onClick={() => { setQuery(''); load(''); }} className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-700 font-black text-slate-600 dark:text-slate-200">
+          <button type="button" onClick={() => { setQuery(''); if (advancedOpen) loadOperational(operationalFilters, ''); else load(''); }} className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-700 font-black text-slate-600 dark:text-slate-200">
             <RefreshCcw size={17} />
           </button>
         </form>
+
+        {advancedOpen ? (
+          <div className="mt-4 rounded-2xl border border-cyan-200 dark:border-cyan-900 bg-cyan-50/40 dark:bg-cyan-950/10 p-4">
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+              <div>
+                <h4 className="font-black uppercase tracking-tight text-cyan-900 dark:text-cyan-200">Pesquisa operacional de equipamentos</h4>
+                <p className="mt-1 text-xs font-bold text-cyan-800/80 dark:text-cyan-300/80">Cruza Livro PN+SN, Inventário/PPU efetivo, Controle de Equipamentos Críticos, Master OS, PIM/OS, WO, Recibos e demais eventos já registrados. Criticidade e motivo não são inventados quando a evidência não sustenta.</p>
+              </div>
+              <button type="button" onClick={clearOperationalSearch} className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-cyan-200 dark:border-cyan-900 text-xs font-black">Limpar filtros</button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button type="button" onClick={() => quickOperationalSearch({ location_category: 'RECEX' })} className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-black">Materiais no RECEX</button>
+              <button type="button" onClick={() => quickOperationalSearch({ repair_state: 'AGUARDANDO_ENVIO_AVALIACAO' })} className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-black">Aguardando reparo</button>
+              <button type="button" onClick={() => quickOperationalSearch({ emergency: 'true' })} className="px-3 py-2 rounded-xl bg-red-600 text-white text-xs font-black">Candidatos a reparo emergencial</button>
+              <button type="button" onClick={() => quickOperationalSearch({ conflict: 'true' })} className="px-3 py-2 rounded-xl bg-amber-500 text-white text-xs font-black">Com inconsistências</button>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              <label><span className={labelClass}>Categoria / localização</span><select className={inputClass} value={operationalFilters.location_category} onChange={(e) => setOperationalFilters((v) => ({ ...v, location_category: e.target.value }))}><option value="">Todas</option>{categoryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label><span className={labelClass}>Local começa com</span><input className={inputClass} value={operationalFilters.location} onChange={(e) => setOperationalFilters((v) => ({ ...v, location: e.target.value }))} placeholder="Ex.: RECEX, CX-001..." /></label>
+              <label><span className={labelClass}>Condição</span><select className={inputClass} value={operationalFilters.condition} onChange={(e) => setOperationalFilters((v) => ({ ...v, condition: e.target.value }))}><option value="">Todas</option>{conditionOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label><span className={labelClass}>Status começa com</span><input className={inputClass} value={operationalFilters.status} onChange={(e) => setOperationalFilters((v) => ({ ...v, status: e.target.value }))} placeholder="Ex.: WO_, CADASTRADO..." /></label>
+              <label className="sm:col-span-2"><span className={labelClass}>Motivo / causa contém</span><input className={inputClass} value={operationalFilters.reason} onChange={(e) => setOperationalFilters((v) => ({ ...v, reason: e.target.value }))} placeholder="Ex.: pane, garantia, remoção, transferência..." /></label>
+              <label><span className={labelClass}>Fonte obrigatória</span><select className={inputClass} value={operationalFilters.source} onChange={(e) => setOperationalFilters((v) => ({ ...v, source: e.target.value }))}><option value="">Qualquer fonte</option><option value="critico">Controle de Equipamentos Críticos</option><option value="master_os">Master OS</option><option value="os_pim">OS / PIM</option><option value="wo">WO</option><option value="recibo">Recibo</option><option value="ppu">PPU / Inventário</option><option value="stc">STC</option></select></label>
+              <label><span className={labelClass}>Situação do reparo</span><select className={inputClass} value={operationalFilters.repair_state} onChange={(e) => setOperationalFilters((v) => ({ ...v, repair_state: e.target.value }))}><option value="">Todas</option><option value="AGUARDANDO_ENVIO_AVALIACAO">Aguardando envio / avaliação</option><option value="EM_REPARO">Em reparo</option><option value="RETORNADO">Retornado</option><option value="SEM_INDICACAO">Sem indicação</option><option value="INDETERMINADA">Indeterminada</option></select></label>
+              <label><span className={labelClass}>Prioridade operacional</span><select className={inputClass} value={operationalFilters.priority} onChange={(e) => setOperationalFilters((v) => ({ ...v, priority: e.target.value }))}><option value="">Todas</option><option value="CRITICA">Crítica</option><option value="ALTA">Alta</option><option value="MEDIA">Média</option><option value="NORMAL">Normal</option><option value="INDETERMINADA">Indeterminada</option></select></label>
+              <label><span className={labelClass}>Controle crítico</span><select className={inputClass} value={operationalFilters.critical} onChange={(e) => setOperationalFilters((v) => ({ ...v, critical: e.target.value }))}><option value="">Todos</option><option value="true">Somente críticos</option><option value="false">Não críticos / sem evidência</option></select></label>
+              <label><span className={labelClass}>PPU efetivo do PN</span><select className={inputClass} value={operationalFilters.ppu} onChange={(e) => setOperationalFilters((v) => ({ ...v, ppu: e.target.value }))}><option value="">Qualquer saldo</option><option value="ZERO">Saldo zero</option><option value="POSITIVO">Saldo positivo</option><option value="INDETERMINADO">Indeterminado</option></select></label>
+              <label><span className={labelClass}>Conflito de evidência</span><select className={inputClass} value={operationalFilters.conflict} onChange={(e) => setOperationalFilters((v) => ({ ...v, conflict: e.target.value }))}><option value="">Todos</option><option value="true">Somente com conflito</option><option value="false">Sem conflito</option></select></label>
+              <label><span className={labelClass}>Mínimo de dias no local</span><input type="number" min="0" className={inputClass} value={operationalFilters.min_days} onChange={(e) => setOperationalFilters((v) => ({ ...v, min_days: e.target.value }))} placeholder="Ex.: 30" /></label>
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button type="button" onClick={closeOperationalSearch} className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 font-black text-sm">Voltar à pesquisa simples</button>
+              <button type="button" onClick={() => loadOperational(operationalFilters, query)} className="px-5 py-2.5 rounded-xl bg-cyan-700 text-white font-black text-sm inline-flex items-center gap-2"><Search size={16} /> Aplicar filtros</button>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -1166,6 +1317,19 @@ export default function Equipamentos() {
         ))}
       </section>
 
+      {advancedOpen && operationalMeta ? (
+        <section className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          {[
+            ['Resultado filtrado', operationalMeta.total ?? items.length],
+            ['No RECEX', operationalMeta.recex ?? 0],
+            ['Controle crítico', operationalMeta.criticos ?? 0],
+            ['Emergência / reparo', operationalMeta.candidatos_emergencia_reparo ?? 0],
+            ['Motivo não identificado', operationalMeta.motivo_nao_identificado ?? 0],
+          ].map(([label, value]) => <div key={label} className="rounded-2xl border border-cyan-200 dark:border-cyan-900 bg-white dark:bg-slate-800 p-3"><p className="text-[9px] font-black uppercase tracking-wider text-slate-400">{label}</p><p className="mt-1 text-xl font-black">{value}</p></div>)}
+          <div className="col-span-2 lg:col-span-5 rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2 text-[10px] font-bold text-slate-500 dark:text-slate-400">{operationalMeta.regra_prioridade}</div>
+        </section>
+      ) : null}
+
       {error ? <div className="rounded-2xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 px-4 py-3 text-sm font-bold text-red-700 dark:text-red-300">{error}</div> : null}
       {notice ? <div className="rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-900 px-4 py-3 text-sm font-bold text-emerald-700 dark:text-emerald-300">{notice}</div> : null}
 
@@ -1180,6 +1344,8 @@ export default function Equipamentos() {
                   <span className="font-black text-slate-900 dark:text-white">{item.pn}</span>
                   <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">SN {item.sn}</span>
                   <span className={`text-[10px] font-black px-2.5 py-1 rounded-lg ${confidenceTone(item.confianca_localizacao)}`}>{item.confianca_localizacao || 'DESCONHECIDA'}</span>
+                  {advancedOpen && item.prioridade_operacional ? <span className={`text-[10px] font-black px-2.5 py-1 rounded-lg ${priorityTone(item.prioridade_operacional.nivel)}`}>PRIORIDADE {item.prioridade_operacional.nivel}</span> : null}
+                  {advancedOpen && item.prioridade_operacional?.candidato_emergencia_reparo ? <span className="text-[10px] font-black px-2.5 py-1 rounded-lg bg-red-600 text-white">CANDIDATO A REPARO EMERGENCIAL</span> : null}
                 </div>
                 <p className="text-sm font-bold text-slate-600 dark:text-slate-300 mt-1 truncate">{item.nomenclatura || 'Nomenclatura não informada'}</p>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
@@ -1187,6 +1353,14 @@ export default function Equipamentos() {
                   <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Condição / status</span><p className="font-black mt-0.5">{conditionLabel(item.condicao_atual)} • {item.status_atual || '—'}</p></div>
                   <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Aeronave / evidência</span><p className="font-black mt-0.5">{item.anv_atual || '—'}{item.ultima_evidencia_documento ? ` • ${item.ultima_evidencia_documento}` : ''}</p></div>
                 </div>
+                {advancedOpen ? (
+                  <div className="mt-2 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 text-xs">
+                    <div className="rounded-xl bg-cyan-50 dark:bg-cyan-950/20 px-3 py-2"><span className="font-black text-cyan-700 dark:text-cyan-300 uppercase text-[9px]">Motivo apurado</span><p className="font-black mt-0.5">{item.motivo_atual || 'Motivo não identificado'}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{item.motivo_documento || item.motivo_evento_tipo || 'Sem documento causal identificado'}</p></div>
+                    <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Tempo / reparo</span><p className="font-black mt-0.5">{item.dias_local_atual === null || item.dias_local_atual === undefined ? 'Tempo não determinado' : `${item.dias_local_atual} dia(s) no local`}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{repairStateLabel(item.prioridade_operacional?.situacao_reparo)}</p></div>
+                    <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">PPU / criticidade</span><p className="font-black mt-0.5">PPU efetivo PN: {item.ppu_disponibilidade_conhecida === false ? 'indeterminado' : (item.ppu_quantidade_efetiva_pn ?? 0)}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{item.controle_critico ? 'Controle crítico: SIM' : 'Criticidade explícita: não confirmada'}</p></div>
+                    <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Fontes cruzadas</span><p className="font-black mt-0.5 line-clamp-2">{(item.fontes_dossie || []).join(' • ') || 'Somente cadastro atual'}</p>{item.conflitos_pendentes > 0 ? <p className="mt-1 text-[10px] font-black text-red-600">{item.conflitos_pendentes} conflito(s) pendente(s)</p> : null}</div>
+                  </div>
+                ) : null}
               </div>
               <div className="flex flex-wrap gap-2 xl:justify-end">
                 {item.garantia_vencimento ? <span className={`px-3 py-2 rounded-xl text-[10px] font-black ${warrantyTone(item)}`}>Garantia {formatDate(item.garantia_vencimento)}</span> : null}
@@ -1660,6 +1834,23 @@ export default function Equipamentos() {
             </div>
           </div>
 
+          {selected.prioridade_operacional ? (
+            <div className="mt-5 rounded-2xl border border-cyan-200 dark:border-cyan-900 bg-cyan-50/40 dark:bg-cyan-950/20 p-4">
+              <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                <div><div className="font-black uppercase tracking-tight">Dossiê operacional consolidado</div><p className="mt-1 text-xs font-bold text-cyan-800 dark:text-cyan-300">Motivo, criticidade e prioridade são derivados somente das evidências já registradas; conflito deixa a decisão indeterminada.</p></div>
+                <div className="flex flex-wrap gap-2"><span className={`px-3 py-1.5 rounded-xl text-xs font-black ${priorityTone(selected.prioridade_operacional.nivel)}`}>PRIORIDADE {selected.prioridade_operacional.nivel}</span>{selected.prioridade_operacional.candidato_emergencia_reparo ? <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-red-600 text-white">CANDIDATO A REPARO EMERGENCIAL</span> : null}</div>
+              </div>
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
+                <div><span className={labelClass}>Motivo atual</span><p className="font-black">{selected.motivo_atual}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{selected.motivo_documento || selected.motivo_evento_tipo || 'Sem documento causal identificado'}</p></div>
+                <div><span className={labelClass}>Permanência</span><p className="font-black">{selected.dias_local_atual === null || selected.dias_local_atual === undefined ? 'Não determinada' : `${selected.dias_local_atual} dia(s)`}</p><p className="mt-1 text-[10px] font-bold text-slate-400">Desde {formatDate(selected.local_atual_desde, true)}</p></div>
+                <div><span className={labelClass}>PPU / criticidade</span><p className="font-black">PPU efetivo PN: {selected.ppu_disponibilidade_conhecida === false ? 'indeterminado' : (selected.ppu_quantidade_efetiva_pn ?? 0)}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{selected.controle_critico ? 'Há evidência no Controle de Equipamentos Críticos' : 'Criticidade explícita não confirmada'}</p></div>
+                <div><span className={labelClass}>Situação do reparo</span><p className="font-black">{repairStateLabel(selected.prioridade_operacional.situacao_reparo)}</p><p className="mt-1 text-[10px] font-bold text-slate-400">WO: {selected.wo_documento || selected.wo_estado || 'sem evidência atual'}</p></div>
+              </div>
+              {(selected.prioridade_operacional.razoes || []).length ? <div className="mt-3 rounded-xl bg-white dark:bg-slate-900 border border-cyan-100 dark:border-cyan-900 p-3 text-xs font-bold text-slate-600 dark:text-slate-300">{selected.prioridade_operacional.razoes.join(' • ')}</div> : null}
+              {(selected.fontes_dossie || []).length ? <div className="mt-3 flex flex-wrap gap-1.5">{selected.fontes_dossie.map((source) => <span key={source} className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] font-black uppercase">{source}</span>)}</div> : null}
+            </div>
+          ) : null}
+
           {selected.dossie_resumo ? (
             <div className="mt-5 rounded-2xl border border-sky-200 dark:border-sky-900 bg-sky-50/50 dark:bg-sky-950/20 p-4">
               <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
@@ -1712,7 +1903,7 @@ export default function Equipamentos() {
         <EquipmentOperationsModal
           token={token}
           onClose={() => setEquipmentOperationsOpen(false)}
-          onChanged={() => load(query)}
+          onChanged={() => refreshEquipmentList()}
         />
       ) : null}
 

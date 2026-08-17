@@ -212,7 +212,7 @@ export default function ConsultaItens() {
                         type="text"
                         value={termo}
                         onChange={(e) => setTermo(e.target.value)}
-                        placeholder="Pesquise por PN, Nome da peça ou SN..."
+                        placeholder="Pesquise por PN, PI/NSN, SN ou Nome..."
                         className="w-full py-2.5 sm:py-4 px-3 sm:px-4 text-sm sm:text-base bg-transparent border-none outline-none text-slate-700 uppercase"
                     />
 
@@ -224,6 +224,9 @@ export default function ConsultaItens() {
                         {carregando ? 'BUSCANDO...' : 'RADAR'}
                     </button>
                 </div>
+                <p className="mt-2 px-2 text-[10px] sm:text-[11px] font-bold text-slate-400 uppercase tracking-wide">
+                    PN, PI/NSN e SN: busca pelo início do código • Nome: busca por trecho do texto
+                </p>
             </form>
 
             <div className="w-full max-w-3xl px-3 sm:px-4 mb-4 flex justify-center sm:justify-end">

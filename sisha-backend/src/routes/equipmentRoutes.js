@@ -26,6 +26,8 @@ const uploadMaster = multer({
 // Dono, Admin e Operador: consulta, dossiê, reconciliação e exportação.
 router.get('/', equipmentController.listar);
 router.get('/export', equipmentController.exportar);
+router.get('/operational-search/export', equipmentController.exportarPesquisaOperacional);
+router.get('/operational-search', equipmentController.pesquisaOperacional);
 router.get('/reconciliation', equipmentController.reconciliacaoPpu);
 router.get('/inventory/imports', equipmentController.listarImportacoesInventario);
 

@@ -21,6 +21,7 @@ const stcEquipmentService = require('../services/stcEquipmentService');
 const osPimEquipmentService = require('../services/osPimEquipmentService');
 const equipmentOperationalService = require('../services/equipmentOperationalService');
 const equipmentReliabilityService = require('../services/equipmentReliabilityService');
+const { searchOperationalEquipments, enrichOperationalEquipment } = require('../services/equipmentOperationalSearchService');
 
 function replyError(res, error, fallback = 'Falha ao processar equipamentos.') {
   const message = error?.message || fallback;
@@ -38,10 +39,74 @@ exports.listar = async (req, res) => {
   }
 };
 
+exports.pesquisaOperacional = async (req, res) => {
+  try {
+    const result = await searchOperationalEquipments({
+      ...req.query,
+      limit: req.query.limit || 5000,
+      result_limit: req.query.result_limit || 2000,
+    });
+    return res.status(200).json({ status: 'success', data: result.data, meta: result.meta });
+  } catch (error) {
+    console.error('[SISHA][equipamentos] pesquisa operacional:', error);
+    return replyError(res, error, 'Falha ao montar a pesquisa operacional de equipamentos.');
+  }
+};
+
+exports.exportarPesquisaOperacional = async (req, res) => {
+  try {
+    const result = await searchOperationalEquipments({
+      ...req.query,
+      limit: req.query.limit || 5000,
+      result_limit: 5000,
+    });
+    const rows = result.data.map((item) => ({
+      PN: item.pn || '',
+      SN: item.sn || '',
+      Nomenclatura: item.nomenclatura || '',
+      Categoria_Local: item.categoria_local_atual || '',
+      Local_Atual: item.local_atual || '',
+      Aeronave: item.anv_atual || '',
+      Condicao: item.condicao_atual || '',
+      Status: item.status_atual || '',
+      Motivo_Apurado: item.motivo_atual || '',
+      Motivo_Status: item.motivo_status || '',
+      Desde: item.local_atual_desde || '',
+      Dias_Local_Atual: item.dias_local_atual ?? '',
+      Controle_Critico: item.controle_critico ? 'SIM' : 'NAO',
+      PPU_Efetivo_PN: item.ppu_disponibilidade_conhecida === false ? 'INDETERMINADO' : (item.ppu_quantidade_efetiva_pn ?? 0),
+      PPU_Disponibilidade_Conhecida: item.ppu_disponibilidade_conhecida === false ? 'NAO' : 'SIM',
+      SN_Presente_PPU: item.ppu_sn_presente ? 'SIM' : 'NAO',
+      Situacao_Reparo: item.prioridade_operacional?.situacao_reparo || '',
+      Prioridade: item.prioridade_operacional?.nivel || '',
+      Candidato_Emergencia_Reparo: item.prioridade_operacional?.candidato_emergencia_reparo ? 'SIM' : 'NAO',
+      Razoes_Prioridade: (item.prioridade_operacional?.razoes || []).join(' | '),
+      WO_Estado: item.wo_estado || '',
+      WO_Documento: item.wo_documento || '',
+      Conflitos_Pendentes: item.conflitos_pendentes || 0,
+      Fontes_Dossie: (item.fontes_dossie || []).join(' | '),
+      Documento_Motivo: item.motivo_documento || '',
+      Tipo_Evento_Motivo: item.motivo_evento_tipo || '',
+    }));
+    const summaryRows = Object.entries(result.meta || {}).map(([Indicador, Valor]) => ({ Indicador, Valor: Array.isArray(Valor) ? Valor.join(' | ') : Valor }));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Pesquisa Operacional');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(summaryRows), 'Resumo');
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="SISHA_Pesquisa_Operacional_Equipamentos.xlsx"');
+    return res.status(200).send(buffer);
+  } catch (error) {
+    console.error('[SISHA][equipamentos] exportar pesquisa operacional:', error);
+    return replyError(res, error, 'Falha ao exportar a pesquisa operacional de equipamentos.');
+  }
+};
+
 exports.obter = async (req, res) => {
   try {
-    const data = await getEquipment(req.params.id);
-    if (!data) return res.status(404).json({ status: 'error', message: 'Equipamento não encontrado.' });
+    const base = await getEquipment(req.params.id);
+    if (!base) return res.status(404).json({ status: 'error', message: 'Equipamento não encontrado.' });
+    const data = await enrichOperationalEquipment(base);
     return res.status(200).json({ status: 'success', data });
   } catch (error) {
     console.error('[SISHA][equipamentos] obter:', error);
