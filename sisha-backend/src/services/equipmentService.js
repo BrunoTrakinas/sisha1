@@ -189,10 +189,11 @@ async function createEquipment(input = {}, user = {}) {
     confianca: 'CONFIRMADA',
     motivo: input.motivo_inicial || 'Cadastro inicial do equipamento no SISHA.',
     observacao: input.observacao_inicial,
+    payload: { project_current_state: true },
   } : null;
 
   if (h4bAcidEnabled()) {
-    const { data, error } = await getH4bAcidDb().rpc('sisha_create_equipment_atomic', {
+    const { data, error } = await getH4bAcidDb().rpc('sisha_create_equipment_and_project_atomic', {
       p_equipment: {
         ...payload,
         status_atual: 'DESCONHECIDO',
@@ -222,7 +223,7 @@ async function createEquipment(input = {}, user = {}) {
     .single();
   if (error) throw error;
 
-  if (initialEvent) await addEvent(data.id, initialEvent, user);
+  if (initialEvent) await addProjectedEvent(data.id, initialEvent, user);
   return getEquipment(data.id);
 }
 
@@ -296,11 +297,12 @@ async function updateEquipment(id, input = {}, user = {}) {
       estado_anterior: previousState,
       estado_confirmado: requestedState,
       alteracoes_cadastrais: cadastroChanges,
+      project_current_state: stateChanged,
     },
   } : null;
 
   if (h4bAcidEnabled()) {
-    const { error } = await getH4bAcidDb().rpc('sisha_update_equipment_atomic', {
+    const { error } = await getH4bAcidDb().rpc('sisha_update_equipment_and_project_atomic', {
       p_equipment_id: Number(id),
       p_equipment: payload,
       p_event: correctionEvent,
@@ -316,8 +318,80 @@ async function updateEquipment(id, input = {}, user = {}) {
     .eq('id', id);
   if (error) throw error;
 
-  if (correctionEvent) await addEvent(id, correctionEvent, user);
+  if (correctionEvent) {
+    if (stateChanged) await addProjectedEvent(id, correctionEvent, user);
+    else await addEvent(id, correctionEvent, user);
+  }
   return getEquipment(id);
+}
+
+
+function eventDefinesCurrentLocation(event = {}) {
+  if (!event || event.invalidado) return false;
+  if (event?.payload?.historical_only === true) return false;
+  if (normalizeCode(event.tipo_evento) === 'CONFLITO_LOCALIZACAO') return false;
+  const category = normalizeCode(event.categoria_destino);
+  const explicitProjection = event?.payload?.project_current_state === true;
+  return Boolean(explicitProjection || cleanText(event.local_destino) || cleanText(event.anv_destino || event.anv) || (category && category !== 'DESCONHECIDO'));
+}
+
+async function recomputeEquipmentProjection(id, user = {}) {
+  const current = await getEquipment(id);
+  if (!current) throw new Error('Equipamento não encontrado.');
+  const latest = (current.eventos || []).find(eventDefinesCurrentLocation) || null;
+  const next = latest ? {
+    categoria_local_atual: normalizeCode(latest.categoria_destino) || 'DESCONHECIDO',
+    local_atual: cleanText(latest.local_destino),
+    anv_atual: cleanText(latest.anv_destino || latest.anv),
+    status_atual: cleanText(latest.status_resultante) || current.status_atual || 'DESCONHECIDO',
+    condicao_atual: cleanText(latest.condicao_resultante) || current.condicao_atual || 'DESCONHECIDA',
+    confianca_localizacao: normalizeCode(latest.confianca) || 'DESCONHECIDA',
+  } : {
+    categoria_local_atual: 'DESCONHECIDO',
+    local_atual: null,
+    anv_atual: null,
+    status_atual: 'DESCONHECIDO',
+    condicao_atual: 'DESCONHECIDA',
+    confianca_localizacao: 'DESCONHECIDA',
+  };
+
+  const { error } = await supabase
+    .from('equipamentos_serializados')
+    .update({ ...next, atualizado_por: user.email || null, updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+  return getEquipment(id);
+}
+
+async function addProjectedEvent(id, input = {}, user = {}) {
+  const projectedInput = {
+    ...input,
+    payload: {
+      ...(input?.payload && typeof input.payload === 'object' ? input.payload : {}),
+      project_current_state: true,
+    },
+  };
+  if (h4bAcidEnabled()) {
+    const { data, error } = await getH4bAcidDb().rpc('sisha_record_equipment_event_and_project_atomic', {
+      p_equipment_id: Number(id),
+      p_event: projectedInput,
+      p_user_email: user.email || null,
+    });
+    if (error) throw error;
+    const eventId = data?.event_id;
+    if (!eventId) throw new Error('RPC não retornou o evento de movimentação.');
+    const { data: event, error: readError } = await supabase
+      .from('equipamento_eventos')
+      .select('*')
+      .eq('id', eventId)
+      .single();
+    if (readError) throw readError;
+    return event;
+  }
+
+  const event = await addEvent(id, projectedInput, user);
+  await recomputeEquipmentProjection(id, user);
+  return event;
 }
 
 async function addEvent(id, input = {}, user = {}) {
@@ -372,6 +446,17 @@ async function invalidateEvent(equipmentId, eventId, reason, user = {}) {
   const motivo = cleanText(reason);
   if (!motivo) throw new Error('Informe o motivo da invalidação do evento.');
 
+  if (h4bAcidEnabled()) {
+    const { error } = await getH4bAcidDb().rpc('sisha_invalidate_equipment_event_and_project_atomic', {
+      p_equipment_id: Number(equipmentId),
+      p_event_id: Number(eventId),
+      p_reason: motivo,
+      p_user_email: user.email || null,
+    });
+    if (error) throw error;
+    return getEquipment(equipmentId);
+  }
+
   const { data: event, error: readError } = await supabase
     .from('equipamento_eventos')
     .select('id,equipamento_id,invalidado')
@@ -393,7 +478,7 @@ async function invalidateEvent(equipmentId, eventId, reason, user = {}) {
     .eq('id', eventId)
     .eq('equipamento_id', equipmentId);
   if (error) throw error;
-  return getEquipment(equipmentId);
+  return recomputeEquipmentProjection(equipmentId, user);
 }
 
 async function fetchEventsForEquipmentIds(ids = []) {
@@ -574,7 +659,7 @@ async function registerLocationEvidence(equipmentId, candidate = {}, source = {}
     return { action: 'CONFLICT', equipment, conflict };
   }
 
-  const event = await addEvent(equipmentId, {
+  const event = await addProjectedEvent(equipmentId, {
     tipo_evento: normalizeCode(candidate.tipo_evento) || 'EVIDENCIA_LOCALIZACAO',
     data_evento: candidate.data_evento || source.data_evento || new Date().toISOString(),
     local_destino: candidateState.local_atual,
@@ -683,11 +768,12 @@ async function resolveLocationConflict(equipmentId, eventId, input = {}, user = 
       decisao: decision,
       evidencia_original: conflict.payload?.fonte || null,
       estado_descartado: decision === 'CANDIDATE' ? conflict.payload?.estado_atual : candidate,
+      project_current_state: true,
     },
   };
 
   if (h4bAcidEnabled()) {
-    const { data, error: rpcError } = await getH4bAcidDb().rpc('sisha_resolve_location_conflict_atomic', {
+    const { data, error: rpcError } = await getH4bAcidDb().rpc('sisha_resolve_location_conflict_and_project_atomic', {
       p_equipment_id: Number(equipmentId),
       p_conflict_event_id: Number(eventId),
       p_resolution_event: resolutionInput,
@@ -703,7 +789,7 @@ async function resolveLocationConflict(equipmentId, eventId, input = {}, user = 
     };
   }
 
-  const resolutionEvent = await addEvent(equipmentId, resolutionInput, user);
+  const resolutionEvent = await addProjectedEvent(equipmentId, resolutionInput, user);
   const nextPayload = {
     ...(conflict.payload || {}),
     conflito_status: 'RESOLVIDO',
@@ -1007,6 +1093,9 @@ module.exports = {
   updateEquipment,
   removeEquipment,
   addEvent,
+  addProjectedEvent,
+  recomputeEquipmentProjection,
+  eventDefinesCurrentLocation,
   invalidateEvent,
   fetchEventsForEquipmentIds,
   upsertPendingLocationConflict,

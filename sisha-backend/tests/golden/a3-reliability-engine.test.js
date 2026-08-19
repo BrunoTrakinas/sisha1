@@ -172,7 +172,7 @@ test('A3: backend usa A2 + A1.2 e mantém confirmação em rota Admin/Dono', () 
 test('A3: frontend adiciona somente modal de confiabilidade no Administrar e reserva A4', () => {
   const page = fs.readFileSync(path.resolve(ROOT, '../sisha-frontend/src/pages/Equipamentos.jsx'), 'utf8');
   const modal = fs.readFileSync(path.resolve(ROOT, '../sisha-frontend/src/components/ReliabilityAnalysisModal.jsx'), 'utf8');
-  assert.match(page, /Confiabilidade A3/);
+  assert.match(page, /Indicadores de confiabilidade/);
   assert.match(page, /ReliabilityAnalysisModal/);
   assert.match(modal, /A3 — Motor de Confiabilidade/);
   assert.match(modal, /MTBF/);

@@ -20,7 +20,8 @@ test('InventarioPPUGeralLoc alimenta PPU e sincroniza PN+SN no Livro de Equipame
 });
 
 test('Importador genérico PN+SN permanece disponível na página Equipamentos', () => {
-  assert.match(equipamentos, /Inventário de equipamentos — PN \+ SN/);
+  assert.match(equipamentos, /Importar relação de equipamentos/);
+  assert.match(equipamentos, /setMasterModal\(true\)/);
 });
 
 test('Central usa nomes originais das fontes operacionais recebidas', () => {

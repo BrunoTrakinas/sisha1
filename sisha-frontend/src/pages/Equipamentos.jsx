@@ -151,6 +151,140 @@ function conditionLabel(value) {
   return conditionOptions.find(([key]) => key === value)?.[1] || value || 'Não informada';
 }
 
+
+const eventUiLabels = {
+  CADASTRO_INICIAL: 'Cadastro inicial',
+  INVENTARIO_EQUIPAMENTOS: 'Inventário de localização',
+  CONTROLE_CRITICO_LOCALIZACAO: 'Controle de Equipamentos Críticos',
+  CORRECAO_CADASTRAL: 'Correção de cadastro',
+  ATUALIZACAO_CADASTRAL: 'Atualização de cadastro',
+  AJUSTE_MANUAL: 'Conferência / movimentação manual',
+  ENTRADA_PPU: 'Entrada no PPU',
+  SAIDA_PPU: 'Saída do PPU',
+  INSTALACAO_ANV: 'Instalação em aeronave',
+  REMOCAO_ANV: 'Remoção de aeronave',
+  TRANSFERENCIA_OS_PIM: 'Transferência por OS / PIM',
+  MOVIMENTACAO_OS_PIM: 'Movimentação por OS / PIM',
+  ENVIO_RECEX: 'Envio ao RECEX',
+  ENVIO_GANM: 'Envio ao GANM',
+  ENVIO_WO: 'Envio para reparo por WO',
+  RETORNO_WO: 'Retorno de reparo por WO',
+  ENVIO_STC: 'Envio por STC',
+  RETORNO_STC: 'Retorno por STC',
+  ENVIO_GARANTIA: 'Envio em garantia',
+  RETORNO_GARANTIA: 'Retorno de garantia',
+  RECEBIMENTO: 'Recebimento de material',
+  RECONCILIACAO_LOCALIZACAO: 'Confirmação de localização',
+  CONFLITO_LOCALIZACAO: 'Divergência de localização',
+  EVIDENCIA_LOCALIZACAO: 'Evidência de localização',
+  EVIDENCIA_HISTORICA_LOCALIZACAO: 'Histórico de localização',
+  DESFAZIMENTO: 'Destinação para desfazimento',
+};
+
+const sourceUiLabels = {
+  INVENTARIO_EQUIPAMENTOS: 'Inventário de localização',
+  INVENTARIO_PPU: 'Inventário do PPU',
+  PPU: 'Inventário do PPU',
+  PPU_INVENTARIO: 'Inventário do PPU',
+  CONTROLE_CRITICOS: 'Controle de Equipamentos Críticos',
+  CONTROLE_CRITICO: 'Controle de Equipamentos Críticos',
+  MASTER_OS: 'Master OS — Divisão de Planejamento',
+  OS_PIM: 'OS / PIM',
+  OS: 'Ordem de Serviço (OS)',
+  OSR: 'Ordem de Serviço de Reparo (OSR)',
+  PIM: 'PIM',
+  WO: 'Ordem de reparo (WO)',
+  STC: 'Movimentação por STC',
+  RECIBO: 'Recibo de Material',
+  ORDER_BOOK: 'Order Book Leonardo',
+  RECONCILIACAO: 'Conferência de localização',
+  MANUAL: 'Registro manual',
+  CADASTRO_MANUAL: 'Relação de Equipamentos',
+  CADASTRO_MESTRE: 'Relação de Equipamentos',
+  BACKEND_AUDITORIA_PAIOL: 'Auditoria de localização do PPU',
+  SAIDA_PPU: 'Registro de saída do PPU',
+  CONTROLE_INSPECAO: 'Controle de Inspeção',
+  PRICE_LIST: 'Price List Leonardo',
+  RFQ: 'Cotações / RFQ',
+  CORRECAO_CADASTRAL: 'Correção de cadastro',
+};
+
+const statusUiLabels = {
+  CADASTRADO: 'Cadastrado',
+  INSTALADO: 'Instalado',
+  REMOVIDO: 'Removido',
+  MOVIMENTADO: 'Movimentado',
+  REMOCAO_DESTINO_A_CONFIRMAR: 'Removido — destino a confirmar',
+  EM_REPARO: 'Em reparo',
+  AGUARDANDO_REPARO: 'Aguardando reparo',
+  PRONTO_USO: 'Pronto para uso',
+  DESCONHECIDO: 'Não determinado',
+};
+
+const statusOptions = Object.entries(statusUiLabels);
+
+function humanizeCode(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 'Não informado';
+  return raw.replace(/_/g, ' ').toLocaleLowerCase('pt-BR').replace(/(^|\s)([a-záàâãéêíóôõúç])/g, (_, prefix, letter) => `${prefix}${letter.toLocaleUpperCase('pt-BR')}`);
+}
+
+function eventTypeLabel(value) {
+  const key = normalizeUpper(value);
+  return eventUiLabels[key] || eventTypeOptions.find(([code]) => code === key)?.[1] || humanizeCode(value);
+}
+
+function documentTypeLabel(value) {
+  const key = normalizeUpper(value);
+  return sourceUiLabels[key] || (key ? humanizeCode(key) : 'Documento');
+}
+
+function statusLabel(value) {
+  const key = normalizeUpper(value);
+  return statusUiLabels[key] || (key ? humanizeCode(key) : 'Não informado');
+}
+
+function confidenceLabel(value) {
+  return confidenceOptions.find(([key]) => key === normalizeUpper(value))?.[1] || humanizeCode(value || 'DESCONHECIDA');
+}
+
+function humanizeDocumentReference(value, documentType = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const normalized = normalizeUpper(raw).replace(/[^A-Z0-9]+/g, ' ');
+  const compact = normalized.replace(/ /g, '');
+  if (/INVENTARIO.*PPU|PPU.*INVENTARIO|INVENTARIOGERALPPU/.test(normalized) || /INVENTARIO.*PPU|PPU.*INVENTARIO|INVENTARIOGERALPPU/.test(compact)) return 'Inventário do PPU';
+  if (/CONTROLE.*CRITIC/.test(normalized)) return 'Controle de Equipamentos Críticos';
+  if (/MASTER.*OS/.test(normalized)) return 'Master OS — Divisão de Planejamento';
+  if (/ORDER.*BOOK/.test(normalized)) return 'Order Book Leonardo';
+  if (/RECIBO/.test(normalized)) return 'Recibo de Material';
+  if (/CADASTRO.*MESTRE/.test(normalized)) return 'Relação de Equipamentos';
+  if (/AUDITORIA.*PAIOL/.test(normalized)) return 'Auditoria de localização do PPU';
+  if (/SAIDA.*PPU/.test(normalized)) return 'Registro de saída do PPU';
+  if (/CONTROLE.*INSPECAO/.test(normalized)) return 'Controle de Inspeção';
+  if (/PRICE.*LIST/.test(normalized)) return 'Price List Leonardo';
+  if (/RFQ|COTAC/.test(normalized)) return 'Cotações / RFQ';
+  const typeLabel = documentType ? documentTypeLabel(documentType) : '';
+  if (/\.(xlsx?|xls|csv|ods|zip)$/i.test(raw) && typeLabel && typeLabel !== 'Documento') return typeLabel;
+  return raw;
+}
+
+function sourceLabel(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 'Fonte não informada';
+  const key = normalizeUpper(raw);
+  if (sourceUiLabels[key]) return sourceUiLabels[key];
+  if (!raw.includes('_') && !/\.(xlsx?|xls|csv|ods|zip|pdf|docx?)$/i.test(raw)) return raw;
+  return humanizeDocumentReference(raw) || humanizeCode(raw);
+}
+
+function documentEvidenceLabel(documentType, document) {
+  const friendlyDocument = humanizeDocumentReference(document, documentType);
+  const friendlyType = documentType ? documentTypeLabel(documentType) : '';
+  if (friendlyDocument && friendlyType && friendlyDocument !== friendlyType) return `${friendlyType} • ${friendlyDocument}`;
+  return friendlyDocument || friendlyType || 'Documento não informado';
+}
+
 function emptyEquipmentForm() {
   return {
     pn: '',
@@ -300,7 +434,7 @@ function stagingToOsPimForm(row = {}) {
     local_origem: row.local_origem || payload.local_origem || '',
     local_destino: row.local_destino || payload.local_destino || '',
     motivo_movimento: payload.motivo || payload.descricao || 'Movimentação extraída pelo Chat Lince e revisada pelo Admin.',
-    observacao: payload.observacao || `Staging Chat Lince ${row.id || ''}`,
+    observacao: payload.observacao || `Sugestão do Chat Lince ${row.id || ''}`,
     staging_id: row.id || '',
     documento_chat_lince_id: row.documento_id || '',
   };
@@ -689,7 +823,7 @@ export default function Equipamentos() {
 
       if (stagingResponse) {
         const stagingJson = await stagingResponse.json();
-        if (!stagingResponse.ok || stagingJson.status !== 'success') throw new Error(stagingJson.message || 'Falha ao consultar staging OS/PIM.');
+        if (!stagingResponse.ok || stagingJson.status !== 'success') throw new Error(stagingJson.message || 'Falha ao consultar pendências de OS / PIM.');
         setOsPimStaging(stagingJson.data || []);
       } else {
         setOsPimStaging([]);
@@ -867,7 +1001,7 @@ export default function Equipamentos() {
       }, token);
       const json = await response.json();
       if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao salvar equipamento.');
-      setNotice(isEdit ? 'Cadastro técnico/garantia atualizado.' : 'Equipamento cadastrado com sucesso.');
+      setNotice(isEdit ? 'Equipamento atualizado. Alterações de localização também ficam registradas no histórico.' : 'Equipamento cadastrado com sucesso.');
       setEquipmentModal(null);
       await refreshEquipmentList();
       if (dossierOpen && selected?.id) await refreshSelected();
@@ -1023,7 +1157,7 @@ export default function Equipamentos() {
       }, token);
       const json = await response.json();
       if (!response.ok || json.status !== 'success') throw new Error(json.message || 'Falha ao registrar movimentação.');
-      setNotice('Movimentação registrada. A localização atual foi recalculada pelo histórico.');
+      setNotice('Movimentação registrada. A localização atual do equipamento foi atualizada e o histórico foi preservado.');
       setSelected(json.data);
       setEventModal(false);
       await refreshEquipmentList();
@@ -1186,9 +1320,9 @@ export default function Equipamentos() {
       <section className="bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-sm p-5">
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div>
-            <h3 className="text-lg font-black uppercase tracking-tight text-slate-900 dark:text-white">Rastreabilidade de Equipamentos</h3>
+            <h3 className="text-lg font-black uppercase tracking-tight text-slate-900 dark:text-white">Equipamentos — Consulta e Rastreabilidade</h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Identidade PN + SN, localização atual, garantia e histórico documental. O evento válido mais recente define a posição atual.
+              Consulte onde cada equipamento está, sua condição, origem da informação e histórico de movimentações. A evidência válida mais recente define a posição atual.
             </p>
           </div>
           <div className="flex flex-wrap items-start gap-2">
@@ -1197,7 +1331,7 @@ export default function Equipamentos() {
             </button>
 
             <button onClick={advancedOpen ? closeOperationalSearch : openOperationalSearch} className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-sm ${advancedOpen ? 'bg-cyan-700 text-white hover:bg-cyan-800' : 'bg-cyan-50 dark:bg-cyan-950/30 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-900 hover:bg-cyan-100 dark:hover:bg-cyan-950/50'}`}>
-              <Settings2 size={17} /> {advancedOpen ? 'Pesquisa operacional ativa' : 'Pesquisa operacional'}
+              <Settings2 size={17} /> {advancedOpen ? 'Pesquisa avançada ativa' : 'Pesquisa avançada'}
             </button>
 
             {canEdit ? (
@@ -1206,33 +1340,33 @@ export default function Equipamentos() {
                   <Settings2 size={17} /> Administrar
                 </summary>
                 <div className="absolute right-0 z-30 mt-2 w-72 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 shadow-2xl">
-                  <p className="px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-400">Ações de Admin / Dono</p>
+                  <p className="px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-400">Ações de gestão</p>
                   <button onClick={openCreate} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
                     <Plus size={16} /> Novo equipamento
                   </button>
                   <button onClick={() => { setMasterModal(true); setMasterDraft(null); setMasterFile(null); setMasterPage(0); }} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <Boxes size={16} /> Cadastro mestre
+                    <Boxes size={16} /> Importar relação de equipamentos
                   </button>
                   <button onClick={() => { setInventoryModal(true); setInventoryDraft(null); setInventoryFile(null); setInventoryPage(0); }} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <FileText size={16} /> Importar inventário
+                    <FileText size={16} /> Importar inventário de localização
                   </button>
                   <button onClick={openStcManager} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <ArrowRightLeft size={16} /> STC
+                    <ArrowRightLeft size={16} /> Movimentações por STC
                   </button>
                   <button onClick={openOsPimManager} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <History size={16} /> OS / PIM
+                    <History size={16} /> Movimentações por OS / PIM
                   </button>
                   <button onClick={() => setEquipmentOperationsOpen(true)} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <ArrowRightLeft size={16} /> Instalar / Remover PN+SN
+                    <ArrowRightLeft size={16} /> Instalar ou remover de aeronave
                   </button>
                   <button onClick={openReconciliation} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <ArrowRightLeft size={16} /> Conferir PPU × SN
+                    <ArrowRightLeft size={16} /> Conferir localização no PPU
                   </button>
                   <button onClick={() => setMaintenanceProgramOpen(true)} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <ShieldCheck size={16} /> Programa TBO / horas / ciclos
+                    <ShieldCheck size={16} /> Controle de TBO / horas / ciclos
                   </button>
                   <button onClick={() => setReliabilityOpen(true)} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
-                    <ShieldCheck size={16} /> Confiabilidade A3
+                    <ShieldCheck size={16} /> Indicadores de confiabilidade
                   </button>
                   {locationConflicts.length ? (
                     <button onClick={() => setConflictsOpen(true)} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-red-50 dark:hover:bg-red-900/20 text-red-700 dark:text-red-300 font-black text-sm flex items-center gap-2">
@@ -1267,8 +1401,8 @@ export default function Equipamentos() {
           <div className="mt-4 rounded-2xl border border-cyan-200 dark:border-cyan-900 bg-cyan-50/40 dark:bg-cyan-950/10 p-4">
             <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
               <div>
-                <h4 className="font-black uppercase tracking-tight text-cyan-900 dark:text-cyan-200">Pesquisa operacional de equipamentos</h4>
-                <p className="mt-1 text-xs font-bold text-cyan-800/80 dark:text-cyan-300/80">Cruza Livro PN+SN, Inventário/PPU efetivo, Controle de Equipamentos Críticos, Master OS, PIM/OS, WO, Recibos e demais eventos já registrados. Criticidade e motivo não são inventados quando a evidência não sustenta.</p>
+                <h4 className="font-black uppercase tracking-tight text-cyan-900 dark:text-cyan-200">Pesquisa avançada de equipamentos</h4>
+                <p className="mt-1 text-xs font-bold text-cyan-800/80 dark:text-cyan-300/80">Cruza automaticamente Inventário do PPU, Controle de Equipamentos Críticos, Master OS, PIM/OS, WO, Recibos e o histórico do equipamento. Quando a documentação não permite concluir localização, motivo ou prioridade, o SISHA informa que a evidência é insuficiente.</p>
               </div>
               <button type="button" onClick={clearOperationalSearch} className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-cyan-200 dark:border-cyan-900 text-xs font-black">Limpar filtros</button>
             </div>
@@ -1281,12 +1415,12 @@ export default function Equipamentos() {
             </div>
 
             <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-              <label><span className={labelClass}>Categoria / localização</span><select className={inputClass} value={operationalFilters.location_category} onChange={(e) => setOperationalFilters((v) => ({ ...v, location_category: e.target.value }))}><option value="">Todas</option>{categoryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label><span className={labelClass}>Tipo de local</span><select className={inputClass} value={operationalFilters.location_category} onChange={(e) => setOperationalFilters((v) => ({ ...v, location_category: e.target.value }))}><option value="">Todas</option>{categoryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label><span className={labelClass}>Local começa com</span><input className={inputClass} value={operationalFilters.location} onChange={(e) => setOperationalFilters((v) => ({ ...v, location: e.target.value }))} placeholder="Ex.: RECEX, CX-001..." /></label>
               <label><span className={labelClass}>Condição</span><select className={inputClass} value={operationalFilters.condition} onChange={(e) => setOperationalFilters((v) => ({ ...v, condition: e.target.value }))}><option value="">Todas</option>{conditionOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-              <label><span className={labelClass}>Status começa com</span><input className={inputClass} value={operationalFilters.status} onChange={(e) => setOperationalFilters((v) => ({ ...v, status: e.target.value }))} placeholder="Ex.: WO_, CADASTRADO..." /></label>
+              <label><span className={labelClass}>Situação atual</span><select className={inputClass} value={operationalFilters.status} onChange={(e) => setOperationalFilters((v) => ({ ...v, status: e.target.value }))}><option value="">Todas</option>{statusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label className="sm:col-span-2"><span className={labelClass}>Motivo / causa contém</span><input className={inputClass} value={operationalFilters.reason} onChange={(e) => setOperationalFilters((v) => ({ ...v, reason: e.target.value }))} placeholder="Ex.: pane, garantia, remoção, transferência..." /></label>
-              <label><span className={labelClass}>Fonte obrigatória</span><select className={inputClass} value={operationalFilters.source} onChange={(e) => setOperationalFilters((v) => ({ ...v, source: e.target.value }))}><option value="">Qualquer fonte</option><option value="critico">Controle de Equipamentos Críticos</option><option value="master_os">Master OS</option><option value="os_pim">OS / PIM</option><option value="wo">WO</option><option value="recibo">Recibo</option><option value="ppu">PPU / Inventário</option><option value="stc">STC</option></select></label>
+              <label><span className={labelClass}>Fonte obrigatória</span><select className={inputClass} value={operationalFilters.source} onChange={(e) => setOperationalFilters((v) => ({ ...v, source: e.target.value }))}><option value="">Qualquer fonte</option><option value="critico">Controle de Equipamentos Críticos</option><option value="master_os">Master OS</option><option value="os_pim">OS / PIM</option><option value="wo">Ordem de reparo (WO)</option><option value="recibo">Recibo</option><option value="ppu">PPU / Inventário</option><option value="stc">Movimentação por STC</option></select></label>
               <label><span className={labelClass}>Situação do reparo</span><select className={inputClass} value={operationalFilters.repair_state} onChange={(e) => setOperationalFilters((v) => ({ ...v, repair_state: e.target.value }))}><option value="">Todas</option><option value="AGUARDANDO_ENVIO_AVALIACAO">Aguardando envio / avaliação</option><option value="EM_REPARO">Em reparo</option><option value="RETORNADO">Retornado</option><option value="SEM_INDICACAO">Sem indicação</option><option value="INDETERMINADA">Indeterminada</option></select></label>
               <label><span className={labelClass}>Prioridade operacional</span><select className={inputClass} value={operationalFilters.priority} onChange={(e) => setOperationalFilters((v) => ({ ...v, priority: e.target.value }))}><option value="">Todas</option><option value="CRITICA">Crítica</option><option value="ALTA">Alta</option><option value="MEDIA">Média</option><option value="NORMAL">Normal</option><option value="INDETERMINADA">Indeterminada</option></select></label>
               <label><span className={labelClass}>Controle crítico</span><select className={inputClass} value={operationalFilters.critical} onChange={(e) => setOperationalFilters((v) => ({ ...v, critical: e.target.value }))}><option value="">Todos</option><option value="true">Somente críticos</option><option value="false">Não críticos / sem evidência</option></select></label>
@@ -1343,22 +1477,22 @@ export default function Equipamentos() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-black text-slate-900 dark:text-white">{item.pn}</span>
                   <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">SN {item.sn}</span>
-                  <span className={`text-[10px] font-black px-2.5 py-1 rounded-lg ${confidenceTone(item.confianca_localizacao)}`}>{item.confianca_localizacao || 'DESCONHECIDA'}</span>
+                  <span className={`text-[10px] font-black px-2.5 py-1 rounded-lg ${confidenceTone(item.confianca_localizacao)}`}>{confidenceLabel(item.confianca_localizacao)}</span>
                   {advancedOpen && item.prioridade_operacional ? <span className={`text-[10px] font-black px-2.5 py-1 rounded-lg ${priorityTone(item.prioridade_operacional.nivel)}`}>PRIORIDADE {item.prioridade_operacional.nivel}</span> : null}
                   {advancedOpen && item.prioridade_operacional?.candidato_emergencia_reparo ? <span className="text-[10px] font-black px-2.5 py-1 rounded-lg bg-red-600 text-white">CANDIDATO A REPARO EMERGENCIAL</span> : null}
                 </div>
                 <p className="text-sm font-bold text-slate-600 dark:text-slate-300 mt-1 truncate">{item.nomenclatura || 'Nomenclatura não informada'}</p>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
                   <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Local atual</span><p className="font-black mt-0.5">{categoryLabel(item.categoria_local_atual)}{item.local_atual ? ` • ${item.local_atual}` : ''}</p></div>
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Condição / status</span><p className="font-black mt-0.5">{conditionLabel(item.condicao_atual)} • {item.status_atual || '—'}</p></div>
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Aeronave / evidência</span><p className="font-black mt-0.5">{item.anv_atual || '—'}{item.ultima_evidencia_documento ? ` • ${item.ultima_evidencia_documento}` : ''}</p></div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Condição / status</span><p className="font-black mt-0.5">{conditionLabel(item.condicao_atual)} • {statusLabel(item.status_atual)}</p></div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Aeronave / evidência</span><p className="font-black mt-0.5">{item.anv_atual || '—'}{item.ultima_evidencia_documento ? ` • ${humanizeDocumentReference(item.ultima_evidencia_documento, item.ultima_evidencia_tipo)}` : ''}</p></div>
                 </div>
                 {advancedOpen ? (
                   <div className="mt-2 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 text-xs">
-                    <div className="rounded-xl bg-cyan-50 dark:bg-cyan-950/20 px-3 py-2"><span className="font-black text-cyan-700 dark:text-cyan-300 uppercase text-[9px]">Motivo apurado</span><p className="font-black mt-0.5">{item.motivo_atual || 'Motivo não identificado'}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{item.motivo_documento || item.motivo_evento_tipo || 'Sem documento causal identificado'}</p></div>
+                    <div className="rounded-xl bg-cyan-50 dark:bg-cyan-950/20 px-3 py-2"><span className="font-black text-cyan-700 dark:text-cyan-300 uppercase text-[9px]">Motivo apurado</span><p className="font-black mt-0.5">{item.motivo_atual || 'Motivo não identificado'}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{item.motivo_documento ? humanizeDocumentReference(item.motivo_documento, item.motivo_evento_tipo) : item.motivo_evento_tipo ? eventTypeLabel(item.motivo_evento_tipo) : 'Sem documento causal identificado'}</p></div>
                     <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Tempo / reparo</span><p className="font-black mt-0.5">{item.dias_local_atual === null || item.dias_local_atual === undefined ? 'Tempo não determinado' : `${item.dias_local_atual} dia(s) no local`}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{repairStateLabel(item.prioridade_operacional?.situacao_reparo)}</p></div>
                     <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">PPU / criticidade</span><p className="font-black mt-0.5">PPU efetivo PN: {item.ppu_disponibilidade_conhecida === false ? 'indeterminado' : (item.ppu_quantidade_efetiva_pn ?? 0)}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{item.controle_critico ? 'Controle crítico: SIM' : 'Criticidade explícita: não confirmada'}</p></div>
-                    <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Fontes cruzadas</span><p className="font-black mt-0.5 line-clamp-2">{(item.fontes_dossie || []).join(' • ') || 'Somente cadastro atual'}</p>{item.conflitos_pendentes > 0 ? <p className="mt-1 text-[10px] font-black text-red-600">{item.conflitos_pendentes} conflito(s) pendente(s)</p> : null}</div>
+                    <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Fontes cruzadas</span><p className="font-black mt-0.5 line-clamp-2">{(item.fontes_dossie || []).map(sourceLabel).join(' • ') || 'Somente cadastro atual'}</p>{item.conflitos_pendentes > 0 ? <p className="mt-1 text-[10px] font-black text-red-600">{item.conflitos_pendentes} conflito(s) pendente(s)</p> : null}</div>
                   </div>
                 ) : null}
               </div>
@@ -1403,12 +1537,12 @@ export default function Equipamentos() {
               </div>
               <h4 className="font-black uppercase text-xs tracking-wider mb-3">Situação atual / correção</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div><label className={labelClass}>Categoria atual</label><select className={inputClass} value={equipmentForm.categoria_local_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, categoria_local_atual: e.target.value }))}>{categoryOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
+                <div><label className={labelClass}>Tipo de local atual</label><select className={inputClass} value={equipmentForm.categoria_local_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, categoria_local_atual: e.target.value }))}>{categoryOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
                 <div><label className={labelClass}>Local atual</label><input className={inputClass} value={equipmentForm.local_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, local_atual: e.target.value }))} /></div>
                 <div><label className={labelClass}>Aeronave atual</label><input className={inputClass} placeholder="Ex.: 4005" value={equipmentForm.anv_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, anv_atual: e.target.value }))} /></div>
                 <div><label className={labelClass}>Condição atual</label><select className={inputClass} value={equipmentForm.condicao_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, condicao_atual: e.target.value }))}>{conditionOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
-                <div><label className={labelClass}>Status atual</label><input className={inputClass} value={equipmentForm.status_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, status_atual: e.target.value }))} /></div>
-                <div><label className={labelClass}>Confiança da localização</label><select className={inputClass} value={equipmentForm.confianca_localizacao} onChange={(e) => setEquipmentForm((v) => ({ ...v, confianca_localizacao: e.target.value }))}>{confidenceOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
+                <div><label className={labelClass}>Situação atual</label><select className={inputClass} value={equipmentForm.status_atual} onChange={(e) => setEquipmentForm((v) => ({ ...v, status_atual: e.target.value }))}>{statusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+                <div><label className={labelClass}>Grau de confirmação do local</label><select className={inputClass} value={equipmentForm.confianca_localizacao} onChange={(e) => setEquipmentForm((v) => ({ ...v, confianca_localizacao: e.target.value }))}>{confidenceOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
                 <div><label className={labelClass}>Documento da correção</label><input className={inputClass} value={equipmentForm.documento_correcao || ''} onChange={(e) => setEquipmentForm((v) => ({ ...v, documento_correcao: e.target.value }))} /></div>
                 <div className="md:col-span-2"><label className={labelClass}>Motivo da correção *</label><textarea className={`${inputClass} min-h-20`} value={equipmentForm.motivo_edicao || ''} onChange={(e) => setEquipmentForm((v) => ({ ...v, motivo_edicao: e.target.value }))} placeholder="Obrigatório quando a identidade ou a situação atual for alterada." /></div>
                 <div className="md:col-span-2"><label className={labelClass}>Observação da correção</label><textarea className={`${inputClass} min-h-20`} value={equipmentForm.observacao_edicao || ''} onChange={(e) => setEquipmentForm((v) => ({ ...v, observacao_edicao: e.target.value }))} /></div>
@@ -1435,22 +1569,22 @@ export default function Equipamentos() {
           title="Registrar movimentação"
           subtitle={`${selected.pn} / SN ${selected.sn} • Origem atual: ${categoryLabel(selected.categoria_local_atual)}${selected.local_atual ? ` • ${selected.local_atual}` : ''}`}
           onClose={() => setEventModal(false)}
-          footer={<div className="flex justify-end gap-2"><button onClick={() => setEventModal(false)} className="px-4 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 font-black">Cancelar</button><button onClick={saveEvent} disabled={saving} className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-black inline-flex items-center gap-2 disabled:opacity-60"><Save size={16} /> Registrar evento</button></div>}
+          footer={<div className="flex justify-end gap-2"><button onClick={() => setEventModal(false)} className="px-4 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 font-black">Cancelar</button><button onClick={saveEvent} disabled={saving} className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-black inline-flex items-center gap-2 disabled:opacity-60"><Save size={16} /> Registrar movimentação</button></div>}
         >
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div><label className={labelClass}>Tipo de evento *</label><select className={inputClass} value={eventForm.tipo_evento} onChange={(e) => setEventForm((v) => ({ ...v, tipo_evento: e.target.value }))}>{eventTypeOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
+            <div><label className={labelClass}>Tipo de movimentação *</label><select className={inputClass} value={eventForm.tipo_evento} onChange={(e) => setEventForm((v) => ({ ...v, tipo_evento: e.target.value }))}>{eventTypeOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
             <div><label className={labelClass}>Data efetiva *</label><input type="datetime-local" className={inputClass} value={eventForm.data_evento} onChange={(e) => setEventForm((v) => ({ ...v, data_evento: e.target.value }))} /></div>
-            <div><label className={labelClass}>Categoria de destino</label><select className={inputClass} value={eventForm.categoria_destino} onChange={(e) => setEventForm((v) => ({ ...v, categoria_destino: e.target.value }))}>{categoryOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
+            <div><label className={labelClass}>Tipo de local de destino</label><select className={inputClass} value={eventForm.categoria_destino} onChange={(e) => setEventForm((v) => ({ ...v, categoria_destino: e.target.value }))}>{categoryOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
             <div><label className={labelClass}>Local de destino</label><input className={inputClass} value={eventForm.local_destino} onChange={(e) => setEventForm((v) => ({ ...v, local_destino: e.target.value }))} /></div>
             <div><label className={labelClass}>Aeronave</label><input className={inputClass} placeholder="Ex.: 4003" value={eventForm.anv_destino} onChange={(e) => setEventForm((v) => ({ ...v, anv_destino: e.target.value }))} /></div>
             <div><label className={labelClass}>Condição resultante</label><select className={inputClass} value={eventForm.condicao_resultante} onChange={(e) => setEventForm((v) => ({ ...v, condicao_resultante: e.target.value }))}>{conditionOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
-            <div><label className={labelClass}>Status resultante</label><input className={inputClass} value={eventForm.status_resultante} onChange={(e) => setEventForm((v) => ({ ...v, status_resultante: e.target.value }))} /></div>
-            <div><label className={labelClass}>Confiança da evidência</label><select className={inputClass} value={eventForm.confianca} onChange={(e) => setEventForm((v) => ({ ...v, confianca: e.target.value }))}>{confidenceOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
+            <div><label className={labelClass}>Situação após a movimentação</label><select className={inputClass} value={eventForm.status_resultante} onChange={(e) => setEventForm((v) => ({ ...v, status_resultante: e.target.value }))}>{statusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+            <div><label className={labelClass}>Grau de confirmação</label><select className={inputClass} value={eventForm.confianca} onChange={(e) => setEventForm((v) => ({ ...v, confianca: e.target.value }))}>{confidenceOptions.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></div>
             <div><label className={labelClass}>Tipo do documento</label><input className={inputClass} placeholder="OS, PIM, WO, STC, OSR..." value={eventForm.documento_tipo} onChange={(e) => setEventForm((v) => ({ ...v, documento_tipo: e.target.value }))} /></div>
             <div><label className={labelClass}>Número / referência do documento</label><input className={inputClass} value={eventForm.documento} onChange={(e) => setEventForm((v) => ({ ...v, documento: e.target.value }))} /></div>
             <div><label className={labelClass}>PIM</label><input className={inputClass} value={eventForm.pim} onChange={(e) => setEventForm((v) => ({ ...v, pim: e.target.value }))} /></div>
             <div><label className={labelClass}>OS</label><input className={inputClass} value={eventForm.os} onChange={(e) => setEventForm((v) => ({ ...v, os: e.target.value }))} /></div>
-            <div className="md:col-span-2"><label className={labelClass}>Motivo / descrição do movimento *</label><textarea className={`${inputClass} min-h-20`} value={eventForm.motivo} onChange={(e) => setEventForm((v) => ({ ...v, motivo: e.target.value }))} /></div>
+            <div className="md:col-span-2"><label className={labelClass}>Motivo da movimentação *</label><textarea className={`${inputClass} min-h-20`} value={eventForm.motivo} onChange={(e) => setEventForm((v) => ({ ...v, motivo: e.target.value }))} /></div>
             <div className="md:col-span-2"><label className={labelClass}>Observação</label><textarea className={`${inputClass} min-h-20`} value={eventForm.observacao} onChange={(e) => setEventForm((v) => ({ ...v, observacao: e.target.value }))} /></div>
           </div>
         </ModalShell>
@@ -1472,7 +1606,7 @@ export default function Equipamentos() {
 
       {masterModal ? (
         <ModalShell
-          title="Cadastro Mestre de Equipamentos — PN + SN"
+          title="Importar relação de equipamentos"
           subtitle="Aceita ZIP, XLSX, XLS, CSV ou ODS. PN + SN são obrigatórios; localização é opcional e nunca será inventada."
           onClose={() => setMasterModal(false)}
           wide
@@ -1494,7 +1628,7 @@ export default function Equipamentos() {
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Arquivo</span><p className="font-black text-sm break-all">{masterDraft.arquivo_nome}</p></div>
+                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Fonte importada</span><p className="font-black text-sm break-all" title={masterDraft.arquivo_nome || ''}>{humanizeDocumentReference(masterDraft.arquivo_nome, 'CADASTRO_MANUAL')}</p></div>
                 <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>PN + SN válidos</span><p className="font-black text-xl">{masterDraft.linhas_validas || 0}</p></div>
                 <div className="rounded-2xl bg-amber-50 dark:bg-amber-900/20 p-4"><span className={labelClass}>Regra de localização</span><p className="font-black text-sm text-amber-700 dark:text-amber-300">Se uma localização divergir do estado atual, vira conflito para confirmação; não sobrescreve silenciosamente.</p></div>
               </div>
@@ -1507,7 +1641,7 @@ export default function Equipamentos() {
                       const absoluteIndex = masterPage * 100 + pageIndex;
                       const issues = masterRowIssues(masterDraft.rows)[absoluteIndex] || [];
                       return <tr key={`${row.arquivo_origem}-${row.linha_origem}-${absoluteIndex}`} className="border-t border-slate-100 dark:border-slate-800 align-top">
-                        <td className="px-3 py-2 max-w-48 break-all">{row.arquivo_origem || '—'}{row.aba_origem ? ` • ${row.aba_origem}` : ''}</td>
+                        <td className="px-3 py-2 max-w-48 break-all">{humanizeDocumentReference(row.arquivo_origem, 'CADASTRO_MANUAL') || '—'}{row.aba_origem ? ` • aba ${row.aba_origem}` : ''}</td>
                         <td className="px-3 py-2 font-black">{row.linha_origem || absoluteIndex + 1}</td>
                         <td className="px-2 py-2"><input className={`${inputClass} min-w-32`} value={row.pn || ''} onChange={(e) => updateMasterRow(absoluteIndex, 'pn', e.target.value)} /></td>
                         <td className="px-2 py-2"><input className={`${inputClass} min-w-28`} value={row.sn || ''} onChange={(e) => updateMasterRow(absoluteIndex, 'sn', e.target.value)} /></td>
@@ -1546,7 +1680,7 @@ export default function Equipamentos() {
                 <div className="flex flex-wrap items-center gap-2"><span className="font-black text-lg">{equipment.pn || conflict.pn}</span><span className="px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 font-black text-xs">SN {equipment.sn || conflict.sn}</span><span className="px-2.5 py-1 rounded-lg bg-red-100 text-red-700 font-black text-[10px]">CONFLITO</span></div>
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-4">
                   <div className="rounded-xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Localização atualmente válida</span><p className="font-black">{categoryLabel(current.categoria_local_atual)}{current.local_atual ? ` • ${current.local_atual}` : ''}{current.anv_atual ? ` • ANV ${current.anv_atual}` : ''}</p></div>
-                  <div className="rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4"><span className={labelClass}>Nova evidência</span><p className="font-black">{categoryLabel(candidate.categoria_local_atual)}{candidate.local_atual ? ` • ${candidate.local_atual}` : ''}{candidate.anv_atual ? ` • ANV ${candidate.anv_atual}` : ''}</p><p className="mt-1 text-[10px] font-bold text-amber-700 dark:text-amber-300">{source.source_type || conflict.documento_tipo || 'FONTE'}{source.documento || conflict.documento ? ` • ${source.documento || conflict.documento}` : ''}{source.linha ? ` • linha ${source.linha}` : ''}</p></div>
+                  <div className="rounded-xl bg-amber-50 dark:bg-amber-900/20 p-4"><span className={labelClass}>Nova evidência</span><p className="font-black">{categoryLabel(candidate.categoria_local_atual)}{candidate.local_atual ? ` • ${candidate.local_atual}` : ''}{candidate.anv_atual ? ` • ANV ${candidate.anv_atual}` : ''}</p><p className="mt-1 text-[10px] font-bold text-amber-700 dark:text-amber-300">{sourceLabel(source.source_type || conflict.documento_tipo || 'FONTE')}{source.documento || conflict.documento ? ` • ${humanizeDocumentReference(source.documento || conflict.documento, source.source_type || conflict.documento_tipo)}` : ''}{source.linha ? ` • linha ${source.linha}` : ''}</p></div>
                 </div>
                 <div className="mt-3"><label className={labelClass}>Motivo da decisão *</label><textarea className={`${inputClass} min-h-16`} value={reason} onChange={(e) => setConflictReasons((currentReasons) => ({ ...currentReasons, [conflict.id]: e.target.value }))} placeholder="Ex.: conferência física realizada em 08/08/2026." /></div>
                 <div className="flex flex-wrap justify-end gap-2 mt-3"><button onClick={() => resolveConflict(conflict, 'CURRENT')} disabled={saving || !reason.trim()} className="px-4 py-2.5 rounded-xl bg-slate-800 text-white font-black disabled:opacity-50">Manter localização atual</button><button onClick={() => resolveConflict(conflict, 'CANDIDATE')} disabled={saving || !reason.trim()} className="px-4 py-2.5 rounded-xl bg-red-600 text-white font-black disabled:opacity-50">Confirmar nova evidência</button></div>
@@ -1558,7 +1692,7 @@ export default function Equipamentos() {
 
       {inventoryModal ? (
         <ModalShell
-          title="Inventário de equipamentos — PN + SN"
+          title="Importar inventário de localização"
           subtitle="O inventário serializado identifica as unidades já contadas no PPU. Nunca soma uma segunda quantidade ao estoque."
           onClose={() => setInventoryModal(false)}
           wide
@@ -1580,8 +1714,8 @@ export default function Equipamentos() {
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Arquivo / aba</span><p className="font-black text-sm">{inventoryDraft.arquivo_nome} • {inventoryDraft.aba}</p></div>
-                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Modo de atualização</span><select className={inputClass} value={inventoryMode} onChange={(event) => setInventoryMode(event.target.value)}><option value="merge">Mesclar com o cadastro atual</option><option value="replace">Substituir o snapshot serializado</option></select></div>
+                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Fonte / aba</span><p className="font-black text-sm" title={inventoryDraft.arquivo_nome || ''}>{humanizeDocumentReference(inventoryDraft.arquivo_nome, 'INVENTARIO_EQUIPAMENTOS')} • {inventoryDraft.aba}</p></div>
+                <div className="rounded-2xl bg-slate-50 dark:bg-slate-800 p-4"><span className={labelClass}>Modo de atualização</span><select className={inputClass} value={inventoryMode} onChange={(event) => setInventoryMode(event.target.value)}><option value="merge">Mesclar com o cadastro atual</option><option value="replace">Substituir a fotografia atual do inventário</option></select></div>
                 <div className="rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 p-4"><span className={labelClass}>Regra de contagem</span><p className="font-black text-sm text-emerald-700 dark:text-emerald-300">5 PPU + 5 SN correspondentes = 5 equipamentos, nunca 10.</p></div>
               </div>
               <p className="text-xs font-bold text-slate-500">Mesclar não marca equipamentos ausentes. Substituir troca a fotografia do inventário serializado, mas não apaga equipamentos nem histórico; ausências ficam sinalizadas.</p>
@@ -1624,8 +1758,8 @@ export default function Equipamentos() {
 
       {osPimOpen ? (
         <ModalShell
-          title={osPimMode === 'form' ? `${osPimForm.card_key ? 'Editar' : osPimForm.staging_id ? 'Revisar staging' : 'Nova'} movimentação OS/PIM` : 'OS / OSR / PIM — Equipamentos e Aeronaves'}
-          subtitle={osPimMode === 'form' ? 'PN+SN identificam o equipamento físico. Instalação, remoção e transferência alimentam o Livro; conflitos de posição exigem reconciliação humana.' : 'Movimentações serializadas, configuração atual das aeronaves e staging do Chat Lince em um único modal.'}
+          title={osPimMode === 'form' ? `${osPimForm.card_key ? 'Editar' : osPimForm.staging_id ? 'Revisar pendência' : 'Nova'} movimentação OS/PIM` : 'OS / OSR / PIM — Equipamentos e Aeronaves'}
+          subtitle={osPimMode === 'form' ? 'PN+SN identificam o equipamento físico. Instalação, remoção e transferência alimentam o Livro; conflitos de posição exigem reconciliação humana.' : 'Movimentações dos equipamentos, configuração atual das aeronaves e pendências sugeridas pelo Chat Lince em um único local.'}
           onClose={() => setOsPimOpen(false)}
           footer={osPimMode === 'form' ? <div className="flex justify-between gap-2"><button onClick={() => setOsPimMode(osPimForm.staging_id ? 'staging' : 'list')} className="px-4 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 font-black">Voltar</button><button onClick={saveOsPim} disabled={saving} className="px-5 py-2.5 rounded-xl bg-sky-700 text-white font-black disabled:opacity-50 inline-flex items-center gap-2"><Save size={16} /> {osPimForm.staging_id ? 'Revisar e aplicar ao Livro' : 'Salvar movimentação'}</button></div> : null}
         >
@@ -1633,7 +1767,7 @@ export default function Equipamentos() {
             <div className="mb-4 flex flex-wrap gap-2">
               <button onClick={() => setOsPimMode('list')} className={`px-3 py-2 rounded-xl text-xs font-black ${osPimMode === 'list' ? 'bg-sky-700 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>Movimentações ({osPimCards.length})</button>
               <button onClick={() => setOsPimMode('aircraft')} className={`px-3 py-2 rounded-xl text-xs font-black ${osPimMode === 'aircraft' ? 'bg-sky-700 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>Configuração ANV</button>
-              {canEdit ? <button onClick={() => setOsPimMode('staging')} className={`px-3 py-2 rounded-xl text-xs font-black ${osPimMode === 'staging' ? 'bg-amber-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>Staging Chat Lince ({osPimStaging.filter((row) => !row?.payload?.aplicado_2b7?.card_key).length})</button> : null}
+              {canEdit ? <button onClick={() => setOsPimMode('staging')} className={`px-3 py-2 rounded-xl text-xs font-black ${osPimMode === 'staging' ? 'bg-amber-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>Pendências do Chat Lince ({osPimStaging.filter((row) => !row?.payload?.aplicado_2b7?.card_key).length})</button> : null}
               {canEdit ? <button onClick={openNewOsPim} className="ml-auto px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-black inline-flex items-center gap-2"><Plus size={14} /> Nova movimentação</button> : null}
             </div>
           ) : null}
@@ -1680,8 +1814,8 @@ export default function Equipamentos() {
 
           {osPimMode === 'staging' ? (
             <div className="space-y-3">
-              <div className="rounded-2xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 p-4 text-xs font-bold text-amber-800 dark:text-amber-300">O Chat Lince apenas sugere os campos. Nenhum staging entra no Livro sem PN+SN e revisão humana. Linhas já aplicadas permanecem auditáveis.</div>
-              {osPimStaging.length === 0 ? <div className="py-8 text-center font-bold text-slate-400">Nenhum staging OS/SN encontrado.</div> : null}
+              <div className="rounded-2xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 p-4 text-xs font-bold text-amber-800 dark:text-amber-300">O Chat Lince apenas sugere os campos. Nenhuma sugestão altera o Livro sem identificar o equipamento e passar por revisão humana. Registros já aplicados permanecem auditáveis.</div>
+              {osPimStaging.length === 0 ? <div className="py-8 text-center font-bold text-slate-400">Nenhuma pendência de OS / PIM encontrada.</div> : null}
               {osPimStaging.map((row) => {
                 const applied = Boolean(row?.payload?.aplicado_2b7?.card_key);
                 return <article key={row.id} className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
@@ -1696,7 +1830,7 @@ export default function Equipamentos() {
 
           {osPimMode === 'form' ? (
             <div className="space-y-5">
-              {osPimForm.staging_id ? <div className="rounded-2xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 p-4 text-xs font-bold text-amber-800 dark:text-amber-300">Revise todos os campos extraídos pelo Chat Lince. Ao salvar, este staging será promovido ao Livro; a IA não decide a localização por conta própria.</div> : null}
+              {osPimForm.staging_id ? <div className="rounded-2xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 p-4 text-xs font-bold text-amber-800 dark:text-amber-300">Revise todos os campos sugeridos pelo Chat Lince. Ao salvar, a movimentação será registrada no Livro; a IA não decide a localização por conta própria.</div> : null}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <label><span className={labelClass}>Tipo *</span><select disabled={Boolean(osPimForm.card_key)} className={`${inputClass} disabled:opacity-60`} value={osPimForm.tipo_movimento} onChange={(e) => setOsPimForm((v) => ({ ...v, tipo_movimento: e.target.value }))}><option value="INSTALACAO">Instalação</option><option value="REMOCAO">Remoção</option><option value="TRANSFERENCIA">Transferência</option><option value="MOVIMENTACAO">Outra movimentação</option></select></label>
                 <label><span className={labelClass}>OS</span><input disabled={Boolean(osPimForm.card_key)} className={`${inputClass} disabled:opacity-60`} value={osPimForm.os} onChange={(e) => setOsPimForm((v) => ({ ...v, os: e.target.value.toUpperCase() }))} /></label>
@@ -1723,7 +1857,7 @@ export default function Equipamentos() {
 
       {stcOpen ? (
         <ModalShell
-          title={stcMode === 'form' ? `${stcForm.card_key ? 'Editar' : 'Nova'} STC` : 'STC — Rastreabilidade de Equipamentos'}
+          title={stcMode === 'form' ? `${stcForm.card_key ? 'Editar' : 'Nova'} STC` : 'STC — Equipamentos — Consulta e Rastreabilidade'}
           subtitle={stcMode === 'form' ? 'PN+SN identificam o equipamento. A STC alimenta o Livro de Eventos e conflitos de localização nunca são resolvidos silenciosamente.' : 'Cards derivados do Livro de Eventos. Editar uma STC sincroniza os eventos; cancelar invalida a movimentação sem apagar o histórico.'}
           onClose={() => { setStcOpen(false); setStcMode('list'); setStcForm(emptyStcForm()); }}
           wide
@@ -1732,7 +1866,7 @@ export default function Equipamentos() {
           {stcMode === 'list' ? (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row gap-2 justify-between">
-                <div className="text-xs font-bold text-slate-500 dark:text-slate-400">{stcLoading ? 'Consultando STCs...' : `${stcCards.length} card(s) localizado(s)`}</div>
+                <div className="text-xs font-bold text-slate-500 dark:text-slate-400">{stcLoading ? 'Consultando STCs...' : `${stcCards.length} registro(s) localizado(s)`}</div>
                 {canEdit ? <button onClick={openNewStc} className="px-4 py-2.5 rounded-xl bg-indigo-700 text-white font-black text-sm inline-flex items-center gap-2"><Plus size={16} /> Nova STC</button> : null}
               </div>
               {stcCards.length === 0 && !stcLoading ? <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-8 text-center font-bold text-slate-400">Nenhuma STC vinculada ao Livro de Equipamentos.</div> : null}
@@ -1818,9 +1952,9 @@ export default function Equipamentos() {
                 <div><span className={labelClass}>Local atual</span><p className="font-black">{categoryLabel(selected.categoria_local_atual)}{selected.local_atual ? ` • ${selected.local_atual}` : ''}</p></div>
                 <div><span className={labelClass}>Aeronave</span><p className="font-black">{selected.anv_atual || '—'}</p></div>
                 <div><span className={labelClass}>Condição</span><p className="font-black">{conditionLabel(selected.condicao_atual)}</p></div>
-                <div><span className={labelClass}>Status</span><p className="font-black">{selected.status_atual || '—'}</p></div>
-                <div><span className={labelClass}>Confiança da localização</span><span className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-black ${confidenceTone(selected.confianca_localizacao)}`}>{selected.confianca_localizacao || 'DESCONHECIDA'}</span></div>
-                <div><span className={labelClass}>Última evidência</span><p className="font-black">{selected.ultima_evidencia_tipo || '—'}{selected.ultima_evidencia_documento ? ` • ${selected.ultima_evidencia_documento}` : ''}</p></div>
+                <div><span className={labelClass}>Status</span><p className="font-black">{statusLabel(selected.status_atual)}</p></div>
+                <div><span className={labelClass}>Confiança da localização</span><span className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-black ${confidenceTone(selected.confianca_localizacao)}`}>{confidenceLabel(selected.confianca_localizacao)}</span></div>
+                <div><span className={labelClass}>Última evidência</span><p className="font-black">{selected.ultima_evidencia_tipo ? eventTypeLabel(selected.ultima_evidencia_tipo) : '—'}{selected.ultima_evidencia_documento ? ` • ${humanizeDocumentReference(selected.ultima_evidencia_documento, selected.ultima_evidencia_tipo)}` : ''}</p></div>
               </div>
             </div>
             <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
@@ -1841,13 +1975,13 @@ export default function Equipamentos() {
                 <div className="flex flex-wrap gap-2"><span className={`px-3 py-1.5 rounded-xl text-xs font-black ${priorityTone(selected.prioridade_operacional.nivel)}`}>PRIORIDADE {selected.prioridade_operacional.nivel}</span>{selected.prioridade_operacional.candidato_emergencia_reparo ? <span className="px-3 py-1.5 rounded-xl text-xs font-black bg-red-600 text-white">CANDIDATO A REPARO EMERGENCIAL</span> : null}</div>
               </div>
               <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
-                <div><span className={labelClass}>Motivo atual</span><p className="font-black">{selected.motivo_atual}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{selected.motivo_documento || selected.motivo_evento_tipo || 'Sem documento causal identificado'}</p></div>
+                <div><span className={labelClass}>Motivo atual</span><p className="font-black">{selected.motivo_atual}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{selected.motivo_documento ? humanizeDocumentReference(selected.motivo_documento, selected.motivo_evento_tipo) : selected.motivo_evento_tipo ? eventTypeLabel(selected.motivo_evento_tipo) : 'Sem documento causal identificado'}</p></div>
                 <div><span className={labelClass}>Permanência</span><p className="font-black">{selected.dias_local_atual === null || selected.dias_local_atual === undefined ? 'Não determinada' : `${selected.dias_local_atual} dia(s)`}</p><p className="mt-1 text-[10px] font-bold text-slate-400">Desde {formatDate(selected.local_atual_desde, true)}</p></div>
                 <div><span className={labelClass}>PPU / criticidade</span><p className="font-black">PPU efetivo PN: {selected.ppu_disponibilidade_conhecida === false ? 'indeterminado' : (selected.ppu_quantidade_efetiva_pn ?? 0)}</p><p className="mt-1 text-[10px] font-bold text-slate-400">{selected.controle_critico ? 'Há evidência no Controle de Equipamentos Críticos' : 'Criticidade explícita não confirmada'}</p></div>
                 <div><span className={labelClass}>Situação do reparo</span><p className="font-black">{repairStateLabel(selected.prioridade_operacional.situacao_reparo)}</p><p className="mt-1 text-[10px] font-bold text-slate-400">WO: {selected.wo_documento || selected.wo_estado || 'sem evidência atual'}</p></div>
               </div>
               {(selected.prioridade_operacional.razoes || []).length ? <div className="mt-3 rounded-xl bg-white dark:bg-slate-900 border border-cyan-100 dark:border-cyan-900 p-3 text-xs font-bold text-slate-600 dark:text-slate-300">{selected.prioridade_operacional.razoes.join(' • ')}</div> : null}
-              {(selected.fontes_dossie || []).length ? <div className="mt-3 flex flex-wrap gap-1.5">{selected.fontes_dossie.map((source) => <span key={source} className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] font-black uppercase">{source}</span>)}</div> : null}
+              {(selected.fontes_dossie || []).length ? <div className="mt-3 flex flex-wrap gap-1.5">{selected.fontes_dossie.map((source) => <span key={source} className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] font-black">{sourceLabel(source)}</span>)}</div> : null}
             </div>
           ) : null}
 
@@ -1862,7 +1996,7 @@ export default function Equipamentos() {
                   {selected.dossie_resumo.conflitos_pendentes > 0 ? <span className="px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 text-amber-700 dark:text-amber-300">{selected.dossie_resumo.conflitos_pendentes} conflito(s)</span> : null}
                 </div>
               </div>
-              {selected.dossie_resumo.fontes_historicas?.length > 0 ? <div className="mt-3 flex flex-wrap gap-1.5">{selected.dossie_resumo.fontes_historicas.map((source) => <span key={source} className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase">{source}</span>)}</div> : null}
+              {selected.dossie_resumo.fontes_historicas?.length > 0 ? <div className="mt-3 flex flex-wrap gap-1.5">{selected.dossie_resumo.fontes_historicas.map((source) => <span key={source} className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] font-black text-slate-600 dark:text-slate-300">{sourceLabel(source)}</span>)}</div> : null}
             </div>
           ) : null}
 
@@ -1874,10 +2008,10 @@ export default function Equipamentos() {
                 <div key={event.id} className={`rounded-2xl border p-4 ${event.invalidado ? 'border-red-200 dark:border-red-900 bg-red-50/50 dark:bg-red-900/10 opacity-70' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950/30'}`}>
                   <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2"><span className="font-black">{event.tipo_evento}</span><span className="text-xs font-bold text-slate-400">{formatEquipmentEventEffectiveDate(event)}</span>{event.invalidado ? <span className="px-2 py-1 rounded-lg bg-red-100 text-red-700 text-[10px] font-black">INVALIDADO</span> : null}{event.automatico ? <span className="px-2 py-1 rounded-lg bg-blue-100 text-blue-700 text-[10px] font-black">AUTOMÁTICO</span> : null}</div>
+                      <div className="flex flex-wrap items-center gap-2"><span className="font-black">{eventTypeLabel(event.tipo_evento)}</span><span className="text-xs font-bold text-slate-400">{formatEquipmentEventEffectiveDate(event)}</span>{event.invalidado ? <span className="px-2 py-1 rounded-lg bg-red-100 text-red-700 text-[10px] font-black">INVALIDADO</span> : null}{event.automatico ? <span className="px-2 py-1 rounded-lg bg-blue-100 text-blue-700 text-[10px] font-black">AUTOMÁTICO</span> : null}</div>
                       <p className="mt-1 text-sm font-bold"><MapPin size={14} className="inline mr-1" />{event.local_origem || event.categoria_origem || 'Origem não informada'} → {event.local_destino || event.categoria_destino || 'Destino não informado'}</p>
                       <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{event.motivo || 'Sem motivo informado'}</p>
-                      {event.documento || event.pim || event.os ? <p className="mt-2 text-xs font-bold text-blue-600 dark:text-blue-400"><FileText size={13} className="inline mr-1" />{[event.documento_tipo, event.documento, event.pim ? `PIM ${event.pim}` : '', event.os ? `OS ${event.os}` : ''].filter(Boolean).join(' • ')}</p> : null}
+                      {event.documento || event.pim || event.os ? <p className="mt-2 text-xs font-bold text-blue-600 dark:text-blue-400"><FileText size={13} className="inline mr-1" />{[documentEvidenceLabel(event.documento_tipo, event.documento), event.pim ? `PIM ${event.pim}` : '', event.os ? `OS ${event.os}` : ''].filter(Boolean).join(' • ')}</p> : null}
                       {event.tipo_evento === 'INVENTARIO_EQUIPAMENTOS' && event.created_at ? (
                         <p className="mt-1 text-[11px] font-bold text-slate-400">
                           Registrado no SISHA: {formatDate(event.created_at, true)}

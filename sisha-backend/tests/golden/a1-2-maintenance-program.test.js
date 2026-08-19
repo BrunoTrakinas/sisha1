@@ -89,6 +89,7 @@ test('A1.2: frontend só adiciona LIVRO DOS MOTORES, checkbox seletivo e modal d
   const modal = fs.readFileSync(path.join(project, 'sisha-frontend/src/components/MaintenanceProgramModal.jsx'), 'utf8');
   assert.match(cadastro, /LIVRO DOS MOTORES/);
   assert.match(gerador, /Incluir manutenção programada confirmada/);
-  assert.match(equipamentos, /Programa TBO \/ horas \/ ciclos/);
+  assert.match(equipamentos, /Controle de TBO \/ horas \/ ciclos/);
+  assert.match(equipamentos, /MaintenanceProgramModal/);
   assert.match(modal, /Nenhum vínculo é inferido/);
 });

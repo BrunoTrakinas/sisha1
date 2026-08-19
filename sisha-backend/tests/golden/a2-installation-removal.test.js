@@ -103,9 +103,10 @@ test('A2: RPCs são service-role only e registram auditoria', () => {
 test('A2: frontend adiciona apenas fluxo guiado sem remover OS\/PIM ou Programa TBO', () => {
   const equipamentos = read(path.join(project, 'sisha-frontend/src/pages/Equipamentos.jsx'));
   const modal = read(path.join(project, 'sisha-frontend/src/components/EquipmentOperationsModal.jsx'));
-  assert.match(equipamentos, /Instalar \/ Remover PN\+SN/);
+  assert.match(equipamentos, /Instalar ou remover de aeronave/);
+  assert.match(equipamentos, /EquipmentOperationsModal/);
   assert.match(equipamentos, /OS \/ PIM/);
-  assert.match(equipamentos, /Programa TBO \/ horas \/ ciclos/);
+  assert.match(equipamentos, /Controle de TBO \/ horas \/ ciclos/);
   assert.match(modal, /PANE/);
   assert.match(modal, /TESTE/);
   assert.match(modal, /PRONTO USO/);

@@ -5,7 +5,7 @@ const {
   createEquipment,
   updateEquipment,
   removeEquipment,
-  addEvent,
+  addProjectedEvent,
   invalidateEvent,
   fetchEventsForEquipmentIds,
   listLocationConflicts,
@@ -214,7 +214,7 @@ exports.resolverConflitoLocalizacao = async (req, res) => {
 
 exports.registrarEvento = async (req, res) => {
   try {
-    const event = await addEvent(req.params.id, req.body || {}, req.user || {});
+    const event = await addProjectedEvent(req.params.id, req.body || {}, req.user || {});
     const data = await getEquipment(req.params.id);
     await registrarAuditoria({
       req,
