@@ -10,6 +10,7 @@ const { loadCurrentAvailabilityRows, loadCurrentMaintenanceIndicators } = requir
 const { loadGeneratorOperationalRows, classifyMaintenanceIndicatorSemantic } = require('../services/aircraftOperationalStateService');
 const { loadMaintenanceProgram } = require('../services/maintenancePlanningService');
 const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
+const { buildRecipePolicyDeficiency, formatRecipePolicyDeficiencyRows } = require('../services/recipePolicyDeficiencyService');
 
 const PAGE_SIZE = 1000;
 const ANV_CODES = ACTIVE_AIRCRAFT_CODES;
@@ -830,6 +831,7 @@ async function loadGeneratorContext(force = false) {
     ppuRows,
     odaRows,
     odcRows,
+    purchaseRows,
     priceRows,
     dicRows,
     altDocRows,
@@ -847,6 +849,7 @@ async function loadGeneratorContext(force = false) {
     loadAllEffectivePpuRows().catch(() => []),
     fetchAllRows('leonardo_spares', 'pn, qtd_pendente, documento_referencia').catch(() => []),
     fetchOdcRows(),
+    fetchAllRows('compras_pds', '*').catch(() => []),
     fetchAllRows('price_list', 'pn, valor_unitario, nomenclatura, nsn').catch(() => []),
     fetchAllRows('dicionario_mestre', 'pn, pi, nsn, nomenclatura, dmc, item_num, sub_item').catch(() => []),
     fetchAllRows('pn_alternativos_documento', 'pn, pn_alt, pi, fonte, ativo').then((rows) => (rows || []).filter((row) => row.ativo !== false)).catch(() => []),
@@ -983,6 +986,7 @@ async function loadGeneratorContext(force = false) {
     ppuMap,
     odaMap,
     odcMap,
+    purchaseRows,
     priceMap,
     costRefMap,
     pnPiMap,
@@ -1162,6 +1166,19 @@ function buildGeneratorPreview(selection, context) {
 
   const availability = buildAvailabilitySections(baseRows, context);
   const { sections, totals } = availability;
+  const recipeDeficiency = buildRecipePolicyDeficiency({
+    selectedRecipes: selectedReceitas,
+    recipeRows: context.receitaRows || [],
+    policyRows: context.politicaRows || [],
+    ppuMap: context.ppuMap || new Map(),
+    ceimspaRows: context.ceimspaRows || [],
+    pnPiMap: context.pnPiMap || new Map(),
+    pnMetaMap: context.pnMetaMap || new Map(),
+    purchaseRows: context.purchaseRows || [],
+    odaFallbackMap: context.odaMap || new Map(),
+    odcFallbackMap: context.odcMap || new Map(),
+    horizonDays: 730,
+  });
 
   const summary = {
     receitas_selecionadas: selectedReceitas.length,
@@ -1195,6 +1212,7 @@ function buildGeneratorPreview(selection, context) {
     summary,
     base: baseRows,
     sections,
+    recipe_deficiency: recipeDeficiency,
   };
 }
 
@@ -2112,6 +2130,23 @@ exports.exportGeneratorXlsx = async (req, res) => {
     const preview = buildGeneratorPreview(req.body || {}, context);
 
     const workbook = xlsx.utils.book_new();
+    const deficiencySummaryRows = [
+      { Indicador: 'Horizonte (dias)', Valor: preview.recipe_deficiency?.summary?.horizonte_dias ?? 730 },
+      { Indicador: 'Receitas com política', Valor: preview.recipe_deficiency?.summary?.receitas_com_politica ?? 0 },
+      { Indicador: 'Receitas afetadas por deficiência', Valor: preview.recipe_deficiency?.summary?.receitas_deficientes ?? 0 },
+      { Indicador: 'PNs planejados', Valor: preview.recipe_deficiency?.summary?.pns_planejados ?? 0 },
+      { Indicador: 'PNs deficientes', Valor: preview.recipe_deficiency?.summary?.pns_deficientes ?? 0 },
+      { Indicador: 'Necessidade Política × Receita (2 anos)', Valor: preview.recipe_deficiency?.summary?.necessidade_2_anos ?? 0 },
+      { Indicador: 'Déficit a providenciar', Valor: preview.recipe_deficiency?.summary?.deficit_a_providenciar ?? 0 },
+      { Indicador: 'Risco de cobertura no horizonte', Valor: preview.recipe_deficiency?.summary?.risco_cobertura_no_horizonte ?? 0 },
+      { Indicador: 'Pendências de cadastro/cálculo', Valor: preview.recipe_deficiency?.summary?.blockers ?? 0 },
+    ];
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(deficiencySummaryRows), '00_RESUMO_DEFICIENCIA');
+    xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(formatRecipePolicyDeficiencyRows(preview.recipe_deficiency?.deficient_rows || [])), '00_DEFICIENCIAS_RECEITAS');
+    if ((preview.recipe_deficiency?.blockers || []).length > 0) {
+      xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(preview.recipe_deficiency.blockers), '00_PENDENCIAS_RECEITAS');
+    }
+
     const sheets = [
       ['01_PPU', preview.sections.ppu],
       ['02_CEIMSPA', preview.sections.ceimspa],

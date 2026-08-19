@@ -99,6 +99,110 @@ function CoverageTable({ title, rows, type = 'coverage' }) {
   );
 }
 
+
+function RecipeDeficiencyPanel({ data }) {
+  if (!data) return null;
+  const summary = data.summary || {};
+  const rows = data.deficient_rows || [];
+  const blockers = data.blockers || [];
+
+  return (
+    <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+      <div className="px-6 py-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80">
+        <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">Deficiência automática — Política × Receita</h3>
+            <p className="text-sm font-bold text-slate-500 dark:text-slate-400 mt-1 max-w-4xl">
+              O SISHA consolida primeiro a necessidade de cada PN em todas as receitas selecionadas e só depois aplica a cobertura. Assim, o mesmo saldo do PPU não é reutilizado artificialmente em duas receitas.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 min-w-fit">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+              <p className="text-[10px] uppercase font-black text-slate-400">Receitas afetadas</p>
+              <p className="text-xl font-black text-slate-900 dark:text-slate-100">{numberBr(summary.receitas_deficientes)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+              <p className="text-[10px] uppercase font-black text-slate-400">PNs deficientes</p>
+              <p className="text-xl font-black text-slate-900 dark:text-slate-100">{numberBr(summary.pns_deficientes)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+              <p className="text-[10px] uppercase font-black text-slate-400">Necessidade 2 anos</p>
+              <p className="text-xl font-black text-slate-900 dark:text-slate-100">{numberBr(summary.necessidade_2_anos)}</p>
+            </div>
+            <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 px-3 py-2">
+              <p className="text-[10px] uppercase font-black text-amber-700 dark:text-amber-300">Déficit a providenciar</p>
+              <p className="text-xl font-black text-amber-800 dark:text-amber-200">{numberBr(summary.deficit_a_providenciar)}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="p-6 text-sm font-bold text-emerald-700 dark:text-emerald-300">
+          Nenhuma deficiência de aquisição nas receitas/políticas selecionadas. O PPU e as compras ativas ODA/FAT/EMB pendentes já cobrem a quantidade planejada; eventuais riscos de prazo continuam sinalizados separadamente.
+        </div>
+      ) : (
+        <div className="overflow-auto">
+          <table className="min-w-[1280px] w-full text-sm">
+            <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th className="p-3 text-left">PN</th>
+                <th className="p-3 text-left">Nomenclatura</th>
+                <th className="p-3 text-left">Política × Receita</th>
+                <th className="p-3 text-left">Necessidade 2 anos</th>
+                <th className="p-3 text-left">PPU efetivo</th>
+                <th className="p-3 text-left">ODA/FAT/EMB c/ previsão</th>
+                <th className="p-3 text-left">ODA/FAT/EMB s/ data</th>
+                <th className="p-3 text-left">CeIMSPA potencial</th>
+                <th className="p-3 text-left">ODC / pipeline potencial</th>
+                <th className="p-3 text-left">Déficit a providenciar</th>
+                <th className="p-3 text-left">Cobertura</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={`def-${row.pn}`} className="border-t border-slate-100 dark:border-slate-800 align-top bg-amber-50/30 dark:bg-amber-950/10">
+                  <td className="p-3 font-black text-slate-900 dark:text-slate-100">{row.pn}</td>
+                  <td className="p-3">
+                    <div className="font-bold text-slate-900 dark:text-slate-100">{row.nomenclatura || '—'}</div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 font-semibold">NSN: {row.nsn || '—'} • Prioridade: {row.prioridade_mais_alta || '—'}</div>
+                  </td>
+                  <td className="p-3 text-xs font-semibold text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-w-[360px]">{row.receitas_texto || '—'}</td>
+                  <td className="p-3 font-black">{numberBr(row.necessidade_2_anos)}</td>
+                  <td className="p-3 font-black text-emerald-700 dark:text-emerald-300">{numberBr(row.ppu_efetivo)}</td>
+                  <td className="p-3 font-black text-blue-700 dark:text-blue-300">{numberBr(row.compras_comprometidas_no_horizonte)}</td>
+                  <td className="p-3 font-black text-slate-700 dark:text-slate-300">{numberBr(row.compras_comprometidas_sem_data)}</td>
+                  <td className="p-3 font-black text-purple-700 dark:text-purple-300">{numberBr(row.ceimspa_potencial)}</td>
+                  <td className="p-3 font-black text-slate-700 dark:text-slate-300">{numberBr((row.pipeline_potencial_no_horizonte || 0) + (row.pipeline_potencial_sem_data || 0))}</td>
+                  <td className="p-3 font-black text-amber-800 dark:text-amber-200">{numberBr(row.deficit_a_providenciar)}</td>
+                  <td className="p-3">
+                    <div className="font-black text-slate-900 dark:text-slate-100">{numberBr(row.cobertura_confirmada_percentual)}%</div>
+                    <div className="text-[10px] uppercase font-black text-slate-500 dark:text-slate-400 mt-1">{String(row.status || '').replaceAll('_', ' ')}</div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {blockers.length > 0 ? (
+        <div className="border-t border-slate-200 dark:border-slate-800 px-6 py-4 bg-red-50 dark:bg-red-950/20">
+          <p className="text-xs font-black uppercase text-red-700 dark:text-red-300">{blockers.length} pendência(s) impedem cálculo automático completo</p>
+          <div className="mt-2 space-y-1 text-xs font-semibold text-red-700 dark:text-red-300">
+            {blockers.slice(0, 8).map((item, index) => <p key={`${item.receita}-${item.pn || 'sem-pn'}-${index}`}>• {item.receita || 'Receita'}{item.pn ? ` • PN ${item.pn}` : ''}: {item.detalhe}</p>)}
+            {blockers.length > 8 ? <p>• Mais {blockers.length - 8} pendência(s) constam no Excel exportado.</p> : null}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="border-t border-slate-200 dark:border-slate-800 px-6 py-4 text-xs font-semibold text-slate-500 dark:text-slate-400">
+        Regra operacional: ODA/FAT/EMB pendentes reduzem a demanda a providenciar para evitar compra duplicada. Se estiverem sem previsão ou fora do horizonte, o SISHA mantém um risco de prazo separado. CeIMSPA e ODC/pipeline permanecem apenas como cobertura potencial. O Excel do Gerador passa a trazer abas específicas desta análise.
+      </div>
+    </section>
+  );
+}
+
 export default function GeradorNecessidades() {
   const { token } = useAuth();
   const [loadingOptions, setLoadingOptions] = useState(true);
@@ -323,6 +427,8 @@ export default function GeradorNecessidades() {
             <SummaryCard title="Disponível ODA + ODC" value={numberBr((preview.summary.disponivel_oda ?? preview.summary.coberto_oda ?? 0) + (preview.summary.disponivel_odc ?? preview.summary.coberto_odc ?? 0))} subtitle={`ODA ${numberBr(preview.summary.disponivel_oda ?? preview.summary.coberto_oda)} • ODC ${numberBr(preview.summary.disponivel_odc ?? preview.summary.coberto_odc)}`} icon={FileText} />
             <SummaryCard title="Comprar" value={numberBr(preview.summary.comprar_qtd)} subtitle={`Estimado ${moneyGbp(preview.summary.comprar_valor_gbp || 0)}`} icon={Download} />
           </div>
+
+          <RecipeDeficiencyPanel data={preview.recipe_deficiency} />
 
           {missingQuoteItems.length > 0 ? (
             <div className="flex justify-end">
