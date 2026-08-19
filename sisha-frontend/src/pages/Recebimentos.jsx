@@ -483,7 +483,7 @@ function persistedJobToRows(job = {}) {
   }));
 }
 
-export default function Recebimentos() {
+export default function Recebimentos({ importOnly = false }) {
   const { token, user } = useAuth();
   const isAdmin = ['admin', 'dono'].includes(user?.role);
   const fileInputRef = useRef(null);
@@ -527,7 +527,7 @@ export default function Recebimentos() {
     }
   }, [token]);
 
-  useEffect(() => { load(''); }, [load]);
+  useEffect(() => { if (!importOnly) load(''); }, [load, importOnly]);
 
 
   const loadRecentBatchJobs = useCallback(async () => {
@@ -995,7 +995,7 @@ export default function Recebimentos() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <section className="bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-sm p-6 space-y-5">
+      {!importOnly && (<section className="bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-sm p-6 space-y-5">
         <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
           <div>
             <h2 className="text-2xl font-black uppercase text-slate-900 dark:text-white">Recibos e Recebimentos</h2>
@@ -1016,9 +1016,9 @@ export default function Recebimentos() {
         </div>
         {q && meta.quantidade_encontrada > 0 && <p className="text-sm font-black text-blue-700 dark:text-blue-300">Quantidade localizada nos itens correspondentes: {formatNumber(meta.quantidade_encontrada)}</p>}
         {message && <p className={`font-black ${message.type === 'success' ? 'text-emerald-600' : message.type === 'warning' ? 'text-amber-600' : 'text-red-600'}`}>{message.text}</p>}
-      </section>
+      </section>)}
 
-      {isAdmin && recentBatchJobs.length > 0 && (
+      {isAdmin && importOnly && recentBatchJobs.length > 0 && (
         <section className="rounded-2xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/20 p-4">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
             <div>
@@ -1036,7 +1036,7 @@ export default function Recebimentos() {
         </section>
       )}
 
-      {isAdmin && (
+      {isAdmin && importOnly && (
         <form onSubmit={importReceipt} className="bg-blue-50 dark:bg-blue-950/20 rounded-3xl border border-blue-200 dark:border-blue-900 p-6 space-y-4">
           <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
             <div>
@@ -1065,6 +1065,7 @@ export default function Recebimentos() {
             </div>
           </div>
           <p className="text-[11px] font-bold text-blue-700 dark:text-blue-300">Formatos: PDF, JPG/JPEG, PNG, WEBP, XLSX, XLS, CSV, ODS, DOC, DOCX, ODT e TXT. Para dezenas de recibos, use “Vários / ZIP”: o lote fica persistido no backend, continua mesmo se você fechar a página, separa prontos, revisões, duplicados e erros, e não grava nada antes da sua confirmação.</p>
+          {message && <p className={`font-black ${message.type === 'success' ? 'text-emerald-600' : message.type === 'warning' ? 'text-amber-600' : 'text-red-600'}`}>{message.text}</p>}
         </form>
       )}
 
@@ -1162,8 +1163,8 @@ export default function Recebimentos() {
         </div>
       )}
 
-      {loading && <p className="font-black text-slate-500">Carregando recibos...</p>}
-      <section className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+      {!importOnly && loading && <p className="font-black text-slate-500">Carregando recibos...</p>}
+      {!importOnly && <section className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         {!loading && receipts.map((receipt) => {
           const items = (receipt.recebimento_itens || []).filter((item) => item.ativo !== false);
           const pending = items.filter((item) => pendingQuantity(item) > 0);
@@ -1218,10 +1219,10 @@ export default function Recebimentos() {
             </article>
           );
         })}
-      </section>
-      {!loading && receipts.length === 0 && <p className="font-black text-slate-500">Nenhum recibo encontrado.</p>}
+      </section>}
+      {!importOnly && !loading && receipts.length === 0 && <p className="font-black text-slate-500">Nenhum recibo encontrado.</p>}
 
-      {selected && (
+      {!importOnly && selected && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-3">
           <div className="bg-slate-50 dark:bg-slate-950 rounded-3xl p-6 w-full max-w-[96vw] max-h-[94vh] overflow-auto shadow-2xl border border-slate-200 dark:border-slate-700 space-y-5">
             <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">

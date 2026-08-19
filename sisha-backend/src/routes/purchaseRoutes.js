@@ -17,6 +17,7 @@ router.get('/ordens', purchaseController.listarOrdens);
 router.get('/ordens/:id/export', purchaseController.exportarOrdem);
 router.post('/ordens', requireRole(['admin']), purchaseController.criarOrdem);
 router.put('/ordens/:id', requireRole(['admin']), purchaseController.atualizarOrdem);
+router.put('/ordens/:id/status', requireRole(['admin']), purchaseController.transicionarStatusOrdem);
 router.delete('/ordens/:id', requireRole(['admin']), purchaseController.excluirOrdem);
 router.post('/ordens/:id/suplementacoes', requireRole(['admin']), purchaseController.adicionarSuplementacaoOrdem);
 router.put('/ordens/:id/suplementacoes/:suplementacaoId', requireRole(['admin']), purchaseController.retificarSuplementacaoOrdem);

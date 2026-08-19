@@ -1266,6 +1266,26 @@ export default function Equipamentos() {
     }
   };
 
+  const enrichEquipmentNames = async () => {
+    if (!canEdit) return;
+    const ok = window.confirm('Completar automaticamente os equipamentos sem nomenclatura usando o PN no Dicionário/Manual Técnico? O SISHA só grava quando encontra correspondência técnica; itens sem fonte segura permanecem sem nome.');
+    if (!ok) return;
+    try {
+      setError('');
+      const response = await apiFetch('/equipment/nomenclaturas/enriquecer', {
+        method: 'POST',
+        headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ dry_run: false }),
+      }, token);
+      const json = await response.json();
+      if (json.status !== 'success') throw new Error(json.message || 'Falha ao completar nomenclaturas.');
+      setNotice(json.message);
+      if (advancedOpen) await loadOperational(operationalFilters, query); else await load(query);
+    } catch (err) {
+      setError(err.message || 'Falha ao completar nomenclaturas.');
+    }
+  };
+
   const openReconciliation = async () => {
     setReconciliationOpen(true);
     setReconciliationLoading(true);
@@ -1358,6 +1378,9 @@ export default function Equipamentos() {
                   </button>
                   <button onClick={() => setEquipmentOperationsOpen(true)} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
                     <ArrowRightLeft size={16} /> Instalar ou remover de aeronave
+                  </button>
+                  <button onClick={enrichEquipmentNames} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
+                    <FileText size={16} /> Completar nomes pelo Manual Técnico
                   </button>
                   <button onClick={openReconciliation} className="w-full px-3 py-2.5 rounded-xl text-left hover:bg-slate-100 dark:hover:bg-slate-800 font-black text-sm flex items-center gap-2">
                     <ArrowRightLeft size={16} /> Conferir localização no PPU
@@ -1481,11 +1504,11 @@ export default function Equipamentos() {
                   {advancedOpen && item.prioridade_operacional ? <span className={`text-[10px] font-black px-2.5 py-1 rounded-lg ${priorityTone(item.prioridade_operacional.nivel)}`}>PRIORIDADE {item.prioridade_operacional.nivel}</span> : null}
                   {advancedOpen && item.prioridade_operacional?.candidato_emergencia_reparo ? <span className="text-[10px] font-black px-2.5 py-1 rounded-lg bg-red-600 text-white">CANDIDATO A REPARO EMERGENCIAL</span> : null}
                 </div>
-                <p className="text-sm font-bold text-slate-600 dark:text-slate-300 mt-1 truncate">{item.nomenclatura || 'Nomenclatura não informada'}</p>
+                <p className="text-sm font-bold text-slate-600 dark:text-slate-300 mt-1 truncate">{item.nomenclatura || item.nomenclatura_resolvida || 'Nomenclatura não informada'}</p>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Local atual</span><p className="font-black mt-0.5">{categoryLabel(item.categoria_local_atual)}{item.local_atual ? ` • ${item.local_atual}` : ''}</p></div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Local atual</span><p className="font-black mt-0.5">{categoryLabel(item.categoria_local_atual)}{item.local_atual ? ` • ${item.local_atual}` : ''}</p>{!item.local_atual && item.dossie_resumo?.leitura_operacional ? <p className="mt-1 text-[10px] font-bold text-amber-600 dark:text-amber-300">{item.dossie_resumo.leitura_operacional}</p> : null}</div>
                   <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Condição / status</span><p className="font-black mt-0.5">{conditionLabel(item.condicao_atual)} • {statusLabel(item.status_atual)}</p></div>
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Aeronave / evidência</span><p className="font-black mt-0.5">{item.anv_atual || '—'}{item.ultima_evidencia_documento ? ` • ${humanizeDocumentReference(item.ultima_evidencia_documento, item.ultima_evidencia_tipo)}` : ''}</p></div>
+                  <div className="rounded-xl bg-slate-50 dark:bg-slate-900/50 px-3 py-2"><span className="font-black text-slate-400 uppercase text-[9px]">Aeronave / evidência</span><p className="font-black mt-0.5">{item.anv_atual || item.dossie_resumo?.ultimo_movimento?.aeronave || '—'}{item.ultima_evidencia_documento ? ` • ${humanizeDocumentReference(item.ultima_evidencia_documento, item.ultima_evidencia_tipo)}` : item.dossie_resumo?.ultimo_movimento?.documento ? ` • ${humanizeDocumentReference(item.dossie_resumo.ultimo_movimento.documento, item.dossie_resumo.ultimo_movimento.documento_tipo)}` : ''}</p>{item.dossie_resumo?.ultimo_movimento?.tipo ? <p className="mt-1 text-[10px] font-bold text-slate-400">{eventTypeLabel(`${item.dossie_resumo.ultimo_movimento.tipo}_ANV`)} • {formatDate(item.dossie_resumo.ultimo_movimento.data, true)}</p> : null}</div>
                 </div>
                 {advancedOpen ? (
                   <div className="mt-2 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 text-xs">
@@ -1947,7 +1970,7 @@ export default function Equipamentos() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
               <div className="flex flex-wrap gap-2 items-center"><span className="font-black text-xl">{selected.pn}</span><span className="px-3 py-1 rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 font-black">SN {selected.sn}</span></div>
-              <p className="mt-1 font-bold text-slate-500">{selected.nomenclatura || 'Nomenclatura não informada'}</p>
+              <p className="mt-1 font-bold text-slate-500">{selected.nomenclatura || selected.nomenclatura_resolvida || 'Nomenclatura não informada'}</p>
               <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                 <div><span className={labelClass}>Local atual</span><p className="font-black">{categoryLabel(selected.categoria_local_atual)}{selected.local_atual ? ` • ${selected.local_atual}` : ''}</p></div>
                 <div><span className={labelClass}>Aeronave</span><p className="font-black">{selected.anv_atual || '—'}</p></div>
@@ -1983,6 +2006,22 @@ export default function Equipamentos() {
               {(selected.prioridade_operacional.razoes || []).length ? <div className="mt-3 rounded-xl bg-white dark:bg-slate-900 border border-cyan-100 dark:border-cyan-900 p-3 text-xs font-bold text-slate-600 dark:text-slate-300">{selected.prioridade_operacional.razoes.join(' • ')}</div> : null}
               {(selected.fontes_dossie || []).length ? <div className="mt-3 flex flex-wrap gap-1.5">{selected.fontes_dossie.map((source) => <span key={source} className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] font-black">{sourceLabel(source)}</span>)}</div> : null}
             </div>
+          ) : null}
+
+          {selected.dossie_resumo?.ultimo_movimento ? (
+            <section className="rounded-2xl border border-amber-200 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/10 p-4">
+              <h4 className="font-black uppercase text-amber-900 dark:text-amber-200">Leitura operacional da última movimentação</h4>
+              <p className="mt-2 text-sm font-black text-slate-900 dark:text-white">{selected.dossie_resumo.ultimo_movimento.leitura}</p>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
+                <span>Tipo: {selected.dossie_resumo.ultimo_movimento.tipo}</span>
+                <span>Aeronave: {selected.dossie_resumo.ultimo_movimento.aeronave || 'Não identificada'}</span>
+                <span>Documento: {selected.dossie_resumo.ultimo_movimento.documento ? humanizeDocumentReference(selected.dossie_resumo.ultimo_movimento.documento, selected.dossie_resumo.ultimo_movimento.documento_tipo) : 'Não informado'}</span>
+                <span>Data: {formatDate(selected.dossie_resumo.ultimo_movimento.data, true)}</span>
+                <span className="sm:col-span-2">Origem: {selected.dossie_resumo.ultimo_movimento.origem || 'Não determinada'}</span>
+                <span className="sm:col-span-2">Destino: {selected.dossie_resumo.ultimo_movimento.destino_conhecido ? selected.dossie_resumo.ultimo_movimento.destino : 'A confirmar'}</span>
+              </div>
+              {!selected.dossie_resumo.ultimo_movimento.destino_conhecido ? <p className="mt-3 text-xs font-bold text-amber-800 dark:text-amber-200">O SISHA confirma a movimentação, mas não inventa o destino quando a OS/PIM/Master OS não o informa.</p> : null}
+            </section>
           ) : null}
 
           {selected.dossie_resumo ? (

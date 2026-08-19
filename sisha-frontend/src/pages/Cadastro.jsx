@@ -9,6 +9,7 @@ import ManuaisTecnicosAdmin from '../components/ManuaisTecnicosAdmin';
 import DataAdminManager from '../components/DataAdminManager';
 import AircraftOperationalStateAdmin from '../components/AircraftOperationalStateAdmin';
 import PendingCenterModal from '../components/PendingCenterModal';
+import Recebimentos from './Recebimentos';
 import { useAuth } from '../context/AuthContext';
 import { apiFetch, buildAuthHeaders } from '../lib/api';
 
@@ -133,13 +134,6 @@ const orientacoesUploadPorTipo = {
         comportamento: 'Atualiza a biblioteca documental sem apagar relações manuais ou relações originadas em RFQ.',
         observacao: 'Não use PN igual ao PN_Alt. CIETP continua usando DMC + ITEM; relações manuais/RFQ são preservadas quando a biblioteca documental é reimportada.',
     },
-    recibos_auto: {
-        titulo: 'Recibos — análise automática',
-        obrigatorias: ['Recibo de Material, Garantia ou PD em formato suportado'],
-        recomendadas: ['Para vários documentos, reúna todos no mesmo ZIP e use a Central de Recibos'],
-        comportamento: 'Usa o fluxo canônico de Recibos e Recebimentos. O SISHA classifica cada documento, separa prontos/revisões/duplicados/erros e somente grava após conferência de Admin/Dono.',
-        observacao: 'Não é necessário separar previamente Material/Garantia de PD. O conteúdo do documento é a evidência principal de classificação; divergências ficam para revisão humana.',
-    },
     qnna: {
         titulo: 'QNNA / Quadro de Necessidades',
         obrigatorias: ['PN / P/N / PART NUMBER', 'QTD / QTY / QTDE / QUANTIDADE'],
@@ -184,6 +178,7 @@ export default function Cadastro() {
     const isAdmin = user?.role === 'admin';
     const podeGerenciarUsuarios = isDono || isAdmin;
     const [areaAtiva, setAreaAtiva] = useState('atualizar');
+    const [recibosImportOpen, setRecibosImportOpen] = useState(false);
 
     const areasSistema = [
         { key: 'atualizar', label: 'Atualizar dados', descricao: 'Envie novas versões de documentos e bases do SISHA.' },
@@ -855,8 +850,26 @@ export default function Cadastro() {
 
             {areaAtiva === 'atualizar' && (
             <section className="bg-white dark:bg-slate-900 rounded-3xl p-8 shadow-sm border border-slate-200 dark:border-slate-800">
-                <h2 className="text-xl font-black text-slate-800 dark:text-white mb-1 uppercase">Atualizar dados</h2>
-                <p className="mb-4 text-sm font-bold text-slate-600 dark:text-slate-400">Escolha o tipo de informação que deseja atualizar e envie o arquivo correspondente.</p>
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 mb-4">
+                    <div>
+                        <h2 className="text-xl font-black text-slate-800 dark:text-white mb-1 uppercase">Atualizar dados</h2>
+                        <p className="text-sm font-bold text-slate-600 dark:text-slate-400">Escolha o tipo de informação que deseja atualizar e envie o arquivo correspondente.</p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setRecibosImportOpen((current) => !current)}
+                        className={`px-5 py-3 rounded-xl font-black border-2 ${recibosImportOpen ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white dark:bg-slate-950 border-blue-500 text-blue-700 dark:text-blue-300'}`}
+                    >
+                        RECIBOS
+                    </button>
+                </div>
+
+                {recibosImportOpen && (
+                    <div className="mb-6">
+                        <Recebimentos importOnly />
+                    </div>
+                )}
+
                 <form onSubmit={handleUpload} className="space-y-4">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <select
@@ -880,7 +893,6 @@ export default function Cadastro() {
                             <option value="manual_legado">Manual / Dicionário Mestre (CIETP)</option>
                             <option value="manual_tecnico">WTP / Manual Técnico</option>
                             <option value="pn_alternativos">PN Alternativos</option>
-                            <option value="recibos_auto">Recibos — automático (Material / Garantia / PD)</option>
                             <option value="qnna">QNNA</option>
                             <option value="sb">SB</option>
                             <option value="receitas" disabled>Receitas — use Chat Lince (importador operacional em preparação)</option>
@@ -888,25 +900,14 @@ export default function Cadastro() {
                             <option value="politica_estoque_tarefas" disabled>Política de Estoque — use Chat Lince (importador operacional em preparação)</option>
                         </select>
 
-                        {tipoArquivo === 'recibos_auto' ? (
-                            <button
-                                type="button"
-                                onClick={() => navigate('/recebimentos')}
-                                className="w-full p-3 bg-blue-600 hover:bg-blue-700 text-white border-2 border-blue-600 rounded-xl font-black"
-                            >
-                                ABRIR RECIBOS E RECEBIMENTOS — VÁRIOS / ZIP
-                            </button>
-                        ) : (
-                            <input
-                                type="file"
-                                onChange={handleFileChange}
-                                className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100 file:text-slate-900"
-                            />
-                        )}
+                        <input
+                            type="file"
+                            onChange={handleFileChange}
+                            className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100 file:text-slate-900"
+                        />
                     </div>
 
-                    {tipoArquivo !== 'recibos_auto' && (
-                        <div className="flex justify-end">
+                    <div className="flex justify-end">
                             <button
                                 type="submit"
                                 disabled={!file || uploadCarregando}
@@ -915,7 +916,6 @@ export default function Cadastro() {
                                 {uploadCarregando ? 'ENVIANDO...' : 'ENVIAR ARQUIVO'}
                             </button>
                         </div>
-                    )}
 
                     {uploadMsg && (
                         <p className={`font-bold ${uploadMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>

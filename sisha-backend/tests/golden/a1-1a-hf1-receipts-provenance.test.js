@@ -25,10 +25,13 @@ test('A1.1A HF1: recibo automático classifica garantia pelo conteúdo', () => {
   assert.equal(result.type, 'GARANTIA');
 });
 
-test('A1.1A HF1: Atualizar Sistema possui uma única entrada canônica de recibos e encaminha para a Central existente', () => {
+test('A1.1A HF1: Atualizar Sistema possui uma única entrada canônica de recibos e reutiliza a triagem existente', () => {
   const source = fs.readFileSync(path.join(frontend, 'src/pages/Cadastro.jsx'), 'utf8');
-  assert.match(source, /Recibos — automático \(Material \/ Garantia \/ PD\)/);
-  assert.match(source, /navigate\('\/recebimentos'\)/);
+  const receiptsEntry = source.match(/<button[\s\S]{0,1200}?setRecibosImportOpen[\s\S]{0,1200}?>\s*RECIBOS\s*<\/button>/);
+  assert.ok(receiptsEntry, 'entrada RECIBOS deve abrir a triagem inline em Atualizar Sistema');
+  assert.doesNotMatch(receiptsEntry[0], /navigate\('\/recebimentos'\)/);
+  assert.match(source, /import Recebimentos from '\.\/Recebimentos'/);
+  assert.match(source, /<Recebimentos importOnly \/>/);
   assert.doesNotMatch(source, /<option value="recibo_material">Recibo Material \/ Garantia<\/option>/);
   assert.doesNotMatch(source, /<option value="recibo_pd">Recibo de PD<\/option>/);
 });

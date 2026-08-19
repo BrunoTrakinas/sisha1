@@ -172,10 +172,12 @@ test('PD lifecycle visão geral: cards usam estágio corrente em vez de Com OC',
   assert.match(controller, /function classifyPdPipelineStage\(pd = \{\}\)/);
   assert.match(controller, /if \(st === 'REC' \|\| \(ordered > 0 && delivered >= ordered\)\) return 'entregue'/);
   assert.match(controller, /if \(delivered > 0\) return 'entrega_parcial'/);
-  assert.match(controller, /if \(st === 'ODA' \|\| st === 'ODA_RESSALVA' \|\| st === 'FAT' \|\| st === 'EMB'\) return 'oda'/);
+  assert.match(controller, /if \(st === 'FAT' \|\| st === 'EMB'\) return 'fat_emb'/);
+  assert.match(controller, /if \(st === 'ODA' \|\| st === 'ODA_RESSALVA'\) return 'oda'/);
   assert.doesNotMatch(frontend, /pdPipeline\.com_oc/);
   assert.match(frontend, /title="ODC"/);
-  assert.match(frontend, /title="ODA \/ FAT \/ EMB"/);
+  assert.match(frontend, /title="ODA"/);
+  assert.match(frontend, /title="FAT \/ EMB"/);
   assert.match(frontend, /title="ENTREGA PARCIAL"/);
   assert.match(frontend, /title="ENTREGUE"/);
 });

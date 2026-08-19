@@ -20,6 +20,9 @@ const upload = multer({
 });
 
 router.post('/perguntar', guardChatLinceConsult, chatLinceController.perguntar);
+router.post('/analista/exportar', guardChatLinceConsult, chatLinceController.exportarConsultaAnalista);
+router.post('/analista/auditar', guardChatLinceDocumentAnalysis, upload.single('file'), chatLinceController.auditarDocumentoComparandoSisha);
+router.post('/analista/auditar/exportar', guardChatLinceDocumentAnalysis, upload.single('file'), chatLinceController.exportarAuditoriaComparativa);
 router.get('/security-readiness', requireRole(['admin', 'dono']), chatLinceController.securityReadiness);
 router.post('/rag/reindexar', requireRole(['admin', 'dono']), guardChatLinceRagReindex, chatLinceController.reindexarRag);
 router.post('/acoes/:id/confirmar', requireRole(['admin', 'dono']), guardChatLinceActionConfirm, chatLinceController.confirmarAcaoExecutor);

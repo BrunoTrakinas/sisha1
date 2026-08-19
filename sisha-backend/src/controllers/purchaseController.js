@@ -617,9 +617,10 @@ function classifyPdPipelineStage(pd = {}) {
   if (st === 'TRI' || st === 'ANS') return 'triagem_analise';
   if (['COT', 'PRO', 'LPC', 'LIB', 'LIBERADA', 'LIBERADO', 'LIBERADA_PARA_COTACAO', 'LIBERADO_PARA_COTACAO'].includes(st)) return 'cotacao_lpc';
 
-  // FAT/EMB são estágios avançados já comprometidos e ficam no grupo ODA
-  // enquanto não houver recebimento físico. O Order Book mantém seu próprio estágio.
-  if (st === 'ODA' || st === 'ODA_RESSALVA' || st === 'FAT' || st === 'EMB') return 'oda';
+  // ODA representa aprovação/compromisso. FAT e EMB já avançaram além da ODA
+  // e precisam de leitura própria para não esconder o estágio financeiro/logístico.
+  if (st === 'FAT' || st === 'EMB') return 'fat_emb';
+  if (st === 'ODA' || st === 'ODA_RESSALVA') return 'oda';
 
   // Um PD ainda sem vínculo de OC é uma condição operacional própria; não deve
   // ser somado também em ODC. Assim cada PD aparece em exatamente um card.
@@ -637,6 +638,7 @@ async function buildPdPipelineSummary() {
     sem_oc: 0,
     odc: 0,
     oda: 0,
+    fat_emb: 0,
     entrega_parcial: 0,
     entregue: 0,
     cancelados: 0,
@@ -1078,6 +1080,124 @@ exports.criarOrdem = async (req, res) => {
   } catch (error) {
     console.error('[SISHA][compras] criarOrdem:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao cadastrar OC.' });
+  }
+};
+
+
+const OC_MANUAL_ADVANCE_FROM = new Set(['ODC', 'ODA_RESSALVA', 'ADP']);
+const PD_MANUAL_ADVANCE_FROM = new Set(['ODC', 'ATIVO', 'ODA_RESSALVA']);
+const PD_ADVANCED_BLOCK_CANCEL = new Set(['FAT', 'EMB', 'REC']);
+
+function planManualOcStatusTransition(ordem = {}, pds = [], targetStatus = '') {
+  const current = normalizeUpper(ordem.status);
+  const target = normalizeUpper(targetStatus);
+  if (target === current) return { action: 'NOOP', current, target, promote: [], cancel: [], preserved: pds || [] };
+
+  if (target === 'ODA') {
+    if (!OC_MANUAL_ADVANCE_FROM.has(current)) {
+      throw Object.assign(new Error(`A OC só pode ser promovida manualmente para ODA a partir de ODC, ODA com ressalva ou ADP. Situação atual: ${current || 'não informada'}.`), { statusCode: 409 });
+    }
+    const promote = (pds || []).filter((pd) => pd.ativo !== false && PD_MANUAL_ADVANCE_FROM.has(normalizeUpper(pd.status_grupo || pd.status)));
+    const preserved = (pds || []).filter((pd) => !promote.some((candidate) => String(candidate.id) === String(pd.id)));
+    return { action: 'PROMOTE_ODA', current, target, promote, cancel: [], preserved };
+  }
+
+  if (target === 'CAN') {
+    const blocking = (pds || []).filter((pd) => {
+      const st = normalizeUpper(pd.status_grupo || pd.status);
+      const delivered = Math.max(0, Number(pd.qtd_recebida || 0) || 0);
+      return pd.ativo !== false && (PD_ADVANCED_BLOCK_CANCEL.has(st) || delivered > 0);
+    });
+    if (blocking.length) {
+      throw Object.assign(new Error(`Cancelamento bloqueado: ${blocking.length} PD(s) já possuem evidência FAT/EMB/REC ou recebimento físico. Regularize esses PDs individualmente antes de cancelar a OC.`), { statusCode: 409, blocking });
+    }
+    const cancel = (pds || []).filter((pd) => pd.ativo !== false && !['CAN', 'EXCLUIDO'].includes(normalizeUpper(pd.status_grupo || pd.status)));
+    return { action: 'CANCEL', current, target, promote: [], cancel, preserved: (pds || []).filter((pd) => !cancel.some((candidate) => String(candidate.id) === String(pd.id))) };
+  }
+
+  throw Object.assign(new Error('Transição manual inválida. Use ODA para avançar a OC ou CAN para cancelar.'), { statusCode: 400 });
+}
+
+async function rollbackPdStatusRows(rows = []) {
+  for (const row of rows || []) {
+    if (!row?.id) continue;
+    await supabase.from('compras_pds').update({
+      status: row.status,
+      status_grupo: row.status_grupo,
+      ativo: row.ativo,
+      cancelado_em: row.cancelado_em || null,
+      motivo_cancelamento: row.motivo_cancelamento || null,
+      updated_at: row.updated_at || new Date().toISOString(),
+    }).eq('id', row.id);
+  }
+}
+
+exports.transicionarStatusOrdem = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { id } = req.params;
+  try {
+    if (String(id).startsWith('orderbook-')) return res.status(400).json({ status: 'error', message: 'OC importada do Order Book é somente leitura. Corrija pela fonte documental.' });
+    const targetStatus = normalizeUpper(req.body?.status);
+    const motivo = cleanText(req.body?.motivo || req.body?.observacao || req.body?.motivo_cancelamento);
+    if (!['ODA', 'CAN'].includes(targetStatus)) return res.status(400).json({ status: 'error', message: 'Situação de destino inválida. Use ODA ou CAN.' });
+    if (targetStatus === 'CAN' && !motivo) return res.status(400).json({ status: 'error', message: 'Informe o motivo do cancelamento para preservar a auditoria.' });
+
+    const { data: ordem, error: ordemError } = await supabase.from('compras_ordens').select('*').eq('id', id).single();
+    if (ordemError || !ordem) throw ordemError || new Error('OC não encontrada.');
+    const { data: pds, error: pdsError } = await supabase.from('compras_pds').select('*').eq('ordem_id', id);
+    if (pdsError) throw pdsError;
+
+    const plan = planManualOcStatusTransition(ordem, pds || [], targetStatus);
+    if (plan.action === 'NOOP') return res.status(200).json({ status: 'success', message: `A OC ${ordem.numero_oc} já está em ${targetStatus}. Nenhuma alteração foi necessária.`, data: { ordem, alterados: 0, preservados: (pds || []).length } });
+
+    const changedBefore = plan.action === 'PROMOTE_ODA' ? plan.promote : plan.cancel;
+    const ids = changedBefore.map((pd) => pd.id).filter(Boolean);
+    const now = new Date().toISOString();
+    if (ids.length) {
+      const pdPayload = plan.action === 'PROMOTE_ODA'
+        ? { status: 'ODA', status_grupo: 'ODA', ativo: true, updated_at: now }
+        : { status: 'CAN', status_grupo: 'CAN', ativo: false, cancelado_em: now, motivo_cancelamento: motivo, updated_at: now };
+      const { error: pdUpdateError } = await supabase.from('compras_pds').update(pdPayload).in('id', ids);
+      if (pdUpdateError) throw pdUpdateError;
+    }
+
+    const ordemPayload = plan.action === 'PROMOTE_ODA'
+      ? { status: 'ODA', ativo: true, updated_at: now }
+      : { status: 'CAN', ativo: false, cancelada_em: now, cancelada_por: req.user?.email || req.user?.sub || null, motivo_cancelamento: motivo, updated_at: now };
+    const { data: updatedOrder, error: updateOrderError } = await supabase.from('compras_ordens').update(ordemPayload).eq('id', id).select('*').single();
+    if (updateOrderError) {
+      await rollbackPdStatusRows(changedBefore).catch(() => {});
+      throw updateOrderError;
+    }
+
+    for (const pd of changedBefore) {
+      await registrarEventoPd(pd.id, req, plan.action === 'PROMOTE_ODA' ? 'OC_MANUAL_PROMOVIDA_ODA' : 'OC_MANUAL_CANCELADA', pd.status_grupo || pd.status, targetStatus, {
+        numero_oc: ordem.numero_oc,
+        origem: 'AJUSTE_MANUAL_OC',
+        motivo: motivo || null,
+      });
+    }
+
+    await auditCompra(req, plan.action === 'PROMOTE_ODA' ? 'OC_STATUS_PROMOVIDO_ODA' : 'OC_CANCELADA', 'OC', ordem.numero_oc, plan.action === 'PROMOTE_ODA'
+      ? `OC ${ordem.numero_oc} promovida manualmente de ${plan.current} para ODA; ${changedBefore.length} PD(s) acompanharam a transição.`
+      : `OC ${ordem.numero_oc} cancelada manualmente; ${changedBefore.length} PD(s) elegíveis foram cancelados.`, {
+        status_anterior: plan.current,
+        status_novo: targetStatus,
+        motivo: motivo || null,
+        pds_alterados: changedBefore.map((pd) => ({ id: pd.id, numero_pd: pd.numero_pd, status_anterior: pd.status_grupo || pd.status })),
+        pds_preservados: plan.preserved.map((pd) => ({ id: pd.id, numero_pd: pd.numero_pd, status: pd.status_grupo || pd.status })),
+      }, targetStatus === 'CAN' ? 'GOD' : 'PUBLIC');
+
+    return res.status(200).json({
+      status: 'success',
+      message: plan.action === 'PROMOTE_ODA'
+        ? `OC ${ordem.numero_oc} avançada para ODA. ${changedBefore.length} PD(s) vinculados foram promovidos; estágios mais avançados foram preservados.`
+        : `OC ${ordem.numero_oc} cancelada. ${changedBefore.length} PD(s) vinculados foram cancelados logicamente.`,
+      data: { ordem: updatedOrder, alterados: changedBefore.length, preservados: plan.preserved.length, plano: plan.action },
+    });
+  } catch (error) {
+    console.error('[SISHA][compras] transicionarStatusOrdem:', error);
+    return res.status(error.statusCode || 500).json({ status: 'error', message: error.message || 'Falha ao alterar situação da OC.' });
   }
 };
 

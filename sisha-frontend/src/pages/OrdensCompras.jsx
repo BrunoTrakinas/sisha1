@@ -84,6 +84,9 @@ export default function OrdensCompras() {
   const [pdManagerTarget, setPdManagerTarget] = useState(null);
   const [actionMenu, setActionMenu] = useState(null);
   const [moreTarget, setMoreTarget] = useState(null);
+  const [ocStatusTarget, setOcStatusTarget] = useState(null);
+  const [ocStatusReason, setOcStatusReason] = useState('');
+  const [ocStatusSaving, setOcStatusSaving] = useState(false);
 
   const ocUploadRef = useRef(null);
   const pdPipelineUploadRef = useRef(null);
@@ -426,18 +429,41 @@ export default function OrdensCompras() {
   };
 
 
-  const cancelarOc = async (ordem) => {
-    const motivo = window.prompt(`Motivo do cancelamento da OC ${ordem.numero_oc}:`);
-    if (!motivo) return;
-    const response = await apiFetch(`/purchases/ordens/${ordem.id}`, {
-      method: 'PUT',
-      headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ status: 'CAN', motivo_cancelamento: motivo }),
-    }, token);
-    const json = await response.json();
-    setMsg({ tipo: json.status === 'success' ? 'success' : 'error', texto: json.message });
-    carregar(q);
+  const abrirAlteracaoStatusOc = (ordem) => {
+    setOcStatusTarget(ordem);
+    setOcStatusReason('');
   };
+
+  const alterarStatusOc = async (novoStatus) => {
+    if (!ocStatusTarget || ocStatusSaving) return;
+    if (novoStatus === 'CAN' && !ocStatusReason.trim()) {
+      setMsg({ tipo: 'error', texto: 'Informe o motivo do cancelamento.' });
+      return;
+    }
+    const acao = novoStatus === 'ODA' ? 'avançar para ODA' : 'cancelar';
+    const ok = window.confirm(`Confirmar ${acao} a OC ${ocStatusTarget.numero_oc}? A alteração será aplicada ao ciclo canônico dos PDs vinculados e passará a valer no restante do SISHA.`);
+    if (!ok) return;
+    setOcStatusSaving(true);
+    try {
+      const response = await apiFetch(`/purchases/ordens/${ocStatusTarget.id}/status`, {
+        method: 'PUT',
+        headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ status: novoStatus, motivo: ocStatusReason.trim() || null }),
+      }, token);
+      const json = await response.json();
+      if (json.status !== 'success') throw new Error(json.message || 'Falha ao alterar situação da OC.');
+      setMsg({ tipo: 'success', texto: json.message });
+      setOcStatusTarget(null);
+      setOcStatusReason('');
+      carregar(q);
+    } catch (error) {
+      setMsg({ tipo: 'error', texto: error.message || 'Falha ao alterar situação da OC.' });
+    } finally {
+      setOcStatusSaving(false);
+    }
+  };
+
+  const cancelarOc = async (ordem) => abrirAlteracaoStatusOc(ordem);
 
   const excluir = async (tipo, id) => {
     const ok = window.confirm('Confirmar exclusão lógica? O histórico será preservado.');
@@ -635,6 +661,7 @@ export default function OrdensCompras() {
             {isOrderBook && <p className="text-xs font-black text-emerald-600 dark:text-emerald-300 mt-2 uppercase tracking-wider">Leitura importada do Order Book. Edição/correção deve ser feita pela fonte documental.</p>}
           </div>
           <div className="flex gap-2 flex-wrap">
+            {isAdmin && !isOrderBook && ordem.status !== 'CAN' && <button onClick={() => abrirAlteracaoStatusOc(ordem)} className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-black text-xs hover:bg-emerald-700">ALTERAR SITUAÇÃO</button>}
             {isAdmin && !isOrderBook && ordem.status !== 'CAN' && <button onClick={() => abrirSuplementacao('oc', ordem)} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-black text-xs hover:bg-blue-700">SUPLEMENTAÇÃO</button>}
             {isAdmin && !isOrderBook && ordem.status !== 'CAN' && <button onClick={() => setPdManagerTarget(ordem)} className="px-4 py-2 rounded-xl bg-slate-700 text-white font-black text-xs hover:bg-slate-600 flex items-center gap-2"><Link2 size={14} /> GERENCIAR PDs</button>}
             <button onClick={() => baixarExportacao(`/purchases/ordens/${encodeURIComponent(ordem.id)}/export`, `OC_${ordem.numero_oc || ordem.id}.xlsx`)} className="px-4 py-2 rounded-xl bg-slate-700 text-white font-black text-xs hover:bg-slate-600 flex items-center gap-2"><Download size={14} /> EXPORTAR</button>
@@ -789,7 +816,8 @@ export default function OrdensCompras() {
             <SummaryMiniCard title="COT / LPC" value={pdPipeline.cotacao_lpc || 0} subtitle="Cotação e liberação" />
             <SummaryMiniCard title="PD sem OC" value={pdPipeline.sem_oc || 0} subtitle="Ainda sem vínculo com OC" />
             <SummaryMiniCard title="ODC" value={pdPipeline.odc || 0} subtitle="Com OC, ainda não promovidos a ODA" />
-            <SummaryMiniCard title="ODA / FAT / EMB" value={pdPipeline.oda || 0} subtitle="Aprovados/avançados, ainda sem recebimento" />
+            <SummaryMiniCard title="ODA" value={pdPipeline.oda || 0} subtitle="Aprovados, ainda não faturados ou embarcados" />
+            <SummaryMiniCard title="FAT / EMB" value={pdPipeline.fat_emb || 0} subtitle="Faturados ou embarcados, ainda sem recebimento físico" />
             <SummaryMiniCard title="ENTREGA PARCIAL" value={pdPipeline.entrega_parcial || 0} subtitle="Recebido em parte; ainda há saldo" />
             <SummaryMiniCard title="ENTREGUE" value={pdPipeline.entregue || 0} subtitle="Quantidade recebida atingiu o pedido" />
             <SummaryMiniCard title="CAN" value={pdPipeline.cancelados || 0} subtitle="Cancelados / excluídos logicamente" />
@@ -883,6 +911,26 @@ export default function OrdensCompras() {
               <button type="button" onClick={() => { const { tipo, item } = moreTarget; setMoreTarget(null); excluir(tipo, item.id); }} className="p-3 rounded-xl bg-red-600 text-white font-black"><Trash2 size={14} className="inline mr-2" /> EXCLUIR LOGICAMENTE</button>
               <button type="button" onClick={() => setMoreTarget(null)} className="p-3 rounded-xl bg-slate-200 dark:bg-slate-800 font-black">VOLTAR</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {ocStatusTarget && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className={`${modalPanelClass} max-w-xl`}>
+            <div>
+              <h3 className="text-xl font-black uppercase">Alterar situação da OC {ocStatusTarget.numero_oc}</h3>
+              <p className="text-sm font-bold text-slate-500 dark:text-slate-400 mt-1">Situação atual: <strong>{ocStatusTarget.status}</strong>. Esta ação altera o ciclo canônico dos PDs vinculados e passa a valer nas consultas do SISHA.</p>
+            </div>
+            <div className="rounded-2xl border border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/20 p-4 text-xs font-bold text-blue-900 dark:text-blue-100">
+              Ao avançar para ODA, PDs ainda em ODC acompanham a OC. FAT, EMB e REC nunca são regredidos. O cancelamento é bloqueado se já houver FAT, EMB, REC ou recebimento físico.
+            </div>
+            <label><span className={modalLabelClass}>Motivo / observação</span><textarea value={ocStatusReason} onChange={(e) => setOcStatusReason(e.target.value)} placeholder="Obrigatório para cancelamento; opcional para avanço a ODA" className={modalTextAreaClass} /></label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {['ODC', 'ODA_RESSALVA', 'ADP'].includes(String(ocStatusTarget.status || '').toUpperCase()) && <button type="button" disabled={ocStatusSaving} onClick={() => alterarStatusOc('ODA')} className="p-3 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-50">AVANÇAR PARA ODA</button>}
+              <button type="button" disabled={ocStatusSaving} onClick={() => alterarStatusOc('CAN')} className="p-3 rounded-xl bg-red-600 text-white font-black disabled:opacity-50">CANCELAR OC</button>
+            </div>
+            <button type="button" disabled={ocStatusSaving} onClick={() => { setOcStatusTarget(null); setOcStatusReason(''); }} className="p-3 rounded-xl bg-slate-200 dark:bg-slate-800 font-black">VOLTAR</button>
           </div>
         </div>
       )}

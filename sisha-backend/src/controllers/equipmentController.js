@@ -14,6 +14,7 @@ const {
   applyEquipmentInventory,
   listEquipmentReconciliation,
   listEquipmentInventoryImports,
+  enrichMissingNomenclatures,
 } = require('../services/equipmentService');
 const { registrarAuditoria } = require('../utils/auditLogger');
 const { parseEquipmentInventory, parseEquipmentMaster } = require('../utils/equipmentInventoryParser');
@@ -36,6 +37,26 @@ exports.listar = async (req, res) => {
   } catch (error) {
     console.error('[SISHA][equipamentos] listar:', error);
     return replyError(res, error, 'Falha ao consultar equipamentos.');
+  }
+};
+
+exports.enriquecerNomenclaturas = async (req, res) => {
+  try {
+    const dryRun = String(req.body?.dry_run || '').toLowerCase() === 'true';
+    const result = await enrichMissingNomenclatures(req.user || {}, { dryRun });
+    await registrarAuditoria({
+      req,
+      action: dryRun ? 'EQUIPAMENTO_NOMENCLATURA_PREFLIGHT' : 'EQUIPAMENTO_NOMENCLATURA_ENRIQUECIDA',
+      entity: 'EQUIPAMENTO_SERIALIZADO',
+      entityId: 'PN_NOMENCLATURA',
+      summary: dryRun ? `Prévia de nomenclaturas: ${result.matched} equipamento(s) possuem nome técnico resolvido.` : `${result.updated} equipamento(s) sem nome foram enriquecidos por PN usando Dicionário/Manual Técnico.`,
+      details: result,
+      visibility: 'PUBLIC',
+    });
+    return res.status(200).json({ status: 'success', message: dryRun ? `${result.matched} equipamento(s) podem receber nomenclatura por PN.` : `${result.updated} equipamento(s) receberam nomenclatura técnica. ${result.unresolved} permaneceram sem fonte segura.`, data: result });
+  } catch (error) {
+    console.error('[SISHA][equipamentos] enriquecer nomenclaturas:', error);
+    return replyError(res, error, 'Falha ao enriquecer nomenclaturas por PN.');
   }
 };
 

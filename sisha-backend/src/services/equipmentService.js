@@ -1,6 +1,6 @@
 const supabase = require('../config/supabaseClient');
 const { getSupabaseAdmin } = require('../config/supabaseAdminClient');
-const { buildEquipmentDossierSummary } = require('./equipmentDossierService');
+const { buildEquipmentDossierSummary, enrichEquipmentRowsWithDossier } = require('./equipmentDossierService');
 
 const MAX_LIST = 500;
 
@@ -86,6 +86,91 @@ function chunkArray(items = [], size = 250) {
   return chunks;
 }
 
+
+function chooseTechnicalNomenclature(row = {}) {
+  return cleanText(row.nomenclatura || row.techname || row.descricao || row.description);
+}
+
+async function resolveNomenclaturesByPn(pns = []) {
+  const uniquePns = [...new Set((pns || []).map(normalizeCode).filter(Boolean))];
+  const found = new Map();
+  for (const chunk of chunkArray(uniquePns, 150)) {
+    const { data, error } = await supabase.from('dicionario_mestre').select('pn,nomenclatura,techname').in('pn', chunk);
+    if (!error) (data || []).forEach((row) => {
+      const pn = normalizeCode(row.pn);
+      const name = chooseTechnicalNomenclature(row);
+      if (pn && name && !found.has(pn)) found.set(pn, { nomenclatura: name, fonte: 'DICIONARIO_MESTRE' });
+    });
+  }
+  const missing = uniquePns.filter((pn) => !found.has(pn));
+  for (const chunk of chunkArray(missing, 150)) {
+    const { data, error } = await supabase.from('v_sisha_manual_pn_aplicacao').select('pn,nomenclatura,manual_codigo,revisao').in('pn', chunk).limit(3000);
+    if (!error) (data || []).forEach((row) => {
+      const pn = normalizeCode(row.pn);
+      const name = chooseTechnicalNomenclature(row);
+      if (pn && name && !found.has(pn)) found.set(pn, { nomenclatura: name, fonte: row.manual_codigo ? `MANUAL_${row.manual_codigo}` : 'WTP_MANUAL_TECNICO' });
+    });
+  }
+  return found;
+}
+
+async function enrichRowsWithResolvedNomenclature(rows = []) {
+  const missingPns = (rows || []).filter((row) => !cleanText(row.nomenclatura)).map((row) => row.pn);
+  if (!missingPns.length) return rows || [];
+  const names = await resolveNomenclaturesByPn(missingPns);
+  return (rows || []).map((row) => {
+    if (cleanText(row.nomenclatura)) return { ...row, nomenclatura_resolvida: row.nomenclatura, fonte_nomenclatura: 'CADASTRO_EQUIPAMENTO' };
+    const resolved = names.get(normalizeCode(row.pn));
+    return { ...row, nomenclatura_resolvida: resolved?.nomenclatura || null, fonte_nomenclatura: resolved?.fonte || null };
+  });
+}
+
+async function syncNomenclatureByPn(pn, nomenclatura, user = {}, { onlyMissing = false } = {}) {
+  const normalizedPn = normalizeCode(pn);
+  const name = cleanText(nomenclatura);
+  if (!normalizedPn || !name) return { updated: 0, pn: normalizedPn, nomenclatura: name };
+  let query = supabase.from('equipamentos_serializados').select('id,pn,sn,nomenclatura').ilike('pn', normalizedPn).limit(5000);
+  const { data: rows, error } = await query;
+  if (error) throw error;
+  const targets = (rows || []).filter((row) => !onlyMissing || !cleanText(row.nomenclatura));
+  const ids = targets.filter((row) => normalizeComparable(row.nomenclatura) !== normalizeComparable(name)).map((row) => row.id);
+  if (!ids.length) return { updated: 0, pn: normalizedPn, nomenclatura: name };
+  const { error: updateError } = await supabase.from('equipamentos_serializados').update({ nomenclatura: name, atualizado_por: user.email || null, updated_at: new Date().toISOString() }).in('id', ids);
+  if (updateError) throw updateError;
+  return { updated: ids.length, pn: normalizedPn, nomenclatura: name, equipment_ids: ids };
+}
+
+async function enrichMissingNomenclatures(user = {}, { dryRun = false } = {}) {
+  const rows = [];
+  const pageSize = 1000;
+  for (let offset = 0; offset < 10000; offset += pageSize) {
+    const { data, error } = await supabase.from('equipamentos_serializados').select('id,pn,sn,nomenclatura,ativo').range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    rows.push(...(data || []));
+    if ((data || []).length < pageSize) break;
+  }
+  const missing = rows.filter((row) => row.ativo !== false && !cleanText(row.nomenclatura) && normalizeCode(row.pn));
+  const names = await resolveNomenclaturesByPn(missing.map((row) => row.pn));
+  const byName = new Map();
+  const unresolved = [];
+  missing.forEach((row) => {
+    const resolved = names.get(normalizeCode(row.pn));
+    if (!resolved?.nomenclatura) { unresolved.push({ id: row.id, pn: row.pn, sn: row.sn }); return; }
+    const key = `${normalizeCode(row.pn)}|${resolved.nomenclatura}`;
+    if (!byName.has(key)) byName.set(key, { pn: normalizeCode(row.pn), name: resolved.nomenclatura, source: resolved.fonte, ids: [] });
+    byName.get(key).ids.push(row.id);
+  });
+  let updated = 0;
+  if (!dryRun) {
+    for (const group of byName.values()) {
+      const { error } = await supabase.from('equipamentos_serializados').update({ nomenclatura: group.name, atualizado_por: user.email || null, updated_at: new Date().toISOString() }).in('id', group.ids);
+      if (error) throw error;
+      updated += group.ids.length;
+    }
+  }
+  return { missing: missing.length, matched: [...byName.values()].reduce((sum, group) => sum + group.ids.length, 0), updated: dryRun ? 0 : updated, unresolved: unresolved.length, sources: [...new Set([...byName.values()].map((group) => group.source))] };
+}
+
 async function listEquipments({ q = '', limit = 250 } = {}) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 250, MAX_LIST));
   let query = supabase
@@ -103,7 +188,9 @@ async function listEquipments({ q = '', limit = 250 } = {}) {
   // A view atual pode ou não expor `ativo`. Quando expõe, equipamentos arquivados
   // deixam de aparecer nas consultas de rotina. Quando não expõe, mantemos
   // compatibilidade com a definição já existente da view.
-  return (data || []).filter((item) => item?.ativo !== false);
+  const activeRows = (data || []).filter((item) => item?.ativo !== false);
+  const namedRows = await enrichRowsWithResolvedNomenclature(activeRows);
+  return enrichEquipmentRowsWithDossier(namedRows);
 }
 
 async function getEquipment(id) {
@@ -207,6 +294,7 @@ async function createEquipment(input = {}, user = {}) {
     if (error) throw error;
     const equipmentId = data?.equipment_id || data?.equipment?.id;
     if (!equipmentId) throw new Error('RPC H4B não retornou o equipamento criado.');
+    if (payload.nomenclatura) await syncNomenclatureByPn(payload.pn, payload.nomenclatura, user);
     return getEquipment(equipmentId);
   }
 
@@ -224,6 +312,7 @@ async function createEquipment(input = {}, user = {}) {
   if (error) throw error;
 
   if (initialEvent) await addProjectedEvent(data.id, initialEvent, user);
+  if (payload.nomenclatura) await syncNomenclatureByPn(payload.pn, payload.nomenclatura, user);
   return getEquipment(data.id);
 }
 
@@ -309,6 +398,7 @@ async function updateEquipment(id, input = {}, user = {}) {
       p_user_email: user.email || null,
     });
     if (error) throw error;
+    if (Object.prototype.hasOwnProperty.call(input, 'nomenclatura') && payload.nomenclatura) await syncNomenclatureByPn(payload.pn, payload.nomenclatura, user);
     return getEquipment(id);
   }
 
@@ -322,6 +412,7 @@ async function updateEquipment(id, input = {}, user = {}) {
     if (stateChanged) await addProjectedEvent(id, correctionEvent, user);
     else await addEvent(id, correctionEvent, user);
   }
+  if (Object.prototype.hasOwnProperty.call(input, 'nomenclatura') && payload.nomenclatura) await syncNomenclatureByPn(payload.pn, payload.nomenclatura, user);
   return getEquipment(id);
 }
 
@@ -1106,4 +1197,7 @@ module.exports = {
   applyEquipmentInventory,
   listEquipmentReconciliation,
   listEquipmentInventoryImports,
+  resolveNomenclaturesByPn,
+  syncNomenclatureByPn,
+  enrichMissingNomenclatures,
 };

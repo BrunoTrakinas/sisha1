@@ -2,6 +2,7 @@ const supabase = require('../config/supabaseClient');
 const { resolvePnRelations } = require('./pnRelationsService');
 const { loadEffectivePpuRowsByPns } = require('./ppuEffectiveAvailabilityService');
 const { sourcePublicLabel } = require('./chatLinceEvidenceTrustService');
+const { structuredSerialsByPn } = require('./chatLinceUniversalAnalystService');
 
 const SENSITIVE_TERMS = [
   'SENHA', 'PASSWORD', 'TOKEN', 'JWT', 'LOGIN', 'LOGINS', 'PERFIL', 'PERFIS',
@@ -892,8 +893,19 @@ async function answerWithDbTools(question = '', user = null) {
   }
 
   let result = null;
+  const serialLookup = await structuredSerialsByPn(question).catch(() => null);
+  if (serialLookup) {
+    modules.consulta_pn = true;
+    modules.equipamentos = true;
+    result = {
+      answer: serialLookup.answer,
+      intent: 'CONSULTA_SN_POR_PN',
+      tokens: serialLookup.tokens || [],
+      structured: serialLookup.structured || null,
+    };
+  }
   if (isDossierQuestion(question)) {
-    result = await runDossierTool(question, sources, modules);
+    if (!result) result = await runDossierTool(question, sources, modules);
   }
   if (!result && isEquipmentRegistryQuestion(question)) {
     result = await runEquipmentRegistryTool(question, sources, modules);
@@ -937,6 +949,8 @@ async function answerWithDbTools(question = '', user = null) {
         helpdesk: null,
         indisponiveis: [],
       },
+      resultado_estruturado: result.structured || null,
+      exportavel: true,
     },
   };
 }

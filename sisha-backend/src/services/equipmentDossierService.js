@@ -38,6 +38,76 @@ function compareEventDesc(a = {}, b = {}) {
   return Number(b.id || 0) - Number(a.id || 0);
 }
 
+
+function normalizeMovementKind(event = {}) {
+  const tipo = normalizeUpper(event.tipo_evento);
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const declared = normalizeUpper(payload?.master_os?.movimento?.tipo || payload?.os_pim?.tipo_movimento || '');
+  const text = `${tipo} ${declared}`;
+  if (text.includes('INSTALACAO')) return 'INSTALACAO';
+  if (text.includes('REMOCAO')) return 'REMOCAO';
+  if (text.includes('TRANSFER')) return 'TRANSFERENCIA';
+  return null;
+}
+
+function extractAircraftFromEvent(event = {}, kind = '') {
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const candidates = kind === 'INSTALACAO'
+    ? [event.anv_destino, event.anv, payload?.os_pim?.anv_destino, payload?.os_pim?.aeronave, payload?.master_os?.dominio_codigo]
+    : [event.anv, payload?.os_pim?.anv_origem, payload?.os_pim?.aeronave, payload?.master_os?.source_aircraft, payload?.master_os?.dominio_codigo];
+  const direct = candidates.find((value) => String(value || '').trim());
+  if (direct) return String(direct).trim().replace(/^N[-\s]*/i, '');
+  const text = `${event.local_origem || ''} ${event.local_destino || ''}`;
+  const match = text.match(/(?:AERONAVE|ANV|N[-\s]*)\s*(4001|4003|4004|4005|4006|4009|4010|4012)/i);
+  return match?.[1] || null;
+}
+
+function buildLatestMovementSummary(events = []) {
+  const valid = [...(events || [])].filter((event) => !event.invalidado).sort(compareEventDesc);
+  const event = valid.find((candidate) => normalizeMovementKind(candidate));
+  if (!event) return null;
+  const kind = normalizeMovementKind(event);
+  const aircraft = extractAircraftFromEvent(event, kind);
+  const destinationKnown = Boolean(event.local_destino || event.anv_destino || (normalizeUpper(event.categoria_destino) && normalizeUpper(event.categoria_destino) !== 'DESCONHECIDO'));
+  const originKnown = Boolean(event.local_origem || aircraft || (normalizeUpper(event.categoria_origem) && normalizeUpper(event.categoria_origem) !== 'DESCONHECIDO'));
+  let leitura = 'Movimentação operacional registrada.';
+  let estado = 'MOVIMENTACAO_CONFIRMADA';
+  if (kind === 'INSTALACAO') {
+    estado = aircraft ? 'INSTALADO_EM_AERONAVE' : 'INSTALACAO_CONFIRMADA';
+    leitura = aircraft ? `Instalação confirmada na aeronave ${aircraft}.` : 'Instalação confirmada; aeronave não identificada na evidência.';
+  } else if (kind === 'REMOCAO') {
+    if (aircraft && !destinationKnown) {
+      estado = 'REMOVIDO_DA_AERONAVE_DESTINO_A_CONFIRMAR';
+      leitura = `Remoção confirmada da aeronave ${aircraft}; destino após a remoção ainda não foi determinado.`;
+    } else if (aircraft) {
+      estado = 'REMOVIDO_DA_AERONAVE';
+      leitura = `Remoção confirmada da aeronave ${aircraft}${event.local_destino ? ` com destino ${event.local_destino}` : ''}.`;
+    } else {
+      estado = destinationKnown ? 'REMOCAO_CONFIRMADA' : 'REMOCAO_DESTINO_A_CONFIRMAR';
+      leitura = destinationKnown ? `Remoção confirmada com destino ${event.local_destino || event.categoria_destino}.` : 'Remoção confirmada; origem/destino físico ainda não estão totalmente determinados.';
+    }
+  } else if (kind === 'TRANSFERENCIA') {
+    estado = destinationKnown ? 'TRANSFERENCIA_CONFIRMADA' : 'TRANSFERENCIA_DESTINO_A_CONFIRMAR';
+    leitura = destinationKnown ? `Transferência registrada para ${event.local_destino || event.categoria_destino}.` : 'Transferência registrada; destino ainda não determinado.';
+  }
+  return {
+    tipo: kind,
+    estado,
+    leitura,
+    data: event.data_evento || null,
+    aeronave: aircraft,
+    origem: event.local_origem || event.categoria_origem || null,
+    destino: event.local_destino || event.anv_destino || event.categoria_destino || null,
+    origem_conhecida: originKnown,
+    destino_conhecido: destinationKnown,
+    documento: event.documento || (event.os ? `OS ${event.os}` : event.pim ? `PIM ${event.pim}` : null),
+    documento_tipo: event.documento_tipo || null,
+    motivo: event.motivo || null,
+    confianca: event.confianca || null,
+    evento_id: event.id || null,
+  };
+}
+
 function buildEquipmentDossierSummary(equipment = {}, events = []) {
   const sorted = [...(events || [])].sort(compareEventDesc);
   const valid = sorted.filter((event) => !event.invalidado);
@@ -52,6 +122,7 @@ function buildEquipmentDossierSummary(equipment = {}, events = []) {
   const chronological = [...valid].sort((a, b) => new Date(a.data_evento || 0).getTime() - new Date(b.data_evento || 0).getTime());
   const firstEvent = chronological[0] || null;
   const latestEvent = valid[0] || null;
+  const latestMovement = buildLatestMovementSummary(valid);
 
   return {
     eventos_total: sorted.length,
@@ -65,6 +136,8 @@ function buildEquipmentDossierSummary(equipment = {}, events = []) {
     ultimo_evento_documento: latestEvent?.documento || equipment.ultima_evidencia_documento || null,
     localizacao_status: pendingConflicts.length > 0 ? 'CONFLITO' : isKnownLocation(equipment) ? 'CONHECIDA' : 'DESCONHECIDA',
     historico_disponivel: sorted.length > 0,
+    ultimo_movimento: latestMovement,
+    leitura_operacional: latestMovement?.leitura || null,
   };
 }
 
@@ -109,4 +182,5 @@ module.exports = {
   buildEquipmentDossierSummary,
   enrichEquipmentRowsWithDossier,
   sourceLabelsFromEvent,
+  buildLatestMovementSummary,
 };

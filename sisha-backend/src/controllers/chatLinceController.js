@@ -29,6 +29,16 @@ const { registrarAuditoria } = require('../utils/auditLogger');
 const { extractLegacyDocText } = require('../services/receiptDocumentParser');
 const { extractOfficeDocument } = require('../utils/officeDocumentText');
 const { publicChatLinceSecurityReadiness } = require('../services/chatLinceSecurityReadinessService');
+const {
+  spreadsheetRecords,
+  analysisRecords,
+  compareRecordsWithSisha,
+} = require('../services/chatLinceUniversalAnalystService');
+const {
+  createXlsxBuffer,
+  createPdfBuffer,
+  fileNameFor,
+} = require('../services/chatLinceReportService');
 
 function extractJpegImagesFromPdfBuffer(buffer, maxImages = 8) {
   const images = [];
@@ -196,6 +206,57 @@ async function extractTextFromFile(file, tipoDocumento = '') {
 }
 
 
+
+function analystReportFromConsult(question, data = {}) {
+  if (data?.resultado_estruturado?.rows) {
+    return {
+      ...data.resultado_estruturado,
+      question: data.resultado_estruturado.question || question,
+      answer: data.resposta || '',
+      sources: data.resultado_estruturado.sources || data?.contexto?.fontes || [],
+    };
+  }
+  return {
+    title: 'Consulta Chat Lince',
+    question,
+    summary: data?.resposta || 'Consulta concluída sem linhas estruturadas.',
+    answer: data?.resposta || '',
+    columns: ['Resposta'],
+    rows: [{ Resposta: data?.resposta || '' }],
+    sources: data?.contexto?.fontes || [],
+    fileBase: 'SISHA_Consulta_Chat_Lince',
+  };
+}
+
+function sendAnalystExport(res, report, requestedFormat = 'xlsx') {
+  const format = String(requestedFormat || 'xlsx').toLowerCase() === 'pdf' ? 'pdf' : 'xlsx';
+  const buffer = format === 'pdf' ? createPdfBuffer(report) : createXlsxBuffer(report);
+  const filename = fileNameFor(report, format);
+  res.setHeader('Content-Type', format === 'pdf'
+    ? 'application/pdf'
+    : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).send(buffer);
+}
+
+async function analystRecordsFromUploadedFile(file, question = '') {
+  const name = String(file?.originalname || '').toLowerCase();
+  if (/\.(xlsx|xls|csv|ods)$/i.test(name)) {
+    return spreadsheetRecords(file);
+  }
+  const text = await extractTextFromFile(file, 'AUDITORIA_COMPARATIVA');
+  const clean = compactText(text, 50000);
+  if (!clean) return [];
+  const analysis = await analyzeDocumentWithAi({
+    tipoDocumento: 'AUDITORIA_COMPARATIVA',
+    text: clean,
+    fileName: file?.originalname || 'documento',
+    instruction: question,
+  });
+  return analysisRecords(analysis);
+}
+
 exports.securityReadiness = async (_req, res) => {
   try {
     return res.status(200).json({
@@ -281,6 +342,83 @@ exports.perguntar = async (req, res) => {
   } catch (error) {
     console.error('[Chat Lince] Falha consultiva:', error);
     return res.status(500).json({ status: 'error', message: 'Falha ao consultar o Chat Lince.' });
+  }
+};
+
+
+exports.exportarConsultaAnalista = async (req, res) => {
+  try {
+    const perguntaRecebida = String(req.body?.pergunta || '').trim();
+    const format = String(req.body?.formato || 'xlsx').toLowerCase();
+    const safety = inspectUserPrompt(perguntaRecebida);
+    if (!safety.allowed) {
+      return res.status(400).json({ status: 'error', code: `CHAT_LINCE_${safety.code}`, message: safety.publicMessage });
+    }
+    if (!safety.normalized) return res.status(400).json({ status: 'error', message: 'Informe a pergunta que será exportada.' });
+    const data = await answerConsultQuestion(safety.normalized, req.user);
+    const report = analystReportFromConsult(safety.normalized, data);
+    await registrarAuditoria({
+      req,
+      action: 'CHAT_LINCE_CONSULTA_EXPORTADA',
+      entity: 'CHAT_LINCE',
+      entityId: safety.normalized.slice(0, 120),
+      summary: `${req.user?.email || 'Usuário'} exportou uma consulta do Chat Lince em ${format === 'pdf' ? 'PDF' : 'Excel'}.`,
+      details: { formato: format === 'pdf' ? 'pdf' : 'xlsx', pergunta: safety.normalized.slice(0, 1000), linhas: report.rows?.length || 0 },
+      level: 'INFO',
+      visibility: 'GOD',
+    }).catch(() => null);
+    return sendAnalystExport(res, report, format);
+  } catch (error) {
+    console.error('[Chat Lince] Falha ao exportar consulta:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao exportar a consulta do Chat Lince.' });
+  }
+};
+
+exports.auditarDocumentoComparandoSisha = async (req, res) => {
+  try {
+    const perguntaRecebida = String(req.body?.pergunta || '').trim();
+    const safety = inspectUserPrompt(perguntaRecebida || 'Compare o documento com o SISHA.');
+    if (!safety.allowed) return res.status(400).json({ status: 'error', code: `CHAT_LINCE_${safety.code}`, message: safety.publicMessage });
+    if (!req.file?.buffer) return res.status(400).json({ status: 'error', message: 'Envie um documento para a auditoria comparativa.' });
+    const records = await analystRecordsFromUploadedFile(req.file, safety.normalized || perguntaRecebida);
+    if (!records.length) {
+      return res.status(422).json({
+        status: 'error',
+        message: 'Não identifiquei PN, SN ou PI/NSN suficientes para comparar este documento com o SISHA. Para planilhas, mantenha uma coluna de PN, SN ou PI/NSN.',
+      });
+    }
+    const report = await compareRecordsWithSisha(records, safety.normalized || perguntaRecebida);
+    await registrarAuditoria({
+      req,
+      action: 'CHAT_LINCE_AUDITORIA_COMPARATIVA',
+      entity: 'CHAT_LINCE',
+      entityId: req.file.originalname || 'documento',
+      summary: `${req.user?.email || 'Usuário'} comparou um documento com as fontes operacionais do SISHA em modo somente leitura.`,
+      details: { nome_arquivo: req.file.originalname || null, registros_documento: records.length, linhas_resultado: report.rows?.length || 0, pergunta: (safety.normalized || '').slice(0, 1000) },
+      level: 'INFO',
+      visibility: 'GOD',
+    }).catch(() => null);
+    return res.status(200).json({ status: 'success', data: { resposta: report.summary, resultado_estruturado: report, exportavel: true } });
+  } catch (error) {
+    console.error('[Chat Lince] Falha na auditoria comparativa:', error);
+    return res.status(error.statusCode || 500).json({ status: 'error', message: error.publicMessage || 'Falha ao comparar o documento com o SISHA.' });
+  }
+};
+
+exports.exportarAuditoriaComparativa = async (req, res) => {
+  try {
+    const perguntaRecebida = String(req.body?.pergunta || '').trim();
+    const format = String(req.body?.formato || 'xlsx').toLowerCase();
+    const safety = inspectUserPrompt(perguntaRecebida || 'Compare o documento com o SISHA.');
+    if (!safety.allowed) return res.status(400).json({ status: 'error', code: `CHAT_LINCE_${safety.code}`, message: safety.publicMessage });
+    if (!req.file?.buffer) return res.status(400).json({ status: 'error', message: 'Envie novamente o documento para gerar o relatório.' });
+    const records = await analystRecordsFromUploadedFile(req.file, safety.normalized || perguntaRecebida);
+    if (!records.length) return res.status(422).json({ status: 'error', message: 'O documento não possui PN, SN ou PI/NSN identificável para exportação comparativa.' });
+    const report = await compareRecordsWithSisha(records, safety.normalized || perguntaRecebida);
+    return sendAnalystExport(res, report, format);
+  } catch (error) {
+    console.error('[Chat Lince] Falha ao exportar auditoria:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao exportar a auditoria comparativa.' });
   }
 };
 

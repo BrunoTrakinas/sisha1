@@ -130,7 +130,7 @@ export default function ChatLince() {
   const [mensagens, setMensagens] = useState([
     {
       role: 'assistant',
-      content: 'Olá! Sou o Chat Lince. Posso consultar PN, SN, OC, PD, WO, Política de Estoque, Custo Operacional, Gerador de Necessidades e também buscar no manual onde um item é aplicado, usado ou instalado. Quando eu não encontrar resposta, abro uma pendência para análise do PPU/Admin.',
+      content: 'Olá! Sou o Chat Lince. Posso consultar PN, SN, OC, PD, WO, PPU, equipamentos, Política de Estoque, Custo Operacional, Gerador de Necessidades, manuais técnicos e cruzar documentos com o SISHA. Também posso exportar análises em Excel ou PDF. Quando eu não encontrar resposta, abro uma pendência para análise do PPU/Admin.',
     },
   ]);
   const [consultando, setConsultando] = useState(false);
@@ -155,6 +155,14 @@ export default function ChatLince() {
   const [acaoMsg, setAcaoMsg] = useState(null);
   const [reindexandoRag, setReindexandoRag] = useState(false);
   const [ragMsg, setRagMsg] = useState(null);
+  const [ultimaPerguntaExportavel, setUltimaPerguntaExportavel] = useState('');
+  const [exportandoConsulta, setExportandoConsulta] = useState('');
+  const [arquivoAuditoria, setArquivoAuditoria] = useState(null);
+  const [perguntaAuditoria, setPerguntaAuditoria] = useState('');
+  const [auditandoDocumento, setAuditandoDocumento] = useState(false);
+  const [auditoriaComparativa, setAuditoriaComparativa] = useState(null);
+  const [auditoriaMsg, setAuditoriaMsg] = useState(null);
+  const [exportandoAuditoria, setExportandoAuditoria] = useState('');
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -185,6 +193,7 @@ export default function ChatLince() {
     setApelidoPendente(null);
     setUltimoItemContexto(null);
     setAcaoPendente(null);
+    setUltimaPerguntaExportavel('');
     limparComposer();
   };
 
@@ -299,6 +308,7 @@ export default function ChatLince() {
     setModulos(result.data?.contexto?.modulos || null);
     setTrilhaSn(result.data?.contexto?.trilha_sn || []);
     setAplicacoesManual(result.data?.contexto?.aplicacoes_manual || []);
+    setUltimaPerguntaExportavel(textoOriginal || result.data?.resultado_estruturado?.question || '');
   };
 
   const confirmarApelidoPendente = async () => {
@@ -403,6 +413,94 @@ export default function ChatLince() {
       setMensagens((prev) => [...prev, { role: 'assistant', content: 'Falha de comunicação com o servidor.' }]);
     } finally {
       setConsultando(false);
+    }
+  };
+
+  const baixarResposta = async (response, fallbackName) => {
+    if (!response.ok) {
+      let message = 'Falha ao gerar o arquivo.';
+      try { const body = await response.json(); message = body.message || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const fileName = match?.[1] || fallbackName;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportarUltimaConsulta = async (formato) => {
+    if (!ultimaPerguntaExportavel || exportandoConsulta) return;
+    setExportandoConsulta(formato);
+    try {
+      const response = await apiFetch(
+        '/chat-lince/analista/exportar',
+        {
+          method: 'POST',
+          headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ pergunta: ultimaPerguntaExportavel, formato }),
+        },
+        token
+      );
+      await baixarResposta(response, `SISHA_Chat_Lince.${formato === 'pdf' ? 'pdf' : 'xlsx'}`);
+    } catch (error) {
+      setMensagens((prev) => [...prev, { role: 'assistant', content: error.message || 'Não consegui exportar a consulta.' }]);
+    } finally {
+      setExportandoConsulta('');
+    }
+  };
+
+  const auditarComparandoSisha = async (event) => {
+    event.preventDefault();
+    if (!arquivoAuditoria || auditandoDocumento) return;
+    setAuditandoDocumento(true);
+    setAuditoriaMsg(null);
+    setAuditoriaComparativa(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', arquivoAuditoria);
+      formData.append('pergunta', perguntaAuditoria.trim() || 'Compare este documento com o SISHA e aponte o que está confirmado, ausente ou divergente.');
+      const response = await apiFetch(
+        '/chat-lince/analista/auditar',
+        { method: 'POST', headers: buildAuthHeaders(token), body: formData },
+        token
+      );
+      const result = await response.json();
+      if (result.status !== 'success') throw new Error(result.message || 'Falha na auditoria comparativa.');
+      setAuditoriaComparativa(result.data?.resultado_estruturado || null);
+      setAuditoriaMsg({ tipo: 'success', texto: result.data?.resposta || 'Auditoria comparativa concluída.' });
+    } catch (error) {
+      setAuditoriaMsg({ tipo: 'error', texto: error.message || 'Falha ao comparar o documento com o SISHA.' });
+    } finally {
+      setAuditandoDocumento(false);
+    }
+  };
+
+  const exportarAuditoria = async (formato) => {
+    if (!arquivoAuditoria || exportandoAuditoria) return;
+    setExportandoAuditoria(formato);
+    try {
+      const formData = new FormData();
+      formData.append('file', arquivoAuditoria);
+      formData.append('pergunta', perguntaAuditoria.trim() || 'Compare este documento com o SISHA e aponte o que está confirmado, ausente ou divergente.');
+      formData.append('formato', formato);
+      const response = await apiFetch(
+        '/chat-lince/analista/auditar/exportar',
+        { method: 'POST', headers: buildAuthHeaders(token), body: formData },
+        token
+      );
+      await baixarResposta(response, `SISHA_Auditoria_Comparativa.${formato === 'pdf' ? 'pdf' : 'xlsx'}`);
+    } catch (error) {
+      setAuditoriaMsg({ tipo: 'error', texto: error.message || 'Falha ao exportar a auditoria.' });
+    } finally {
+      setExportandoAuditoria('');
     }
   };
 
@@ -695,7 +793,7 @@ export default function ChatLince() {
                     value={pergunta}
                     onChange={(e) => { setPergunta(e.target.value); resizeComposer(e.target); }}
                     onKeyDown={onComposerKeyDown}
-                    placeholder="Pergunte sobre PN, SN, localização, Master OS, PIM, STC, WO, PD/OC, Recibos ou manuais..."
+                    placeholder="Pergunte livremente sobre PN, SN, PPU, localização, Master OS, PIM, WO, PD/OC, Recibos, WTP ou peça uma análise..."
                     className="block h-[52px] max-h-[180px] min-h-[52px] w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-0 bg-transparent px-3 py-3 text-[15px] font-semibold leading-6 text-slate-900 outline-none placeholder:text-slate-400 dark:text-white"
                   />
                   <div className="flex items-center justify-between gap-3 px-2 pb-1">
@@ -710,6 +808,17 @@ export default function ChatLince() {
                   </div>
                 </div>
                 <p className="mt-2 text-center text-[10px] font-semibold text-slate-400">O Lince diferencia evidência confirmada, intenção documental e pendência. Decisões ambíguas continuam fail-closed.</p>
+                {ultimaPerguntaExportavel && (
+                  <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                    <span className="text-[10px] font-black uppercase text-slate-400">Exportar última análise:</span>
+                    <button type="button" onClick={() => exportarUltimaConsulta('xlsx')} disabled={Boolean(exportandoConsulta)} className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-[10px] font-black text-white disabled:opacity-50">
+                      {exportandoConsulta === 'xlsx' ? <LoaderCircle size={13} className="animate-spin" /> : <Download size={13} />} EXCEL
+                    </button>
+                    <button type="button" onClick={() => exportarUltimaConsulta('pdf')} disabled={Boolean(exportandoConsulta)} className="inline-flex items-center gap-1.5 rounded-xl bg-slate-700 px-3 py-2 text-[10px] font-black text-white disabled:opacity-50">
+                      {exportandoConsulta === 'pdf' ? <LoaderCircle size={13} className="animate-spin" /> : <Download size={13} />} PDF
+                    </button>
+                  </div>
+                )}
               </form>
             </div>
           </div>
@@ -764,6 +873,72 @@ export default function ChatLince() {
             </aside>
           )}
         </div>
+      </section>
+
+      <section className="bg-white dark:bg-slate-800 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 dark:border-slate-700">
+        <div className="mb-5">
+          <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white uppercase flex items-center gap-3">
+            <Layers className="text-blue-600" /> Auditoria comparativa
+          </h2>
+          <p className="mt-2 text-sm font-semibold text-slate-600 dark:text-slate-300">
+            Anexe uma relação e pergunte em linguagem natural. O Lince cruza PN/SN/PI com o Livro de Equipamentos, PPU efetivo e a Pesquisa Operacional sem alterar o banco. Exemplos: “desta planilha, mostre somente o que temos no PPU” ou “classifique a prioridade de reparo desta relação”.
+          </p>
+        </div>
+
+        <form onSubmit={auditarComparandoSisha} className="grid grid-cols-1 lg:grid-cols-[1fr_2fr_auto] gap-3">
+          <input
+            type="file"
+            accept=".xlsx,.xls,.csv,.ods,.pdf,.doc,.docx,.odt,.txt,.jpg,.jpeg,.png,.webp"
+            onChange={(e) => { setArquivoAuditoria(e.target.files?.[0] || null); setAuditoriaComparativa(null); setAuditoriaMsg(null); }}
+            className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-white file:text-slate-900 dark:file:text-white"
+          />
+          <input
+            value={perguntaAuditoria}
+            onChange={(e) => setPerguntaAuditoria(e.target.value)}
+            placeholder="Ex.: Desta relação, mostre somente o que temos no PPU e justifique as divergências"
+            className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-white"
+          />
+          <button disabled={!arquivoAuditoria || auditandoDocumento} className="px-5 py-3 rounded-xl bg-blue-600 text-white font-black disabled:opacity-50 inline-flex items-center justify-center gap-2">
+            {auditandoDocumento ? <LoaderCircle size={17} className="animate-spin" /> : <FileSearch size={17} />} COMPARAR
+          </button>
+        </form>
+
+        {auditoriaMsg && <p className={`mt-4 font-black ${auditoriaMsg.tipo === 'success' ? 'text-emerald-600' : 'text-red-600'}`}>{auditoriaMsg.texto}</p>}
+
+        {auditoriaComparativa && (
+          <div className="mt-5 space-y-4 rounded-2xl border border-blue-200 dark:border-blue-900 bg-blue-50/50 dark:bg-blue-950/10 p-4">
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-600">Resultado estruturado</p>
+                <h3 className="font-black text-slate-900 dark:text-white">{auditoriaComparativa.title}</h3>
+                <p className="mt-1 text-sm font-semibold text-slate-600 dark:text-slate-300">{auditoriaComparativa.summary}</p>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => exportarAuditoria('xlsx')} disabled={Boolean(exportandoAuditoria)} className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white font-black inline-flex items-center gap-2 disabled:opacity-50">
+                  {exportandoAuditoria === 'xlsx' ? <LoaderCircle size={15} className="animate-spin" /> : <Download size={15} />} EXCEL
+                </button>
+                <button type="button" onClick={() => exportarAuditoria('pdf')} disabled={Boolean(exportandoAuditoria)} className="px-4 py-2.5 rounded-xl bg-slate-700 text-white font-black inline-flex items-center gap-2 disabled:opacity-50">
+                  {exportandoAuditoria === 'pdf' ? <LoaderCircle size={15} className="animate-spin" /> : <Download size={15} />} PDF
+                </button>
+              </div>
+            </div>
+            <div className="overflow-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+              <table className="min-w-full text-xs">
+                <thead className="bg-slate-100 dark:bg-slate-800">
+                  <tr>{safeList(auditoriaComparativa.columns).slice(0, 10).map((column) => <th key={column} className="p-2 text-left font-black whitespace-nowrap">{column.replaceAll('_', ' ')}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {safeList(auditoriaComparativa.rows).slice(0, 50).map((row, index) => (
+                    <tr key={index} className="border-t border-slate-100 dark:border-slate-800">
+                      {safeList(auditoriaComparativa.columns).slice(0, 10).map((column) => <td key={column} className="p-2 font-semibold whitespace-nowrap">{String(row?.[column] ?? '')}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {safeList(auditoriaComparativa.rows).length > 50 && <p className="text-xs font-bold text-slate-500">Prévia limitada a 50 linhas. A exportação contém o resultado completo retornado pela auditoria.</p>}
+          </div>
+        )}
       </section>
 
       <section className="bg-white dark:bg-slate-800 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 dark:border-slate-700">
