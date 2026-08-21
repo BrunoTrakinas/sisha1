@@ -600,7 +600,7 @@ async function runDossierTool(question, sources, modules) {
     safeSelect('equipamentos_serializados', 'id,pn,sn,nomenclatura,status_atual,condicao_atual,local_atual,anv_atual,ativo', (q) => q.in('pn', pns).neq('ativo', false).order('pn').order('sn'), { motivo: 'Livro de Equipamentos por PN exato', limit: 250 }),
     safeEffectivePpuSelect(pns, { motivo: 'Disponibilidade efetiva do PPU por PN', limit: 200 }),
     safeSelect('recebimento_itens', '*', (q) => q.in('pn', pns).neq('ativo', false), { motivo: 'Recibos por PN', limit: 250 }),
-    safeSelect('pim_demandas', '*', (q) => q.in('pn', pns), { motivo: 'PIM/OS por PN', limit: 200 }),
+    safeSelect('pim_demandas', '*', (q) => q.in('pn', pns).neq('ativo', false), { motivo: 'PIM/OS atual por PN', limit: 200 }),
     safeSelect('work_orders', '*', (q) => q.in('pn', pns), { motivo: 'WO por PN', limit: 200 }),
     safeSelect('work_orders', '*', (q) => q.in('pn_saida', pns), { motivo: 'WO por PN de saída', limit: 200 }),
     safeSelect('compras_pds', '*', (q) => q.in('pn', pns), { motivo: 'PD/OC por PN', limit: 250 }),
@@ -827,7 +827,7 @@ async function runPnTool(question, sources, modules) {
     safeSelect('receita_itens', '*', (query) => query.in('pn', pns), { motivo: 'Receitas por PN', limit: 100 }),
     safeSelect('receita_itens', '*', (query) => query.in('pn_alt', pns), { motivo: 'Receitas por PN alternativo', limit: 100 }),
     safeSelect('historico_movimentacao', '*', (query) => query.in('pn', pns), { motivo: 'Histórico de movimentação por PN', limit: 100 }),
-    safeSelect('pim_demandas', '*', (query) => query.in('pn', pns), { motivo: 'PIM/OS por PN', limit: 80 }),
+    safeSelect('pim_demandas', '*', (query) => query.in('pn', pns).neq('ativo', false), { motivo: 'PIM/OS atual por PN', limit: 80 }),
     safeSelect('service_bulletin_items', '*', (query) => query.in('pn', pns), { motivo: 'SB por PN', limit: 80 }),
     safeSelect('equipamentos_serializados', 'id,pn,sn,nomenclatura,status_atual,condicao_atual,local_atual,anv_atual,ativo', (query) => query.in('pn', pns).neq('ativo', false).order('pn').order('sn'), { motivo: 'Livro de Equipamentos por PN', limit: 250 }),
   ];

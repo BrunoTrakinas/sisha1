@@ -46,7 +46,7 @@ test('A4: manutenção programada respeita horizonte e contador previsto', () =>
   assert.equal(result.included.length, 2);
 });
 
-test('A4: ODA/FAT/EMB com previsão no horizonte são comprometidas; ODC é potencial', () => {
+test('A4: somente ODA é cobertura futura; ODC é potencial e FAT/EMB/REC são históricos', () => {
   const result = buildProcurementSnapshot([
     { status_grupo: 'ODA', quantidade: 2, qtd_recebida: 0, data_previsao_entrega: '2026-09-01', dias_entrega: 100 },
     { status_grupo: 'ODC', quantidade: 3, qtd_recebida: 0, data_previsao_entrega: '2026-09-10', dias_entrega: 200 },
@@ -54,7 +54,8 @@ test('A4: ODA/FAT/EMB com previsão no horizonte são comprometidas; ODC é pote
   ], 90, NOW, 240);
   assert.equal(result.committed_within_horizon, 2);
   assert.equal(result.potential_within_horizon, 3);
-  assert.equal(result.pipeline_without_date, 1);
+  assert.equal(result.pipeline_without_date, 0);
+  assert.equal(result.pipeline.find((row) => row.status === 'FAT')?.coverage_role, 'HISTORICAL_DELIVERED');
   assert.equal(result.lead_time.effective_days, 150);
   assert.equal(result.lead_time.source, 'HISTORICAL_PD_DIAS_ENTREGA_MEDIAN');
 });

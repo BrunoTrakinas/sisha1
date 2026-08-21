@@ -156,11 +156,11 @@ const orientacoesUploadPorTipo = {
         observacao: 'Se o upload retornar formato não reconhecido, o importador desta base ainda precisa ser ativado no backend atual.',
     },
     pim: {
-        titulo: 'PIM / Demandas',
-        obrigatorias: ['PN ou referência da demanda', 'QTD quando houver item material'],
-        recomendadas: ['PIM', 'OS', 'ANV', 'Nomenclatura', 'Status', 'Data', 'Observação'],
-        comportamento: 'Use para alimentar demandas operacionais e vínculo com aeronave/OS quando o importador estiver habilitado.',
-        observacao: 'Prefixos de OS 4001, 4003, 4004, 4005, 4010 e 4012 devem ser preservados para identificar demanda por aeronave.',
+        titulo: 'PIM Pendentes — snapshot atual',
+        obrigatorias: ['PIM', 'PN', 'QTD', 'OS'],
+        recomendadas: ['Data', 'NSN/PI', 'Nomenclatura', 'Observação'],
+        comportamento: 'O novo arquivo passa a ser o snapshot PIM atual do Gerador. O snapshot de arquivo anterior é preservado como histórico e deixa de participar do cálculo; registros manuais não são apagados.',
+        observacao: 'A OS define a origem. São reconhecidas aeronaves e oficinas, inclusive MTVN, MTMV, MTSV, MTHV, MTAP, MTPA e MTAR. Linhas incompletas falham fechadas e ficam registradas na auditoria.',
     },
     politica_estoque_tarefas: {
         titulo: 'Política de Estoque',
@@ -169,6 +169,22 @@ const orientacoesUploadPorTipo = {
         comportamento: 'Use para alimentar parâmetros de ressuprimento e comparação com estoque/necessidades.',
         observacao: 'A política deve apoiar decisão logística; não deve substituir consumo real, receitas e histórico de movimentação.',
     },
+};
+
+const formatUploadDate = (value) => {
+    if (!value) return 'Data não registrada';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return String(value);
+    return dt.toLocaleString('pt-BR');
+};
+
+const importStatusLabel = (status) => {
+    const value = String(status || '').toUpperCase();
+    if (value === 'SUCESSO' || value === 'CONCLUIDO') return 'Concluído';
+    if (value === 'SUCESSO_COM_ALERTAS' || value === 'CONCLUIDO_COM_PENDENCIAS') return 'Concluído com alertas';
+    if (value === 'PROCESSANDO') return 'Processando';
+    if (value === 'ERRO') return 'Falhou';
+    return status || 'Sem status';
 };
 
 export default function Cadastro() {
@@ -186,11 +202,15 @@ export default function Cadastro() {
         { key: 'usuarios', label: 'Usuários e acessos', descricao: 'Gerencie permissões, credenciais e situação dos usuários.' },
         { key: 'necessidades', label: 'Receitas / PIM / Política', descricao: 'Mantenha cadastros de apoio à necessidade e ao ressuprimento.' },
         { key: 'cotacoes', label: 'Cotações e RFQ', descricao: 'Importe, revise e mantenha cotações comerciais.' },
+        { key: 'atualizacoes', label: 'Atualizações', descricao: 'Veja quais documentos foram enviados ao SISHA e quando ocorreu a última atualização registrada.' },
     ];
     const [file, setFile] = useState(null);
     const [tipoArquivo, setTipoArquivo] = useState('order_book');
     const [uploadCarregando, setUploadCarregando] = useState(false);
     const [uploadMsg, setUploadMsg] = useState(null);
+    const [importLogs, setImportLogs] = useState([]);
+    const [importLogsCarregando, setImportLogsCarregando] = useState(false);
+    const [importLogsMsg, setImportLogsMsg] = useState(null);
     const [modalCeimspaConfirm, setModalCeimspaConfirm] = useState(false);
     const [ceimspaOverwrite, setCeimspaOverwrite] = useState(false);
     const [modalLocalizacoes, setModalLocalizacoes] = useState(false);
@@ -236,6 +256,30 @@ export default function Cadastro() {
             }
         }
     };
+
+    const carregarAtualizacoes = async (silencioso = false) => {
+        if (!token) return;
+        if (!silencioso) setImportLogsCarregando(true);
+        setImportLogsMsg(null);
+        try {
+            const response = await apiFetch('/import/logs?limit=300', {}, token);
+            const result = await response.json();
+            if (!response.ok || result.status !== 'success') throw new Error(result.message || 'Falha ao consultar atualizações.');
+            setImportLogs((result.data || []).filter((item) => item?.nome_arquivo));
+        } catch (error) {
+            setImportLogsMsg(error?.message || 'Falha ao consultar o histórico de atualizações.');
+        } finally {
+            if (!silencioso) setImportLogsCarregando(false);
+        }
+    };
+
+    const ultimoUploadTipo = importLogs.find((item) => String(item.tipo_arquivo || '') === String(tipoArquivo || '')) || null;
+
+    const atualizacoesPorTipo = Array.from(importLogs.reduce((map, item) => {
+        const key = String(item.tipo_arquivo || 'outros');
+        if (!map.has(key)) map.set(key, item);
+        return map;
+    }, new Map()).values());
 
     const handleUpload = async (e) => {
         e.preventDefault();
@@ -283,8 +327,9 @@ export default function Cadastro() {
                 return;
             }
 
+            const uploadEndpoint = tipoArquivo === 'pim' ? '/needs/pims/import' : '/import/upload';
             const response = await apiFetch(
-                '/import/upload',
+                uploadEndpoint,
                 { method: 'POST', headers: buildAuthHeaders(token), body: formData },
                 token
             );
@@ -324,6 +369,7 @@ export default function Cadastro() {
                 } else {
                     setUploadMsg({ tipo: 'success', texto: data.message });
                     if (tipoArquivo === 'custodia_externa_ppu') carregarCustodiaExterna(false);
+                    carregarAtualizacoes(true);
                 }
             } else {
                 setUploadMsg({ tipo: 'error', texto: data.message });
@@ -511,6 +557,11 @@ export default function Cadastro() {
             setUsuariosCarregando(false);
         }
     };
+
+    useEffect(() => {
+        if (token) carregarAtualizacoes(true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [token]);
 
     useEffect(() => {
         if (podeGerenciarUsuarios && token) carregarUsuariosAutorizados();
@@ -896,7 +947,7 @@ export default function Cadastro() {
                             <option value="qnna">QNNA</option>
                             <option value="sb">SB</option>
                             <option value="receitas" disabled>Receitas — use Chat Lince (importador operacional em preparação)</option>
-                            <option value="pim" disabled>PIM — use Chat Lince (importador operacional em preparação)</option>
+                            <option value="pim">PIM Pendentes — snapshot atual</option>
                             <option value="politica_estoque_tarefas" disabled>Política de Estoque — use Chat Lince (importador operacional em preparação)</option>
                         </select>
 
@@ -905,6 +956,19 @@ export default function Cadastro() {
                             onChange={handleFileChange}
                             className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100 file:text-slate-900"
                         />
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/50 px-4 py-3 text-sm">
+                        <p className="font-black text-slate-700 dark:text-slate-200">
+                            Última atualização registrada para este tipo
+                        </p>
+                        {ultimoUploadTipo ? (
+                            <p className="mt-1 font-bold text-slate-600 dark:text-slate-400">
+                                {formatUploadDate(ultimoUploadTipo.finished_at || ultimoUploadTipo.created_at)} • {ultimoUploadTipo.nome_arquivo} • {importStatusLabel(ultimoUploadTipo.status)}
+                            </p>
+                        ) : (
+                            <p className="mt-1 font-bold text-slate-500 dark:text-slate-400">Ainda sem upload registrado na trilha de atualizações do SISHA.</p>
+                        )}
                     </div>
 
                     <div className="flex justify-end">
@@ -995,6 +1059,74 @@ export default function Cadastro() {
                 </form>
             </section>
 
+            )}
+
+            {areaAtiva === 'atualizacoes' && (
+                <section className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 dark:border-slate-800 space-y-6">
+                    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                        <div>
+                            <h2 className="text-xl font-black text-slate-800 dark:text-white uppercase">Atualizações registradas</h2>
+                            <p className="mt-1 text-sm font-bold text-slate-600 dark:text-slate-400 max-w-3xl">
+                                Consulte a última atualização por tipo de documento e o histórico de arquivos registrados pela trilha de importação do SISHA. A data exibida é a data registrada pelo backend, não a data do arquivo no computador.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => carregarAtualizacoes(false)}
+                            disabled={importLogsCarregando}
+                            className="rounded-xl border-2 border-blue-500 px-5 py-3 text-sm font-black text-blue-700 dark:text-blue-300 disabled:opacity-50"
+                        >
+                            {importLogsCarregando ? 'ATUALIZANDO...' : 'ATUALIZAR LISTA'}
+                        </button>
+                    </div>
+
+                    {importLogsMsg ? <p className="font-bold text-red-600">{importLogsMsg}</p> : null}
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {atualizacoesPorTipo.length ? atualizacoesPorTipo.map((item) => (
+                            <div key={`latest-${item.tipo_arquivo}`} className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/40 p-4">
+                                <p className="text-[10px] uppercase tracking-[0.15em] font-black text-slate-400">{orientacoesUploadPorTipo[item.tipo_arquivo]?.titulo || item.tipo_arquivo || 'Documento'}</p>
+                                <p className="mt-1 font-black text-slate-900 dark:text-slate-100 break-words">{item.nome_arquivo || 'Sem nome registrado'}</p>
+                                <p className="mt-2 text-sm font-bold text-slate-600 dark:text-slate-400">{formatUploadDate(item.finished_at || item.created_at)}</p>
+                                <p className="mt-1 text-xs font-black text-blue-700 dark:text-blue-300">{importStatusLabel(item.status)}</p>
+                            </div>
+                        )) : (
+                            <p className="text-sm font-bold text-slate-500 dark:text-slate-400">Nenhum arquivo registrado na trilha de importação.</p>
+                        )}
+                    </div>
+
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+                        <div className="bg-slate-50 dark:bg-slate-800/80 px-4 py-3">
+                            <p className="text-xs font-black uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">Histórico de documentos</p>
+                        </div>
+                        <div className="overflow-auto max-h-[520px]">
+                            <table className="min-w-[900px] w-full text-sm">
+                                <thead className="sticky top-0 bg-slate-100 dark:bg-slate-800 text-[10px] uppercase tracking-wider text-slate-500">
+                                    <tr>
+                                        <th className="p-3 text-left">Documento</th>
+                                        <th className="p-3 text-left">Tipo</th>
+                                        <th className="p-3 text-left">Atualizado em</th>
+                                        <th className="p-3 text-left">Responsável</th>
+                                        <th className="p-3 text-left">Linhas</th>
+                                        <th className="p-3 text-left">Situação</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {importLogs.map((item) => (
+                                        <tr key={item.id} className="border-t border-slate-100 dark:border-slate-800 align-top">
+                                            <td className="p-3 font-black text-slate-800 dark:text-slate-200">{item.nome_arquivo || '—'}</td>
+                                            <td className="p-3 font-bold text-slate-600 dark:text-slate-400">{orientacoesUploadPorTipo[item.tipo_arquivo]?.titulo || item.tipo_arquivo || '—'}</td>
+                                            <td className="p-3 font-bold text-slate-600 dark:text-slate-400">{formatUploadDate(item.finished_at || item.created_at)}</td>
+                                            <td className="p-3 text-slate-600 dark:text-slate-400">{item.uploaded_by_email || 'Sistema'}</td>
+                                            <td className="p-3 text-slate-600 dark:text-slate-400">{Number(item.linhas_importadas || 0).toLocaleString('pt-BR')} aplicadas • {Number(item.linhas_ignoradas || 0).toLocaleString('pt-BR')} ignoradas</td>
+                                            <td className="p-3 font-black text-slate-700 dark:text-slate-300">{importStatusLabel(item.status)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
             )}
 
             {areaAtiva === 'usuarios' && (

@@ -1,3 +1,5 @@
+const { pendingPurchaseQty, isFuturePurchaseCoverageStatus, isOdcProcessStatus, isDeliveredHistoricalStatus } = require('./pdLifecyclePolicyService');
+
 function clean(value) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   return text || null;
@@ -35,25 +37,20 @@ function parseDate(value) {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
-function pendingPurchaseQty(row = {}) {
-  const base = positive(row.qtd_comprada) || positive(row.quantidade) || positive(row.qtd_pedida);
-  const received = positive(row.qtd_recebida);
-  return Math.max(0, base - received);
-}
-
 function buildPurchaseCoverage(rows = [], pn, { now = new Date(), horizonDays = 730 } = {}) {
   const targetPn = normalizePn(pn);
   const horizonEnd = new Date(now.getTime() + (Math.max(1, Number(horizonDays) || 730) * 86400000));
-  const committedStatuses = new Set(['ODA', 'FAT', 'EMB']);
-  const potentialStatuses = new Set(['ODC', 'ELB', 'TRI', 'ANS', 'COT', 'PRO', 'LIB', 'LPC']);
-  const excludedStatuses = new Set(['CAN', 'REC', 'EXCLUIDO', 'EXCLUÍDO']);
-  let committedWithinHorizon = 0;
-  let committedWithoutDate = 0;
-  let committedOutsideHorizon = 0;
-  let potentialWithinHorizon = 0;
-  let potentialWithoutDate = 0;
-  let potentialOutsideHorizon = 0;
-  const docs = new Set();
+  const excludedStatuses = new Set(['CAN', 'EXCLUIDO', 'EXCLUÍDO']);
+  let odaWithinHorizon = 0;
+  let odaWithoutDate = 0;
+  let odaOutsideHorizon = 0;
+  let odcWithinHorizon = 0;
+  let odcWithoutDate = 0;
+  let odcOutsideHorizon = 0;
+  let historicalDeliveredRows = 0;
+  const futureDocs = new Set();
+  const odcDocs = new Set();
+  const historicalDocs = new Set();
   let canonicalRows = 0;
 
   (rows || []).forEach((row) => {
@@ -61,37 +58,48 @@ function buildPurchaseCoverage(rows = [], pn, { now = new Date(), horizonDays = 
     if (normalizePn(row?.pn) !== targetPn) return;
     const status = upper(row.status_grupo || row.status);
     if (!status || excludedStatuses.has(status)) return;
-    const qty = pendingPurchaseQty(row);
-    if (qty <= 0) return;
     canonicalRows += 1;
-    const ref = clean(row.numero_pd || row.documento_referencia || row.numero_oc);
-    if (ref) docs.add(ref);
-    const expected = parseDate(row.data_previsao_entrega || row.data_previsao);
-    const inside = expected && expected.getTime() <= horizonEnd.getTime();
 
-    if (committedStatuses.has(status)) {
-      if (!expected) committedWithoutDate += qty;
-      else if (inside) committedWithinHorizon += qty;
-      else committedOutsideHorizon += qty;
+    const ref = clean(row.numero_pd || row.documento_referencia || row.numero_oc);
+    if (isDeliveredHistoricalStatus(status)) {
+      historicalDeliveredRows += 1;
+      if (ref) historicalDocs.add(`${ref} (${status})`);
       return;
     }
 
-    if (potentialStatuses.has(status)) {
-      if (!expected) potentialWithoutDate += qty;
-      else if (inside) potentialWithinHorizon += qty;
-      else potentialOutsideHorizon += qty;
+    const qty = pendingPurchaseQty(row);
+    if (qty <= 0) return;
+    const expected = parseDate(row.data_previsao_entrega || row.data_previsao);
+    const inside = expected && expected.getTime() <= horizonEnd.getTime();
+
+    if (isFuturePurchaseCoverageStatus(status)) {
+      if (ref) futureDocs.add(ref);
+      if (!expected) odaWithoutDate += qty;
+      else if (inside) odaWithinHorizon += qty;
+      else odaOutsideHorizon += qty;
+      return;
+    }
+
+    if (isOdcProcessStatus(status)) {
+      if (ref) odcDocs.add(ref);
+      if (!expected) odcWithoutDate += qty;
+      else if (inside) odcWithinHorizon += qty;
+      else odcOutsideHorizon += qty;
     }
   });
 
   return {
     canonical_rows: canonicalRows,
-    committed_within_horizon: round(committedWithinHorizon),
-    committed_without_date: round(committedWithoutDate),
-    committed_outside_horizon: round(committedOutsideHorizon),
-    potential_within_horizon: round(potentialWithinHorizon),
-    potential_without_date: round(potentialWithoutDate),
-    potential_outside_horizon: round(potentialOutsideHorizon),
-    documents: Array.from(docs).sort(),
+    committed_within_horizon: round(odaWithinHorizon),
+    committed_without_date: round(odaWithoutDate),
+    committed_outside_horizon: round(odaOutsideHorizon),
+    potential_within_horizon: round(odcWithinHorizon),
+    potential_without_date: round(odcWithoutDate),
+    potential_outside_horizon: round(odcOutsideHorizon),
+    documents: Array.from(futureDocs).sort(),
+    odc_documents: Array.from(odcDocs).sort(),
+    historical_delivered_rows: historicalDeliveredRows,
+    historical_documents: Array.from(historicalDocs).sort(),
   };
 }
 
@@ -219,43 +227,56 @@ function buildRecipePolicyDeficiency({
   const rows = Array.from(demandByPn.values()).map((entry) => {
     const need = round(entry.necessidade_2_anos);
     const ppu = round(mapQuantity(ppuMap, entry.pn));
-    const immediateShortage = round(Math.max(0, need - ppu));
+    const ceimspa = ceimspaQuantity(ceimspaRows, entry.pn, mapEntry(pnPiMap, entry.pn) || new Set());
+    const physicalCoverage = round(Math.min(need, ppu + ceimspa));
+    const afterPhysical = round(Math.max(0, need - ppu - ceimspa));
     const canonical = buildPurchaseCoverage(purchaseRows, entry.pn, { now, horizonDays });
 
-    let committedWithin = canonical.committed_within_horizon;
-    let committedUndated = canonical.committed_without_date;
-    let committedOutside = canonical.committed_outside_horizon;
-    let potentialWithin = canonical.potential_within_horizon;
-    let potentialUndated = canonical.potential_without_date;
-    let potentialOutside = canonical.potential_outside_horizon;
+    let odaWithin = canonical.committed_within_horizon;
+    let odaUndated = canonical.committed_without_date;
+    let odaOutside = canonical.committed_outside_horizon;
+    let odcWithin = canonical.potential_within_horizon;
+    let odcUndated = canonical.potential_without_date;
+    let odcOutside = canonical.potential_outside_horizon;
     let purchaseSource = 'COMPRAS_PDS';
-    let purchaseDocs = canonical.documents;
+    let odaDocs = canonical.documents;
+    let odcDocs = canonical.odc_documents || [];
 
+    // Compatibilidade com base histórica: só usa snapshot do Order Book quando
+    // não há qualquer PD canônico daquele PN. ODA reduz a compra; ODC só alerta.
     if (canonical.canonical_rows === 0) {
       const legacyOda = round(mapQuantity(odaFallbackMap, entry.pn));
       const legacyOdc = round(mapQuantity(odcFallbackMap, entry.pn));
       if (legacyOda > 0 || legacyOdc > 0) {
-        committedUndated = legacyOda;
-        potentialUndated = legacyOdc;
-        purchaseSource = 'FALLBACK_ORDER_BOOK_ODC';
-        purchaseDocs = [...new Set([...mapDocs(odaFallbackMap, entry.pn), ...mapDocs(odcFallbackMap, entry.pn)])];
+        odaUndated = legacyOda;
+        odcUndated = legacyOdc;
+        purchaseSource = 'FALLBACK_ORDER_BOOK';
+        odaDocs = mapDocs(odaFallbackMap, entry.pn);
+        odcDocs = mapDocs(odcFallbackMap, entry.pn);
       }
     }
 
-    const committedTotal = round(committedWithin + committedUndated + committedOutside);
-    const horizonCoverageRisk = round(Math.max(0, immediateShortage - committedWithin));
-    const deficitToProvide = round(Math.max(0, immediateShortage - committedTotal));
-    const ceimspa = ceimspaQuantity(ceimspaRows, entry.pn, mapEntry(pnPiMap, entry.pn) || new Set());
-    const potentialPipeline = round(potentialWithin + potentialUndated);
-    const afterPotential = round(Math.max(0, deficitToProvide - ceimspa - potentialPipeline));
-    const committedCoverage = round(Math.min(need, ppu + committedTotal));
-    const confirmedCoveragePct = need > 0 ? round((committedCoverage / need) * 100, 1) : 100;
+    const odaTotal = round(odaWithin + odaUndated + odaOutside);
+    const odaApplied = round(Math.min(afterPhysical, odaTotal));
+    const deficitToProvide = round(Math.max(0, afterPhysical - odaTotal));
+    const odcTotal = round(odcWithin + odcUndated + odcOutside);
+
+    // ODA já comprado nunca gera compra duplicada. Se estiver sem data ou fora
+    // do horizonte, permanece como risco de disponibilidade, não como novo débito.
+    const odaWithinApplied = round(Math.min(afterPhysical, odaWithin));
+    const horizonAvailabilityShortage = round(Math.max(0, afterPhysical - odaWithinApplied));
+    const odaRiskQty = deficitToProvide <= 0
+      ? round(Math.max(0, afterPhysical - odaWithinApplied))
+      : round(Math.min(odaUndated + odaOutside, afterPhysical));
+
+    const coverageForPurchase = round(Math.min(need, physicalCoverage + odaApplied));
+    const confirmedCoveragePct = need > 0 ? round((coverageForPurchase / need) * 100, 1) : 100;
 
     let status = 'DEFICIENTE';
-    if (immediateShortage <= 0) status = 'COBERTO_NO_PPU';
-    else if (deficitToProvide <= 0 && horizonCoverageRisk <= 0) status = 'COBERTO_COMPROMETIDO_NO_HORIZONTE';
-    else if (deficitToProvide <= 0) status = 'COBERTO_COMPROMETIDO_COM_RISCO_PRAZO';
-    else if (afterPotential <= 0) status = 'COBERTURA_POTENCIAL';
+    if (afterPhysical <= 0) status = 'COBERTO_PPU_CEIMSPA';
+    else if (deficitToProvide <= 0 && odaRiskQty <= 0) status = 'COBERTO_COM_ODA_NO_HORIZONTE';
+    else if (deficitToProvide <= 0) status = 'COBERTO_COM_ODA_RISCO_PRAZO';
+    else if (odcTotal > 0) status = 'DEFICIENTE_COM_ODC_EM_ANDAMENTO';
 
     if (deficitToProvide > 0) entry.receitas.forEach((item) => deficientRecipes.add(item.receita));
 
@@ -266,29 +287,37 @@ function buildRecipePolicyDeficiency({
       prioridade_mais_alta: entry.prioridade_mais_alta,
       necessidade_2_anos: need,
       ppu_efetivo: ppu,
-      deficit_imediato: immediateShortage,
-      compras_comprometidas_no_horizonte: round(committedWithin),
-      compras_comprometidas_sem_data: round(committedUndated),
-      compras_comprometidas_fora_horizonte: round(committedOutside),
-      compras_comprometidas_total: committedTotal,
-      risco_cobertura_no_horizonte: horizonCoverageRisk,
+      ceimspa_disponivel: ceimspa,
+      cobertura_fisica_atual: physicalCoverage,
+      deficit_apos_estoques: afterPhysical,
+      oda_no_horizonte: round(odaWithin),
+      oda_sem_data: round(odaUndated),
+      oda_fora_horizonte: round(odaOutside),
+      oda_a_receber_total: odaTotal,
+      oda_aplicada_na_necessidade: odaApplied,
       deficit_a_providenciar: deficitToProvide,
-      ceimspa_potencial: ceimspa,
-      pipeline_potencial_no_horizonte: round(potentialWithin),
-      pipeline_potencial_sem_data: round(potentialUndated),
-      pipeline_potencial_fora_horizonte: round(potentialOutside),
-      deficit_apos_potenciais: afterPotential,
+      odc_em_andamento: odcTotal,
+      odc_no_horizonte: round(odcWithin),
+      odc_sem_data: round(odcUndated),
+      odc_fora_horizonte: round(odcOutside),
+      risco_cobertura_no_horizonte: odaRiskQty,
+      disponibilidade_faltante_no_horizonte: horizonAvailabilityShortage,
       cobertura_confirmada_percentual: confirmedCoveragePct,
+      entregas_historicas_fat_emb_rec: canonical.historical_delivered_rows || 0,
+      documentos_historicos_fat_emb_rec: (canonical.historical_documents || []).join(' | '),
       status,
       receitas: entry.receitas,
       receitas_texto: entry.receitas.map((item) => `${item.receita}: ${item.ciclos_planejados_2_anos} ciclo(s) × ${item.qtd_por_ciclo} = ${item.necessidade}`).join(' | '),
-      documentos_compra: purchaseDocs.join(' | '),
+      documentos_oda: (odaDocs || []).join(' | '),
+      documentos_odc: (odcDocs || []).join(' | '),
       fonte_compra: purchaseSource,
       nota: deficitToProvide > 0
-        ? 'Déficit a providenciar = necessidade da Política/Receita menos PPU efetivo e toda compra ativa ODA/FAT/EMB ainda pendente. CeIMSPA e ODC/pipeline são apenas potenciais. Compromissos sem data ou fora do horizonte não geram compra duplicada, mas aparecem como risco de prazo.'
-        : horizonCoverageRisk > 0
-          ? 'Quantidade de aquisição já está coberta por ODA/FAT/EMB, porém parte da cobertura não possui previsão dentro do horizonte de 2 anos; acompanhar como risco de prazo, sem duplicar compra.'
-          : 'Cobertura física/comprometida suficiente para a necessidade Política × Receita.',
+        ? (odcTotal > 0
+          ? `Faltam ${deficitToProvide} un para cumprir a Política × Receita após PPU, CeIMSPA e ODA. Existe ODC em andamento (${odcTotal} un), que não abate a necessidade e deve ser priorizado para suplementação/liberação.`
+          : `Faltam ${deficitToProvide} un para cumprir a Política × Receita após PPU, CeIMSPA e ODA. FAT/EMB/REC são históricos de material já entregue/recebido e não são somados novamente.`)
+        : odaRiskQty > 0
+          ? `A quantidade de aquisição já está coberta por ODA, porém ${odaRiskQty} un não possuem previsão dentro do horizonte de 2 anos. Acompanhar prazo sem duplicar compra.`
+          : 'Cobertura suficiente por PPU, CeIMSPA e/ou saldo ODA ainda a receber.',
     };
   }).sort((a, b) => {
     const aDef = a.deficit_a_providenciar > 0 ? 0 : 1;
@@ -310,7 +339,9 @@ function buildRecipePolicyDeficiency({
     pns_deficientes: deficientRows.length,
     necessidade_2_anos: round(rows.reduce((sum, row) => sum + row.necessidade_2_anos, 0)),
     ppu_efetivo: round(rows.reduce((sum, row) => sum + Math.min(row.ppu_efetivo, row.necessidade_2_anos), 0)),
-    compras_comprometidas_no_horizonte: round(rows.reduce((sum, row) => sum + row.compras_comprometidas_no_horizonte, 0)),
+    ceimspa_disponivel: round(rows.reduce((sum, row) => sum + Math.min(row.ceimspa_disponivel, Math.max(0, row.necessidade_2_anos - row.ppu_efetivo)), 0)),
+    oda_a_receber: round(rows.reduce((sum, row) => sum + row.oda_aplicada_na_necessidade, 0)),
+    odc_em_andamento: round(rows.reduce((sum, row) => sum + row.odc_em_andamento, 0)),
     deficit_a_providenciar: round(rows.reduce((sum, row) => sum + row.deficit_a_providenciar, 0)),
     risco_cobertura_no_horizonte: round(rows.reduce((sum, row) => sum + row.risco_cobertura_no_horizonte, 0)),
     blockers: blockers.length,
@@ -324,11 +355,12 @@ function buildRecipePolicyDeficiency({
     rules: [
       'Demanda = Qtde planejada em 2 anos na Política × Qtd por ciclo da Receita.',
       'Demandas de um mesmo PN são consolidadas antes da cobertura para não reutilizar o mesmo estoque em duas receitas.',
-      'PPU efetivo é cobertura física confirmada.',
-      'Toda compra ativa ODA/FAT/EMB pendente reduz o déficit a providenciar, evitando compra duplicada.',
-      'ODA/FAT/EMB sem data ou fora do horizonte continuam visíveis como risco de prazo, mas não viram nova demanda de aquisição.',
-      'ODC/estágios anteriores e CeIMSPA são cobertura potencial e não reduzem o déficit a providenciar enquanto não forem confirmados.',
-      'CAN, REC e registros inativos não entram como compra pendente.',
+      'PPU efetivo e CeIMSPA disponível reduzem a necessidade porque representam disponibilidade atual consultável.',
+      'Somente o saldo ODA ainda a receber reduz a necessidade de nova aquisição.',
+      'ODC não reduz a necessidade: permanece em evidência como processo em andamento que requer suplementação/liberação.',
+      'FAT, EMB e REC são evidências históricas de material já entregue/recebido e nunca são somados novamente como cobertura futura.',
+      'ODA sem data ou fora do horizonte evita compra duplicada, mas permanece sinalizada como risco de prazo.',
+      'CAN, registros inativos e quantidades já recebidas não entram no saldo ODA a receber.',
       'Receita/política incompleta falha fechada: o SISHA não presume 1 ciclo nem quantidade por ciclo.',
     ],
   };
@@ -343,20 +375,22 @@ function formatRecipePolicyDeficiencyRows(rows = []) {
     Receitas_Politica: row.receitas_texto || '',
     Necessidade_2_Anos: row.necessidade_2_anos,
     PPU_Efetivo: row.ppu_efetivo,
-    Deficit_Imediato: row.deficit_imediato,
-    ODA_FAT_EMB_Com_Previsao_2_Anos: row.compras_comprometidas_no_horizonte,
-    ODA_FAT_EMB_Sem_Data: row.compras_comprometidas_sem_data,
-    ODA_FAT_EMB_Fora_2_Anos: row.compras_comprometidas_fora_horizonte,
-    ODA_FAT_EMB_Comprometido_Total: row.compras_comprometidas_total,
-    Risco_Cobertura_No_Horizonte: row.risco_cobertura_no_horizonte,
+    CeIMSPA_Disponivel: row.ceimspa_disponivel,
+    Cobertura_Fisica_Atual: row.cobertura_fisica_atual,
+    Deficit_Apos_PPU_CeIMSPA: row.deficit_apos_estoques,
+    ODA_Com_Previsao_2_Anos: row.oda_no_horizonte,
+    ODA_Sem_Data: row.oda_sem_data,
+    ODA_Fora_2_Anos: row.oda_fora_horizonte,
+    ODA_A_Receber_Total: row.oda_a_receber_total,
     Deficit_A_Providenciar: row.deficit_a_providenciar,
-    CeIMSPA_Potencial: row.ceimspa_potencial,
-    ODC_Pipeline_Potencial_2_Anos: row.pipeline_potencial_no_horizonte,
-    ODC_Pipeline_Potencial_Sem_Data: row.pipeline_potencial_sem_data,
-    Deficit_Apos_Potenciais: row.deficit_apos_potenciais,
-    Cobertura_Confirmada_Percentual: row.cobertura_confirmada_percentual,
+    ODC_Em_Andamento: row.odc_em_andamento,
+    Risco_ODA_No_Horizonte: row.risco_cobertura_no_horizonte,
+    Cobertura_Para_Compra_Percentual: row.cobertura_confirmada_percentual,
+    FAT_EMB_REC_Historicos: row.entregas_historicas_fat_emb_rec,
+    Documentos_ODA: row.documentos_oda || '',
+    Documentos_ODC: row.documentos_odc || '',
+    Documentos_Historicos_FAT_EMB_REC: row.documentos_historicos_fat_emb_rec || '',
     Situacao: row.status,
-    Documentos_Compra: row.documentos_compra || '',
     Fonte_Compra: row.fonte_compra || '',
     Nota: row.nota || '',
   }));

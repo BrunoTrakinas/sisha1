@@ -3,6 +3,7 @@ const supabase = require('../config/supabaseClient');
 const { registrarAuditoria } = require('../utils/auditLogger');
 const workOrderEquipmentService = require('../services/workOrderEquipmentService');
 const { listOrderBookPdGaps, reconcileExistingPdLifecycle } = require('../services/orderBookReconciliationService');
+const { chooseMonotonicImportedStatus, statusRank } = require('../services/pdLifecyclePolicyService');
 
 const OC_STATUSES = new Set(['ELB', 'ODC', 'ODA', 'ODA_RESSALVA', 'REC', 'CAN', 'ADP']);
 const PD_STATUSES = new Set(['ELB', 'TRI', 'ANS', 'COT', 'PRO', 'LPC', 'ODC', 'ODA', 'EMB', 'REC', 'FAT', 'CAN', 'ATIVO', 'EXCLUIDO']);
@@ -1354,9 +1355,30 @@ exports.importarOrdens = async (req, res) => {
       payload.push({ numero_oc: raiz, numero_oc_original: original || raiz, status: mapped.status, status_mb_original: statusOriginal || null, substatus: get(row, 'SubStatus') || null, data_emissao: parseDate(get(row, 'Data Emissão')), data_aprovacao: parseDate(get(row, 'Data Aprovação')), data_recebimento: parseDate(get(row, 'Data Recebimento')), data_cancelamento: parseDate(get(row, 'Data Cancelamento')), data_ack: parseDate(get(row, 'Data Ack')), processo_obtencao: get(row, 'Processo de Obtenção') || null, codemp: normalizeUpper(get(row, 'CODEMP')) || null, razao_social: get(row, 'Razão Social(CODEMP)') || null, qtde_se_informada: toNumber(get(row, 'Qtde SE')), responsavel: get(row, 'Responsável') || null, sigla_moeda: normalizeUpper(get(row, 'Sigla Moeda')) || null, moeda: normalizeUpper(get(row, 'Sigla Moeda')) || 'GBP', valor_total: toNumber(get(row, 'Preço Total c/ CIO')), valor_total_gbp: toNumber(get(row, 'Preço Total c/ CIO')), valor_total_usd: toNumber(get(row, 'Preço Total USD c/ CIO')), valor_total_moeda_contrato: toNumber(get(row, 'Total c/ CIO Moeda Contrato')), fonte_importacao: 'EXPORT_OC_MB', fonte_confirmacao: orderBookOcs.has(raiz) ? 'ORDER_BOOK' : 'EXPORT_MB', motivo_ressalva: mapped.motivo, observacao: mapped.motivo || null, ativo: mapped.status !== 'CAN', data_importacao: now, updated_at: now });
     });
     if (payload.length === 0) return res.status(400).json({ status: 'error', message: 'Nenhuma OC válida encontrada no arquivo.' });
-    const { error } = await supabase.from('compras_ordens').upsert(payload, { onConflict: 'numero_oc' });
+
+    const numerosOc = [...new Set(payload.map((row) => row.numero_oc).filter(Boolean))];
+    const { data: existentes, error: existentesError } = await supabase
+      .from('compras_ordens')
+      .select('id,numero_oc,status,ativo')
+      .in('numero_oc', numerosOc);
+    if (existentesError) throw existentesError;
+    const existentesMap = new Map((existentes || []).map((row) => [normalizeOcRaiz(row.numero_oc), row]));
+    let regressoesBloqueadas = 0;
+    const payloadMonotonic = payload.map((row) => {
+      const current = existentesMap.get(normalizeOcRaiz(row.numero_oc));
+      if (!current) return row;
+      const mergedStatus = chooseMonotonicImportedStatus(current.status, row.status);
+      if (statusRank(mergedStatus) > statusRank(row.status) && mergedStatus === normalizeUpper(current.status)) regressoesBloqueadas += 1;
+      return {
+        ...row,
+        status: mergedStatus,
+        ativo: current.ativo === false ? false : mergedStatus !== 'CAN',
+      };
+    });
+
+    const { error } = await supabase.from('compras_ordens').upsert(payloadMonotonic, { onConflict: 'numero_oc' });
     if (error) throw error;
-    await auditCompra(req, 'OC_IMPORTADA_LOTE', 'OC', 'EXPORT_OC', `${payload.length} OC(s) importadas/atualizadas.`, { linhas_lidas: rows.length, importadas: payload.length });
+    await auditCompra(req, 'OC_IMPORTADA_LOTE', 'OC', 'EXPORT_OC', `${payloadMonotonic.length} OC(s) importadas/atualizadas.`, { linhas_lidas: rows.length, importadas: payloadMonotonic.length, regressoes_bloqueadas: regressoesBloqueadas, regra: 'IMPORTACAO_NUNCA_REGRIDE_STATUS; CORRECAO_REGRESSIVA_SOMENTE_ADMIN_DONO' });
     return res.status(200).json({ status: 'success', message: `${payload.length} OC(s) importadas/atualizadas.`, data: { linhas_lidas: rows.length, importadas: payload.length } });
   } catch (error) {
     console.error('[SISHA][compras] importarOrdens:', error);
@@ -1387,9 +1409,34 @@ exports.importarPdsDaOrdem = async (req, res) => {
       payload.push({ ordem_id: ordem.id, numero_oc: ordem.numero_oc, numero_oc_original: ordem.numero_oc_original || ordem.numero_oc, numero_pd: numeroPd, pn, nsn: normalizeUpper(get(row, 'NSN')) || null, nomenclatura: get(row, 'Nomenclatura') || null, fabricante: normalizeUpper(get(row, 'Fabricante')) || null, uf_pedida: get(row, 'UF Pedida') || null, qtd_pedida: toNumber(get(row, 'Qtde Pedida')), uf_cotada: get(row, 'UF Cotada') || null, qtd_cotada: toNumber(get(row, 'Qtde Cotada')), qtd_comprada: qtdComprada, qtd_faturada: toNumber(get(row, 'Qtde Faturada')), qtd_recebida: toNumber(get(row, 'Qtde Recebida')), quantidade: qtdComprada, valor_unitario: valorUnitario, valor_unitario_gbp: valorUnitario, valor_total: valorTotalGbp, valor_total_gbp: valorTotalGbp, valor_total_usd: toNumber(get(row, 'Preço USD')), moeda: 'GBP', dias_entrega: toNumber(get(row, 'Dias de Entrega')), data_entrega: parseDate(get(row, 'Data de Entrega')), desconto_percentual: toNumber(get(row, 'Desc. (%)')), status, status_grupo: mapProcessStatus(status), status_item: statusItem || null, origem_importacao: 'EXPORT_PD_OC_MB', ativo: !cancelado && ordem.status !== 'CAN', cancelado_em: cancelado ? now : null, motivo_cancelamento: cancelado ? 'PD cancelado no export de PD da OC.' : null, updated_at: now });
     });
     if (payload.length === 0) return res.status(400).json({ status: 'error', message: 'Nenhum PD válido encontrado no arquivo.' });
-    const { error } = await supabase.from('compras_pds').upsert(payload, { onConflict: 'numero_pd' });
+
+    const numerosPd = [...new Set(payload.map((row) => row.numero_pd).filter(Boolean))];
+    const { data: existentes, error: existentesError } = await supabase
+      .from('compras_pds')
+      .select('id,numero_pd,status,status_grupo,ativo,qtd_recebida')
+      .in('numero_pd', numerosPd);
+    if (existentesError) throw existentesError;
+    const existentesMap = new Map((existentes || []).map((row) => [normalizeComparable(row.numero_pd), row]));
+    let regressoesBloqueadas = 0;
+    const payloadMonotonic = payload.map((row) => {
+      const current = existentesMap.get(normalizeComparable(row.numero_pd));
+      if (!current) return row;
+      const currentStatus = current.status_grupo || current.status;
+      const incomingStatus = row.status_grupo || row.status;
+      const mergedStatus = chooseMonotonicImportedStatus(currentStatus, incomingStatus);
+      if (statusRank(mergedStatus) > statusRank(incomingStatus) && mergedStatus === normalizeUpper(currentStatus)) regressoesBloqueadas += 1;
+      return {
+        ...row,
+        status: mergedStatus,
+        status_grupo: mergedStatus,
+        ativo: current.ativo === false ? false : !['CAN', 'EXCLUIDO'].includes(mergedStatus),
+        qtd_recebida: Math.max(toNumber(current.qtd_recebida), toNumber(row.qtd_recebida)),
+      };
+    });
+
+    const { error } = await supabase.from('compras_pds').upsert(payloadMonotonic, { onConflict: 'numero_pd' });
     if (error) throw error;
-    await auditCompra(req, 'PD_ANEXADO_OC', 'PD', ordem.numero_oc, `${payload.length} PD(s) anexados/atualizados na OC ${ordem.numero_oc}.`, { linhas_lidas: rows.length, importadas: payload.length, numero_oc: ordem.numero_oc });
+    await auditCompra(req, 'PD_ANEXADO_OC', 'PD', ordem.numero_oc, `${payloadMonotonic.length} PD(s) anexados/atualizados na OC ${ordem.numero_oc}.`, { linhas_lidas: rows.length, importadas: payloadMonotonic.length, numero_oc: ordem.numero_oc, regressoes_bloqueadas: regressoesBloqueadas, regra: 'IMPORTACAO_PD_NUNCA_REGRIDE; REGRESSAO_SOMENTE_EDICAO_ADMIN_DONO' });
     return res.status(200).json({ status: 'success', message: `${payload.length} PD(s) anexados/atualizados na OC ${ordem.numero_oc}.`, data: { linhas_lidas: rows.length, importadas: payload.length } });
   } catch (error) {
     console.error('[SISHA][compras] importarPdsDaOrdem:', error);
@@ -1415,9 +1462,34 @@ exports.importarPipelinePds = async (req, res) => {
       payload.push({ numero_pd: numeroPd, pn, nsn: normalizeUpper(get(row, 'NSN')) || null, codemp: normalizeUpper(get(row, 'CODEMP')) || null, quantidade: qtd, qtd_pedida: qtd, uf_pedida: get(row, 'UF') || null, valor_unitario: valorUnitUsd, valor_total: toNumber(get(row, 'Total (USD)')) || valorUnitUsd * qtd, moeda: 'USD', valor_total_usd: toNumber(get(row, 'Total (USD)')) || valorUnitUsd * qtd, valor_contratado: toNumber(get(row, 'Valor Contratado')), status: statusOriginal, status_grupo: statusGrupo, data_status: parseDate(get(row, 'Data Status')), org_obt: get(row, 'Org. Obt') || null, ext: get(row, 'Ext') || null, sub: get(row, 'Sub') || null, critica: get(row, 'Crítica') || null, prioridade: get(row, 'Pri') || null, tl: get(row, 'T.L.') || null, co: get(row, 'C.O.') || null, sj: get(row, 'SJ') || null, lote_envio: get(row, 'Lote Envio') || null, omd: get(row, 'OMD') || null, omc: get(row, 'OMC') || null, cam: get(row, 'CAM') || null, equipamento_codigo: get(row, 'Equipamento') || null, modelo: get(row, 'Modelo') || null, serial_number_relatorio: get(row, 'Serial Number') || null, responsavel: get(row, 'Responsável') || null, data_previsao_entrega: parseDate(get(row, 'Dt.Prv. Entrega')), origem_importacao: 'EXPORT_PD_ODC_MB', ativo: !cancelado, cancelado_em: cancelado ? now : null, motivo_cancelamento: cancelado ? 'PD sem OC cancelado no arquivo de origem.' : null, updated_at: now });
     });
     if (payload.length === 0) return res.status(400).json({ status: 'error', message: 'Nenhum PD de pipeline válido encontrado no arquivo.' });
-    const { error } = await supabase.from('compras_pds').upsert(payload, { onConflict: 'numero_pd' });
+
+    const numerosPd = [...new Set(payload.map((row) => row.numero_pd).filter(Boolean))];
+    const { data: existentes, error: existentesError } = await supabase
+      .from('compras_pds')
+      .select('id,numero_pd,status,status_grupo,ativo,qtd_recebida')
+      .in('numero_pd', numerosPd);
+    if (existentesError) throw existentesError;
+    const existentesMap = new Map((existentes || []).map((row) => [normalizeComparable(row.numero_pd), row]));
+    let regressoesBloqueadas = 0;
+    const payloadMonotonic = payload.map((row) => {
+      const current = existentesMap.get(normalizeComparable(row.numero_pd));
+      if (!current) return row;
+      const currentStatus = current.status_grupo || current.status;
+      const incomingStatus = row.status_grupo || row.status;
+      const mergedStatus = chooseMonotonicImportedStatus(currentStatus, incomingStatus);
+      if (statusRank(mergedStatus) > statusRank(incomingStatus) && mergedStatus === normalizeUpper(currentStatus)) regressoesBloqueadas += 1;
+      return {
+        ...row,
+        status: mergedStatus,
+        status_grupo: mergedStatus,
+        ativo: current.ativo === false ? false : !['CAN', 'EXCLUIDO'].includes(mergedStatus),
+        qtd_recebida: Math.max(toNumber(current.qtd_recebida), toNumber(row.qtd_recebida)),
+      };
+    });
+
+    const { error } = await supabase.from('compras_pds').upsert(payloadMonotonic, { onConflict: 'numero_pd' });
     if (error) throw error;
-    await auditCompra(req, 'PD_SEM_OC_IMPORTADO', 'PD', 'PD_SEM_OC', `${payload.length} PD(s) sem OC importados/atualizados.`, { linhas_lidas: rows.length, importadas: payload.length });
+    await auditCompra(req, 'PD_SEM_OC_IMPORTADO', 'PD', 'PD_SEM_OC', `${payloadMonotonic.length} PD(s) sem OC importados/atualizados.`, { linhas_lidas: rows.length, importadas: payloadMonotonic.length, regressoes_bloqueadas: regressoesBloqueadas, regra: 'IMPORTACAO_PD_NUNCA_REGRIDE; REGRESSAO_SOMENTE_EDICAO_ADMIN_DONO' });
     return res.status(200).json({ status: 'success', message: `${payload.length} PD(s) sem OC importados/atualizados.`, data: { linhas_lidas: rows.length, importadas: payload.length } });
   } catch (error) {
     console.error('[SISHA][compras] importarPipelinePds:', error);

@@ -192,7 +192,7 @@ function pendingPurchaseQty(row = {}) {
 
 function buildProcurementSnapshot(rows = [], horizonDays = 90, now = new Date(), referenceLeadTime = null) {
   const horizonEnd = new Date((now instanceof Date ? now.getTime() : new Date(now).getTime()) + (Math.max(1, Number(horizonDays) || 90) * 86400000));
-  const committedStatuses = new Set(['ODA', 'FAT', 'EMB']);
+  const committedStatuses = new Set(['ODA']);
   const potentialStatuses = new Set(['ODC', 'ELB', 'TRI', 'ANS', 'COT', 'PRO']);
   let committedWithinHorizon = 0;
   let potentialWithinHorizon = 0;
@@ -213,7 +213,20 @@ function buildProcurementSnapshot(rows = [], horizonDays = 90, now = new Date(),
       const delay = (delivered - expected) / 86400000;
       if (Number.isFinite(delay)) delayValues.push(delay);
     }
-    if (qty <= 0 || ['CAN', 'REC', 'EXCLUIDO'].includes(status)) continue;
+    if (qty <= 0 || ['CAN', 'EXCLUIDO'].includes(status)) continue;
+    if (['FAT', 'EMB', 'REC'].includes(status)) {
+      pipeline.push({
+        numero_pd: clean(row.numero_pd),
+        numero_oc: clean(row.numero_oc),
+        status,
+        pending_qty: 0,
+        expected_date: expected !== null ? new Date(expected).toISOString().slice(0, 10) : null,
+        committed: false,
+        within_horizon: false,
+        coverage_role: 'HISTORICAL_DELIVERED',
+      });
+      continue;
+    }
     if (committedStatuses.has(status) && expectedInside) committedWithinHorizon += qty;
     else if (potentialStatuses.has(status) && expectedInside) potentialWithinHorizon += qty;
     else if (expected === null) pipelineWithoutDate += qty;
@@ -319,7 +332,7 @@ function buildRecommendation({ shortageStrict, shortageAfterPotential, ceimspaQt
   }
   const pipelineUse = Math.min(remaining, Math.max(0, purchasePotential));
   if (pipelineUse > 0) {
-    actions.push({ action: 'CONFIRM_OR_EXPEDITE_PURCHASE_PIPELINE', quantity: round(pipelineUse, 3), reason: 'Há compra/PD potencial no horizonte, ainda sem o mesmo grau de compromisso de ODA/FAT/EMB.' });
+    actions.push({ action: 'CONFIRM_OR_EXPEDITE_PURCHASE_PIPELINE', quantity: round(pipelineUse, 3), reason: 'Há compra/PD potencial no horizonte, ainda sem o grau de compromisso de uma ODA.' });
     remaining -= pipelineUse;
   }
   if (shortageAfterPotential > 0) {
@@ -470,7 +483,7 @@ function buildA4PnAnalysis({
       'PPU é cobertura confirmada; localizações excluídas já ficam fora da view de disponibilidade.',
       'CeIMSPA é cobertura potencial e exige confirmação externa.',
       'WO/reparo em aberto é potencial até retorno/disponibilidade confirmados.',
-      'ODA/FAT/EMB só reduzem déficit confirmado quando possuem previsão dentro do horizonte.',
+      'Somente ODA reduz déficit futuro de aquisição quando possui previsão dentro do horizonte. FAT/EMB/REC são evidências de material já entregue/recebido e não são somadas novamente como cobertura futura.',
       'ODC e estágios anteriores são pipeline potencial, não estoque confirmado.',
       'Índice de risco não é probabilidade estatística: representa a fração da demanda prevista sem cobertura confirmada.',
       'A4 é somente recomendação read-only; não cria OC, PD, WO ou movimentação automaticamente.',

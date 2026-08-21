@@ -100,6 +100,78 @@ function CoverageTable({ title, rows, type = 'coverage' }) {
 }
 
 
+function BuyDecisionTable({ rows = [] }) {
+  return (
+    <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-amber-950/20">
+        <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">06 • COMPRAR — decisão de verba</h3>
+        <p className="text-sm font-bold text-slate-600 dark:text-slate-400 mt-1">
+          A comprar = necessidade total menos PPU, CeIMSPA e saldo ODA ainda a receber. ODC aparece como processo em andamento, mas não reduz a quantidade.
+        </p>
+      </div>
+      <div className="overflow-auto">
+        <table className="min-w-[1650px] w-full text-sm">
+          <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase text-[10px] tracking-wider">
+            <tr>
+              <th className="p-3 text-left">PN</th>
+              <th className="p-3 text-left">Nomenclatura</th>
+              <th className="p-3 text-left">Necessidade total</th>
+              <th className="p-3 text-left">Política 2 anos</th>
+              <th className="p-3 text-left">PPU</th>
+              <th className="p-3 text-left">CeIMSPA</th>
+              <th className="p-3 text-left">ODA a receber</th>
+              <th className="p-3 text-left">ODC em andamento</th>
+              <th className="p-3 text-left">Cobertura</th>
+              <th className="p-3 text-left">Comprar</th>
+              <th className="p-3 text-left">Déficit política</th>
+              <th className="p-3 text-left">Receitas / motivo</th>
+              <th className="p-3 text-left">Valor estimado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td colSpan={13} className="p-6 text-center font-bold text-slate-500 dark:text-slate-400">Nenhuma aquisição necessária nesta simulação.</td></tr>
+            ) : rows.map((row) => (
+              <tr key={`buy-${row.pn}`} className="border-t border-slate-100 dark:border-slate-800 align-top bg-amber-50/30 dark:bg-amber-950/10">
+                <td className="p-3 font-black text-slate-900 dark:text-slate-100">{row.pn}</td>
+                <td className="p-3">
+                  <div className="font-bold text-slate-900 dark:text-slate-100">{row.nomenclatura || '—'}</div>
+                  <div className="text-xs font-semibold text-slate-500">NSN: {row.nsn || '—'}</div>
+                </td>
+                <td className="p-3 font-black">{numberBr(row.necessidade_total_gerador ?? row.necessidade_total)}</td>
+                <td className="p-3 font-black text-indigo-700 dark:text-indigo-300">{numberBr(row.necessidade_politica_2_anos)}</td>
+                <td className="p-3 font-black text-emerald-700 dark:text-emerald-300">{numberBr(row.ppu_disponivel)}</td>
+                <td className="p-3 font-black text-purple-700 dark:text-purple-300">{numberBr(row.ceimspa_disponivel)}</td>
+                <td className="p-3 font-black text-blue-700 dark:text-blue-300">{numberBr(row.oda_a_receber)}</td>
+                <td className="p-3">
+                  <div className="font-black text-orange-700 dark:text-orange-300">{numberBr(row.odc_em_andamento)}</div>
+                  {Number(row.odc_em_andamento || 0) > 0 ? <div className="mt-1 text-[10px] font-black uppercase text-orange-600">Não abate • priorizar suplementação</div> : null}
+                </td>
+                <td className="p-3">
+                  <div className="font-black">{numberBr(row.cobertura_total_efetiva)}</div>
+                  <div className="text-[10px] font-black text-slate-500">{numberBr(row.cobertura_percentual)}%</div>
+                </td>
+                <td className="p-3 font-black text-amber-800 dark:text-amber-200 text-lg">{numberBr(row.deficit_liquido ?? row.faltam_apos_etapa)}</td>
+                <td className="p-3 font-black text-red-700 dark:text-red-300">{numberBr(row.deficit_politica_2_anos)}</td>
+                <td className="p-3 max-w-[360px]">
+                  <div className="text-xs font-bold text-slate-700 dark:text-slate-300">{row.politica_receitas_texto || row.receitas_texto || row.origens_texto || '—'}</div>
+                  <div className="mt-1 text-[10px] font-semibold text-slate-500 whitespace-pre-wrap">{row.observacao || '—'}</div>
+                  {row.documento_referencia ? <div className="mt-1 text-[10px] font-semibold text-orange-700 dark:text-orange-300">{row.documento_referencia}</div> : null}
+                </td>
+                <td className="p-3 font-black">
+                  <div>{row.valor_total_gbp != null ? moneyGbp(row.valor_total_gbp) : '—'}</div>
+                  <div className="text-[10px] text-slate-500">{row.valor_unitario_gbp != null ? `${moneyGbp(row.valor_unitario_gbp)} / un` : 'Sem referência'}</div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+
 function RecipeDeficiencyPanel({ data }) {
   if (!data) return null;
   const summary = data.summary || {};
@@ -139,7 +211,7 @@ function RecipeDeficiencyPanel({ data }) {
 
       {rows.length === 0 ? (
         <div className="p-6 text-sm font-bold text-emerald-700 dark:text-emerald-300">
-          Nenhuma deficiência de aquisição nas receitas/políticas selecionadas. O PPU e as compras ativas ODA/FAT/EMB pendentes já cobrem a quantidade planejada; eventuais riscos de prazo continuam sinalizados separadamente.
+          Nenhuma deficiência de aquisição nas receitas/políticas selecionadas. PPU, CeIMSPA e saldo ODA a receber já cobrem a quantidade planejada; eventuais riscos de prazo do ODA continuam sinalizados separadamente.
         </div>
       ) : (
         <div className="overflow-auto">
@@ -151,10 +223,10 @@ function RecipeDeficiencyPanel({ data }) {
                 <th className="p-3 text-left">Política × Receita</th>
                 <th className="p-3 text-left">Necessidade 2 anos</th>
                 <th className="p-3 text-left">PPU efetivo</th>
-                <th className="p-3 text-left">ODA/FAT/EMB c/ previsão</th>
-                <th className="p-3 text-left">ODA/FAT/EMB s/ data</th>
-                <th className="p-3 text-left">CeIMSPA potencial</th>
-                <th className="p-3 text-left">ODC / pipeline potencial</th>
+                <th className="p-3 text-left">CeIMSPA</th>
+                <th className="p-3 text-left">ODA c/ previsão</th>
+                <th className="p-3 text-left">ODA s/ data</th>
+                <th className="p-3 text-left">ODC em andamento</th>
                 <th className="p-3 text-left">Déficit a providenciar</th>
                 <th className="p-3 text-left">Cobertura</th>
               </tr>
@@ -170,10 +242,10 @@ function RecipeDeficiencyPanel({ data }) {
                   <td className="p-3 text-xs font-semibold text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-w-[360px]">{row.receitas_texto || '—'}</td>
                   <td className="p-3 font-black">{numberBr(row.necessidade_2_anos)}</td>
                   <td className="p-3 font-black text-emerald-700 dark:text-emerald-300">{numberBr(row.ppu_efetivo)}</td>
-                  <td className="p-3 font-black text-blue-700 dark:text-blue-300">{numberBr(row.compras_comprometidas_no_horizonte)}</td>
-                  <td className="p-3 font-black text-slate-700 dark:text-slate-300">{numberBr(row.compras_comprometidas_sem_data)}</td>
-                  <td className="p-3 font-black text-purple-700 dark:text-purple-300">{numberBr(row.ceimspa_potencial)}</td>
-                  <td className="p-3 font-black text-slate-700 dark:text-slate-300">{numberBr((row.pipeline_potencial_no_horizonte || 0) + (row.pipeline_potencial_sem_data || 0))}</td>
+                  <td className="p-3 font-black text-purple-700 dark:text-purple-300">{numberBr(row.ceimspa_disponivel)}</td>
+                  <td className="p-3 font-black text-blue-700 dark:text-blue-300">{numberBr(row.oda_no_horizonte)}</td>
+                  <td className="p-3 font-black text-slate-700 dark:text-slate-300">{numberBr(row.oda_sem_data)}</td>
+                  <td className="p-3 font-black text-orange-700 dark:text-orange-300">{numberBr(row.odc_em_andamento)}</td>
                   <td className="p-3 font-black text-amber-800 dark:text-amber-200">{numberBr(row.deficit_a_providenciar)}</td>
                   <td className="p-3">
                     <div className="font-black text-slate-900 dark:text-slate-100">{numberBr(row.cobertura_confirmada_percentual)}%</div>
@@ -197,7 +269,7 @@ function RecipeDeficiencyPanel({ data }) {
       ) : null}
 
       <div className="border-t border-slate-200 dark:border-slate-800 px-6 py-4 text-xs font-semibold text-slate-500 dark:text-slate-400">
-        Regra operacional: ODA/FAT/EMB pendentes reduzem a demanda a providenciar para evitar compra duplicada. Se estiverem sem previsão ou fora do horizonte, o SISHA mantém um risco de prazo separado. CeIMSPA e ODC/pipeline permanecem apenas como cobertura potencial. O Excel do Gerador passa a trazer abas específicas desta análise.
+        Regra operacional: PPU e CeIMSPA representam disponibilidade atual; somente o saldo ODA ainda a receber reduz a nova aquisição. ODC permanece destacado como processo que precisa de suplementação/liberação, mas não abate a necessidade. FAT/EMB/REC ficam somente como histórico de material já entregue/recebido. O Excel preserva essa separação.
       </div>
     </section>
   );
@@ -340,7 +412,7 @@ export default function GeradorNecessidades() {
           <div>
             <h1 className="text-2xl font-black text-slate-900 dark:text-slate-100 uppercase">Gerador de Necessidades</h1>
             <p className="text-sm text-slate-600 dark:text-slate-400 font-bold mt-2 max-w-3xl">
-              Agora o Gerador aceita Receitas, PIMs e SBs. A cascata operacional segue PPU → CeIMSPA → ODA → Price List → ODC → Comprar.
+              O Gerador cruza Receitas, Política, PIMs e SBs. Para aquisição, a cobertura é PPU → CeIMSPA → saldo ODA a receber. ODC fica em evidência como processo em andamento, sem abater a necessidade.
             </p>
           </div>
           <div className="flex gap-3 flex-wrap">
@@ -424,9 +496,27 @@ export default function GeradorNecessidades() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
             <SummaryCard title="Necessidade total" value={numberBr(preview.summary.necessidade_total)} subtitle={`${preview.summary.linhas_base} PN(s) consolidados`} icon={ShieldAlert} />
             <SummaryCard title="Disponível PPU + CeIMSPA" value={numberBr((preview.summary.disponivel_ppu ?? preview.summary.coberto_ppu ?? 0) + (preview.summary.disponivel_ceimspa ?? preview.summary.coberto_ceimspa ?? 0))} subtitle={`PPU + recibos ${numberBr(preview.summary.disponivel_ppu ?? preview.summary.coberto_ppu)} • CeIMSPA ${numberBr(preview.summary.disponivel_ceimspa ?? preview.summary.coberto_ceimspa)}`} icon={PackageCheck} />
-            <SummaryCard title="Disponível ODA + ODC" value={numberBr((preview.summary.disponivel_oda ?? preview.summary.coberto_oda ?? 0) + (preview.summary.disponivel_odc ?? preview.summary.coberto_odc ?? 0))} subtitle={`ODA ${numberBr(preview.summary.disponivel_oda ?? preview.summary.coberto_oda)} • ODC ${numberBr(preview.summary.disponivel_odc ?? preview.summary.coberto_odc)}`} icon={FileText} />
+            <SummaryCard title="ODA a receber" value={numberBr(preview.summary.disponivel_oda ?? preview.summary.coberto_oda ?? 0)} subtitle={`ODC em andamento ${numberBr(preview.summary.odc_em_andamento ?? preview.summary.disponivel_odc ?? 0)} • não abate necessidade`} icon={FileText} />
             <SummaryCard title="Comprar" value={numberBr(preview.summary.comprar_qtd)} subtitle={`Estimado ${moneyGbp(preview.summary.comprar_valor_gbp || 0)}`} icon={Download} />
           </div>
+
+          <section className="rounded-3xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50/50 dark:bg-indigo-950/20 p-5">
+            <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.18em] font-black text-indigo-600 dark:text-indigo-300">Política de estoque • horizonte de 2 anos</p>
+                <p className="mt-1 text-sm font-bold text-slate-700 dark:text-slate-300">
+                  Base para decidir cortes de verba sem confundir estoque atual, aquisição já feita e processo ainda não suplementado.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                <div className="rounded-xl bg-white dark:bg-slate-900 border border-indigo-100 dark:border-indigo-900 px-3 py-2"><p className="text-[9px] uppercase font-black text-slate-400">Preciso</p><p className="font-black">{numberBr(preview.summary.politica_necessidade_2_anos)}</p></div>
+                <div className="rounded-xl bg-white dark:bg-slate-900 border border-indigo-100 dark:border-indigo-900 px-3 py-2"><p className="text-[9px] uppercase font-black text-slate-400">PPU + CeIMSPA</p><p className="font-black">{numberBr((preview.summary.politica_ppu_efetivo || 0) + (preview.summary.politica_ceimspa_disponivel || 0))}</p></div>
+                <div className="rounded-xl bg-white dark:bg-slate-900 border border-indigo-100 dark:border-indigo-900 px-3 py-2"><p className="text-[9px] uppercase font-black text-slate-400">ODA</p><p className="font-black text-blue-700 dark:text-blue-300">{numberBr(preview.summary.politica_oda_a_receber)}</p></div>
+                <div className="rounded-xl bg-white dark:bg-slate-900 border border-orange-200 dark:border-orange-900 px-3 py-2"><p className="text-[9px] uppercase font-black text-orange-600">ODC alerta</p><p className="font-black text-orange-700 dark:text-orange-300">{numberBr(preview.summary.politica_odc_em_andamento)}</p></div>
+                <div className="rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 px-3 py-2"><p className="text-[9px] uppercase font-black text-amber-700">Falta comprar</p><p className="font-black text-amber-800 dark:text-amber-200">{numberBr(preview.summary.politica_deficit_a_providenciar)}</p></div>
+              </div>
+            </div>
+          </section>
 
           <RecipeDeficiencyPanel data={preview.recipe_deficiency} />
 
@@ -443,7 +533,7 @@ export default function GeradorNecessidades() {
           <CoverageTable title="03 • ODA" rows={preview.sections.oda || []} />
           <CoverageTable title="04 • BANCO DE PREÇOS" rows={preview.sections.pricelist || []} type="price" />
           <CoverageTable title="05 • ODC" rows={preview.sections.odc || []} />
-          <CoverageTable title="06 • COMPRAR" rows={preview.sections.comprar || []} type="buy" />
+          <BuyDecisionTable rows={preview.sections.comprar || []} />
         </>
       ) : null}
 

@@ -31,7 +31,7 @@ test('prefixos convencionais continuam apontando para a oficina correta', () => 
 });
 
 test('família MT reconhece todos os novos prefixos antes da MT genérica', () => {
-  const expected = ['MTVN', 'MTMV', 'MTHV', 'MTAP', 'MTSV', 'MTPA', 'MTVA', 'MT'];
+  const expected = ['MTVN', 'MTMV', 'MTHV', 'MTAP', 'MTSV', 'MTPA', 'MTAR', 'MTVA', 'MT'];
   expected.forEach((prefix) => {
     const parsed = parseOsDomain(`${prefix}0001`);
     assert.equal(parsed.tipo, 'OFICINA', prefix);

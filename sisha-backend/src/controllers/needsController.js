@@ -1,4 +1,5 @@
 const xlsx = require('xlsx');
+const crypto = require('crypto');
 const supabase = require('../config/supabaseClient');
 const { normalizePn } = require('../utils/importAliases');
 const { loadReferencePriceRows, buildReferencePriceMap } = require('../services/pricingService');
@@ -11,6 +12,8 @@ const { loadGeneratorOperationalRows, classifyMaintenanceIndicatorSemantic } = r
 const { loadMaintenanceProgram } = require('../services/maintenancePlanningService');
 const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
 const { buildRecipePolicyDeficiency, formatRecipePolicyDeficiencyRows } = require('../services/recipePolicyDeficiencyService');
+const { pendingPurchaseQty, isFuturePurchaseCoverageStatus, isOdcProcessStatus } = require('../services/pdLifecyclePolicyService');
+const { setAuditSummary, recordAuditIssue } = require('../utils/importAudit');
 
 const PAGE_SIZE = 1000;
 const ANV_CODES = ACTIVE_AIRCRAFT_CODES;
@@ -27,6 +30,7 @@ const ORIGEM_ALLOWED_ORDER = [
   { tipo: 'OFICINA', codigo: 'MTAP', descricao: OFICINA_MAP.MTAP },
   { tipo: 'OFICINA', codigo: 'MTSV', descricao: OFICINA_MAP.MTSV },
   { tipo: 'OFICINA', codigo: 'MTPA', descricao: OFICINA_MAP.MTPA },
+  { tipo: 'OFICINA', codigo: 'MTAR', descricao: OFICINA_MAP.MTAR },
   { tipo: 'OFICINA', codigo: 'MTVA', descricao: OFICINA_MAP.MTVA },
   { tipo: 'OFICINA', codigo: 'MT', descricao: OFICINA_MAP.MT },
   ...ANV_CODES.map((codigo) => ({ tipo: 'ANV', codigo, descricao: `AERONAVE ${codigo}` })),
@@ -103,6 +107,9 @@ function buildAvailabilitySections(baseRows = [], context) {
   let totalOdc = 0;
   let totalComprar = 0;
   let valorComprar = 0;
+  let appliedPpu = 0;
+  let appliedCeimspa = 0;
+  let appliedOda = 0;
 
   baseRows.forEach((row) => {
     const necessidade = toNumber(row.necessidade_total);
@@ -110,14 +117,17 @@ function buildAvailabilitySections(baseRows = [], context) {
 
     const ppuInfo = context.ppuMap.get(row.pn);
     const disponivelPpu = Math.max(0, toNumber(ppuInfo?.quantidade));
+    const ppuAplicado = Math.min(faltam, disponivelPpu);
     faltam = Math.max(0, faltam - disponivelPpu);
     totalPpu += disponivelPpu;
+    appliedPpu += ppuAplicado;
     if (disponivelPpu > 0) {
       sections.ppu.push({
         ...row,
         disponivel_etapa: roundQuantity(disponivelPpu),
+        aplicado_na_necessidade: roundQuantity(ppuAplicado),
         faltam_apos_etapa: roundQuantity(faltam),
-        cobertura_etapa: roundQuantity(disponivelPpu),
+        cobertura_etapa: roundQuantity(ppuAplicado),
         saldo_apos_etapa: roundQuantity(faltam),
         documento_referencia: formatPpuLocationReference(ppuInfo),
         row_tone: faltam <= 0 ? 'full' : 'partial',
@@ -126,32 +136,41 @@ function buildAvailabilitySections(baseRows = [], context) {
 
     const pis = Array.from(context.pnPiMap.get(row.pn) || []);
     const disponivelCeimspa = Math.max(0, getCeimspaQuantity(context, row.pn, pis));
+    const ceimspaAplicado = Math.min(faltam, disponivelCeimspa);
     faltam = Math.max(0, faltam - disponivelCeimspa);
     totalCeimspa += disponivelCeimspa;
+    appliedCeimspa += ceimspaAplicado;
     if (disponivelCeimspa > 0) {
       sections.ceimspa.push({
         ...row,
         disponivel_etapa: roundQuantity(disponivelCeimspa),
+        aplicado_na_necessidade: roundQuantity(ceimspaAplicado),
         faltam_apos_etapa: roundQuantity(faltam),
-        cobertura_etapa: roundQuantity(disponivelCeimspa),
+        cobertura_etapa: roundQuantity(ceimspaAplicado),
         saldo_apos_etapa: roundQuantity(faltam),
         documento_referencia: pis.join(' | '),
         row_tone: faltam <= 0 ? 'full' : 'partial',
       });
     }
 
+    // Somente ODA ainda pendente representa aquisição futura já efetivada.
+    // FAT/EMB/REC são históricos de entrega/recebimento e não entram neste mapa.
     const odaInfo = context.odaMap.get(row.pn);
     const disponivelOda = Math.max(0, toNumber(odaInfo?.quantidade));
+    const odaAplicado = Math.min(faltam, disponivelOda);
     faltam = Math.max(0, faltam - disponivelOda);
     totalOda += disponivelOda;
+    appliedOda += odaAplicado;
     if (disponivelOda > 0) {
       sections.oda.push({
         ...row,
         disponivel_etapa: roundQuantity(disponivelOda),
+        aplicado_na_necessidade: roundQuantity(odaAplicado),
         faltam_apos_etapa: roundQuantity(faltam),
-        cobertura_etapa: roundQuantity(disponivelOda),
+        cobertura_etapa: roundQuantity(odaAplicado),
         saldo_apos_etapa: roundQuantity(faltam),
         documento_referencia: odaInfo?.docs ? Array.from(odaInfo.docs).join(' | ') : '',
+        observacao: 'ODA = compra efetivada ainda a receber. Apenas o saldo pendente reduz nova necessidade de aquisição.',
         row_tone: faltam <= 0 ? 'full' : 'partial',
       });
     }
@@ -176,19 +195,22 @@ function buildAvailabilitySections(baseRows = [], context) {
       });
     }
 
+    // ODC é processo administrativo em andamento. Deve ficar em evidência para
+    // suplementação/liberação, mas NUNCA abate a quantidade que ainda precisa ser adquirida.
     const odcInfo = context.odcMap.get(row.pn);
     const disponivelOdc = Math.max(0, toNumber(odcInfo?.quantidade));
-    faltam = Math.max(0, faltam - disponivelOdc);
     totalOdc += disponivelOdc;
     if (disponivelOdc > 0) {
       sections.odc.push({
         ...row,
         disponivel_etapa: roundQuantity(disponivelOdc),
+        aplicado_na_necessidade: 0,
         faltam_apos_etapa: roundQuantity(faltam),
-        cobertura_etapa: roundQuantity(disponivelOdc),
+        cobertura_etapa: 0,
         saldo_apos_etapa: roundQuantity(faltam),
         documento_referencia: odcInfo?.docs ? Array.from(odcInfo.docs).join(' | ') : '',
-        row_tone: faltam <= 0 ? 'full' : 'partial',
+        observacao: `PD ODC em andamento (${roundQuantity(disponivelOdc)} un). Não abate a necessidade; priorizar suplementação/liberação do processo existente.`,
+        row_tone: 'info',
       });
     }
 
@@ -198,20 +220,35 @@ function buildAvailabilitySections(baseRows = [], context) {
       totalComprar += faltam;
       valorComprar += valorTotal;
       const priceMeta = buildPricePresentation(priceInfo || null);
+      const coberturaEfetiva = Math.min(necessidade, ppuAplicado + ceimspaAplicado + odaAplicado);
       sections.comprar.push({
         ...row,
         ...priceMeta,
+        necessidade_total_gerador: roundQuantity(necessidade),
+        ppu_disponivel: roundQuantity(disponivelPpu),
+        ppu_aplicado: roundQuantity(ppuAplicado),
+        ceimspa_disponivel: roundQuantity(disponivelCeimspa),
+        ceimspa_aplicado: roundQuantity(ceimspaAplicado),
+        oda_a_receber: roundQuantity(disponivelOda),
+        oda_aplicado: roundQuantity(odaAplicado),
+        odc_em_andamento: roundQuantity(disponivelOdc),
+        cobertura_total_efetiva: roundQuantity(coberturaEfetiva),
+        cobertura_percentual: necessidade > 0 ? Number(((coberturaEfetiva / necessidade) * 100).toFixed(1)) : 100,
+        deficit_liquido: roundQuantity(faltam),
         disponivel_etapa: '',
         faltam_apos_etapa: roundQuantity(faltam),
         cobertura_etapa: '',
         saldo_apos_etapa: roundQuantity(faltam),
+        documento_referencia: odcInfo?.docs?.size
+          ? `ODC em andamento: ${Array.from(odcInfo.docs).join(' | ')}`
+          : '',
         valor_unitario_gbp: valorUnit || null,
         valor_total_gbp: valorTotal || null,
-        observacao: priceInfo
+        observacao: `${priceInfo
           ? (priceMeta.preco_estimativa
             ? `Comprar — ESTIMATIVA por ${priceMeta.fonte_exibicao || 'fonte histórica'}; solicitar nova cotação.`
             : `Comprar — preço por ${priceMeta.fonte_exibicao || 'PRICE LIST'}.`)
-          : 'Comprar — sem referência de valor; solicitar cotação.',
+          : 'Comprar — sem referência de valor; solicitar cotação.'}${disponivelOdc > 0 ? ' Já existe ODC: priorizar suplementação/liberação antes de abrir processo duplicado.' : ''}`,
         row_tone: 'buy',
       });
     }
@@ -224,6 +261,10 @@ function buildAvailabilitySections(baseRows = [], context) {
       ceimspa: roundQuantity(totalCeimspa),
       oda: roundQuantity(totalOda),
       odc: roundQuantity(totalOdc),
+      ppu_aplicado: roundQuantity(appliedPpu),
+      ceimspa_aplicado: roundQuantity(appliedCeimspa),
+      oda_aplicado: roundQuantity(appliedOda),
+      cobertura_efetiva: roundQuantity(appliedPpu + appliedCeimspa + appliedOda),
       comprar: roundQuantity(totalComprar),
       valorComprar: Number(valorComprar.toFixed(2)),
     },
@@ -269,6 +310,50 @@ async function fetchOdcRows() {
   }
 }
 
+
+function buildCanonicalPurchaseStageMaps(purchaseRows = [], odaFallbackMap = new Map(), odcFallbackMap = new Map()) {
+  const odaMap = new Map();
+  const odcMap = new Map();
+  const canonicalPn = new Set();
+
+  const add = (map, pn, qty, doc) => {
+    if (!pn || qty <= 0) return;
+    if (!map.has(pn)) map.set(pn, { quantidade: 0, docs: new Set() });
+    const ref = map.get(pn);
+    ref.quantidade += qty;
+    if (doc) ref.docs.add(doc);
+  };
+
+  (purchaseRows || []).forEach((row) => {
+    if (row?.ativo === false) return;
+    const pn = normalizeKey(row?.pn);
+    if (!pn) return;
+    canonicalPn.add(pn);
+    const status = normalizeUpper(row?.status_grupo || row?.status);
+    const qty = pendingPurchaseQty(row);
+    const doc = safeString(row?.numero_pd || row?.documento_referencia || row?.numero_oc);
+    if (isFuturePurchaseCoverageStatus(status)) add(odaMap, pn, qty, doc);
+    else if (isOdcProcessStatus(status)) add(odcMap, pn, qty, doc);
+  });
+
+  // Compatibilidade: se o PN ainda não possui qualquer PD canônico, aceita a
+  // leitura histórica das views/snapshots legados. Havendo PD canônico, ele é a verdade.
+  for (const [pnRaw, info] of odaFallbackMap.entries()) {
+    const pn = normalizeKey(pnRaw);
+    if (!pn || canonicalPn.has(pn)) continue;
+    add(odaMap, pn, Math.max(0, toNumber(info?.quantidade)), null);
+    if (info?.docs && odaMap.has(pn)) Array.from(info.docs).forEach((doc) => doc && odaMap.get(pn).docs.add(doc));
+  }
+  for (const [pnRaw, info] of odcFallbackMap.entries()) {
+    const pn = normalizeKey(pnRaw);
+    if (!pn || canonicalPn.has(pn)) continue;
+    add(odcMap, pn, Math.max(0, toNumber(info?.quantidade)), null);
+    if (info?.docs && odcMap.has(pn)) Array.from(info.docs).forEach((doc) => doc && odcMap.get(pn).docs.add(doc));
+  }
+
+  return { odaMap, odcMap, canonicalPn };
+}
+
 function parseDateInput(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -282,6 +367,146 @@ function parseDateInput(value) {
   const dt = new Date(text);
   if (!Number.isNaN(dt.getTime())) return dt.toISOString().split('T')[0];
   return null;
+}
+
+
+function normalizeHeaderLabel(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+}
+
+const PIM_HEADER_ALIASES = {
+  pim: ['PIM', 'NUMERO PIM', 'NUM PIM', 'NR PIM', 'N PIM'],
+  pn: ['PN', 'P N', 'PART NUMBER', 'PART NUMER', 'PART NO'],
+  quantidade: ['QTD', 'QTDE', 'QTE', 'QUANTIDADE', 'QTY', 'QUANTITY'],
+  os_vinculada: ['OS', 'NUMERO OS', 'NUM OS', 'NR OS', 'ORDEM DE SERVICO', 'ORDEM SERVICO'],
+  data_solicitacao: ['DATA', 'DATA SOLICITACAO', 'DATA PIM', 'DT SOLICITACAO', 'DT PIM'],
+  nsn: ['NSN', 'NATO STOCK NUMBER', 'PI', 'NSN PI'],
+  nomenclatura: ['NOMENCLATURA', 'DESCRIPTION', 'DESCRICAO', 'ITEM'],
+  observacoes: ['OBS', 'OBSERVACAO', 'OBSERVACOES', 'COMMENTS', 'COMENTARIO'],
+};
+
+function findPimHeaderIndex(rows = []) {
+  const aliasSet = Object.fromEntries(Object.entries(PIM_HEADER_ALIASES).map(([key, aliases]) => [key, new Set(aliases.map(normalizeHeaderLabel))]));
+  const max = Math.min(rows.length, 40);
+  for (let index = 0; index < max; index += 1) {
+    const normalized = (rows[index] || []).map(normalizeHeaderLabel);
+    const has = (key) => normalized.some((value) => aliasSet[key].has(value));
+    if (has('pim') && has('pn') && has('quantidade') && has('os_vinculada')) return index;
+  }
+  return -1;
+}
+
+function buildPimHeaderMap(headers = []) {
+  const normalized = headers.map(normalizeHeaderLabel);
+  const map = {};
+  Object.entries(PIM_HEADER_ALIASES).forEach(([key, aliases]) => {
+    const set = new Set(aliases.map(normalizeHeaderLabel));
+    map[key] = normalized.findIndex((value) => set.has(value));
+  });
+  return map;
+}
+
+function parsePimSnapshotWorkbook(file) {
+  if (!file?.buffer) {
+    const error = new Error('Selecione o arquivo PIM a importar.');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!/\.(xlsx?|xls|csv|ods)$/i.test(file.originalname || '')) {
+    const error = new Error('PIM: envie XLSX, XLS, ODS ou CSV.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const workbook = xlsx.read(file.buffer, { type: 'buffer', cellDates: true });
+  const parsedRows = [];
+  const issues = [];
+  let physicalRows = 0;
+  const sheetStats = [];
+
+  (workbook.SheetNames || []).forEach((sheetName) => {
+    const sheet = workbook.Sheets[sheetName];
+    const matrix = xlsx.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+    if (!matrix.length) return;
+    const headerIndex = findPimHeaderIndex(matrix);
+    if (headerIndex < 0) {
+      sheetStats.push({ sheet: sheetName, status: 'IGNORADA_SEM_CABECALHO_PIM', rows: matrix.length });
+      return;
+    }
+
+    const headers = matrix[headerIndex] || [];
+    const columns = buildPimHeaderMap(headers);
+    let validInSheet = 0;
+    for (let i = headerIndex + 1; i < matrix.length; i += 1) {
+      const row = matrix[i] || [];
+      if (!row.some((value) => value !== null && value !== undefined && String(value).trim() !== '')) continue;
+      physicalRows += 1;
+
+      const pim = safeString(row[columns.pim]);
+      const pn = normalizePn(row[columns.pn]);
+      const quantidade = toNumber(row[columns.quantidade]);
+      const osVinculada = normalizeUpper(row[columns.os_vinculada]);
+      const sourceRow = i + 1;
+      if (!pim || !pn || quantidade <= 0 || !osVinculada) {
+        issues.push({
+          linha_numero: sourceRow,
+          campo: 'PIM/PN/QTD/OS',
+          valor_original: [pim, pn, row[columns.quantidade], osVinculada].filter(Boolean).join(' | '),
+          motivo: `Aba ${sheetName}: linha ignorada porque PIM, PN, quantidade positiva e OS são obrigatórios.`,
+        });
+        continue;
+      }
+
+      const origem = parseOsOrigem(osVinculada);
+      const nomenclatura = columns.nomenclatura >= 0 ? safeString(row[columns.nomenclatura]) : null;
+      const obsOriginal = columns.observacoes >= 0 ? safeString(row[columns.observacoes]) : null;
+      const observacoes = [obsOriginal, nomenclatura ? `Nomenclatura do arquivo: ${nomenclatura}` : null].filter(Boolean).join(' | ') || null;
+      const sourcePayload = {};
+      headers.forEach((header, colIndex) => {
+        const key = safeString(header) || `COL_${colIndex + 1}`;
+        const value = row[colIndex];
+        if (value !== null && value !== undefined && String(value).trim() !== '') sourcePayload[key] = value instanceof Date ? value.toISOString() : value;
+      });
+
+      parsedRows.push({
+        pim,
+        data_solicitacao: columns.data_solicitacao >= 0 ? parseDateInput(row[columns.data_solicitacao]) : null,
+        pn,
+        nsn: columns.nsn >= 0 ? safeString(row[columns.nsn]) : null,
+        quantidade: roundQuantity(quantidade),
+        os_vinculada: osVinculada,
+        observacoes,
+        origem_tipo: origem.origem_tipo,
+        origem_codigo: origem.origem_codigo,
+        origem_descricao: origem.origem_descricao,
+        source_sheet: sheetName,
+        source_row: sourceRow,
+        source_payload: sourcePayload,
+      });
+      validInSheet += 1;
+    }
+    sheetStats.push({ sheet: sheetName, status: 'LIDA', rows: matrix.length, valid: validInSheet });
+  });
+
+  if (!parsedRows.length) {
+    const error = new Error('PIM: nenhuma linha válida encontrada. O arquivo precisa conter PIM, PN, QTD e OS.');
+    error.statusCode = 400;
+    error.pimIssues = issues;
+    throw error;
+  }
+
+  return {
+    rows: parsedRows,
+    issues,
+    physicalRows,
+    sheetStats,
+    sha256: crypto.createHash('sha256').update(file.buffer).digest('hex'),
+  };
 }
 
 function parseOsOrigem(osVinculada) {
@@ -418,6 +643,17 @@ function formatWorkbookRows(rows = []) {
     NSN: row.nsn || '',
     Nomenclatura: row.nomenclatura || '',
     Necessidade_Total: row.necessidade_total,
+    Necessidade_Total_Gerador: row.necessidade_total_gerador ?? row.necessidade_total ?? '',
+    Necessidade_Politica_2_Anos: row.necessidade_politica_2_anos ?? '',
+    PPU_Atual: row.ppu_disponivel ?? '',
+    CeIMSPA_Atual: row.ceimspa_disponivel ?? '',
+    ODA_A_Receber: row.oda_a_receber ?? '',
+    ODC_Em_Andamento_Nao_Abate: row.odc_em_andamento ?? '',
+    Cobertura_Efetiva_PPU_CeIMSPA_ODA: row.cobertura_total_efetiva ?? '',
+    Cobertura_Percentual: row.cobertura_percentual ?? '',
+    Deficit_Liquido_A_Comprar: row.deficit_liquido ?? '',
+    Deficit_Politica_2_Anos: row.deficit_politica_2_anos ?? '',
+    Politica_Receitas: row.politica_receitas_texto ?? '',
     Disponivel_na_Etapa: row.disponivel_etapa ?? row.cobertura_etapa ?? '',
     Faltam_Apos_Etapa: row.faltam_apos_etapa ?? row.saldo_apos_etapa ?? '',
     Usado_em_Receita: row.usado_em_receita || (row.receitas_texto ? 'SIM' : ''),
@@ -793,7 +1029,7 @@ async function loadOptionsContext(force = false) {
   const [receitaRows, politicaRows, pimRows, sbRows, sbItemRows] = await Promise.all([
     fetchAllRows('receita_itens', '*').catch(() => []),
     fetchAllRows('politica_estoque_tarefas', '*').catch(() => []),
-    fetchAllRows('pim_demandas', '*').catch(() => []),
+    fetchAllRows('pim_demandas', '*').then((rows) => (rows || []).filter((row) => row.ativo !== false)).catch(() => []),
     fetchAllRows('service_bulletins', 'sb_numero, titulo, tipo_sb, status_acao, data_publicacao, observacao, fonte_documento, updated_at').catch(() => []),
     fetchAllRows('service_bulletin_items', 'sb_numero, pn, nsn, nomenclatura, qtd, capitulo, item_num, aplicabilidade').catch(() => []),
   ]);
@@ -845,7 +1081,7 @@ async function loadGeneratorContext(force = false) {
   ] = await Promise.all([
     fetchAllRows('receita_itens', '*').catch(() => []),
     fetchAllRows('politica_estoque_tarefas', '*').catch(() => []),
-    fetchAllRows('pim_demandas', '*').catch(() => []),
+    fetchAllRows('pim_demandas', '*').then((rows) => (rows || []).filter((row) => row.ativo !== false)).catch(() => []),
     loadAllEffectivePpuRows().catch(() => []),
     fetchAllRows('leonardo_spares', 'pn, qtd_pendente, documento_referencia').catch(() => []),
     fetchOdcRows(),
@@ -881,27 +1117,33 @@ async function loadGeneratorContext(force = false) {
     }
   });
 
-  const odaMap = new Map();
+  const odaFallbackMap = new Map();
   (odaRows || []).forEach((row) => {
     const pn = normalizeKey(row.pn);
     if (!pn) return;
-    if (!odaMap.has(pn)) odaMap.set(pn, { quantidade: 0, docs: new Set() });
-    const ref = odaMap.get(pn);
+    if (!odaFallbackMap.has(pn)) odaFallbackMap.set(pn, { quantidade: 0, docs: new Set() });
+    const ref = odaFallbackMap.get(pn);
     ref.quantidade += toNumber(row.qtd_pendente);
     if (row.documento_referencia) ref.docs.add(String(row.documento_referencia).trim());
   });
 
-  const odcMap = new Map();
+  const odcFallbackMap = new Map();
   (odcRows || []).forEach((row) => {
     const pn = normalizeKey(row.pn);
     if (!pn) return;
-    if (!odcMap.has(pn)) odcMap.set(pn, { quantidade: 0, docs: new Set() });
+    if (!odcFallbackMap.has(pn)) odcFallbackMap.set(pn, { quantidade: 0, docs: new Set() });
     const qtyKey = firstExistingKey(row, ODC_QTY_CANDIDATES);
     const pdKey = firstExistingKey(row, ODC_PD_CANDIDATES);
-    const ref = odcMap.get(pn);
+    const ref = odcFallbackMap.get(pn);
     ref.quantidade += qtyKey ? toNumber(row[qtyKey]) : 0;
     if (pdKey && row[pdKey]) ref.docs.add(String(row[pdKey]).trim());
   });
+
+  const { odaMap, odcMap } = buildCanonicalPurchaseStageMaps(
+    purchaseRows || [],
+    odaFallbackMap,
+    odcFallbackMap
+  );
 
   const pnPiMap = new Map();
   const pnMetaMap = new Map();
@@ -1028,7 +1270,7 @@ function buildSbCoverageItem(item = {}, context) {
   const ceimspa = getCeimspaQuantity(context, pn, pis);
   const oda = toNumber(context.odaMap.get(pn)?.quantidade);
   const odc = toNumber(context.odcMap.get(pn)?.quantidade);
-  const coberturaTotal = ppu + ceimspa + oda + odc;
+  const coberturaTotal = ppu + ceimspa + oda;
   const saldo = Math.max(quantidadeReferencial - coberturaTotal, 0);
   const priceInfo = context.costRefMap.get(pn) || context.priceMap.get(pn) || null;
   const precisaCadastro = !meta.nomenclatura && !meta.nsn && !context.priceMap.has(pn);
@@ -1043,6 +1285,7 @@ function buildSbCoverageItem(item = {}, context) {
     ceimspa_qtd: ceimspa,
     oda_qtd: oda,
     odc_qtd: odc,
+    odc_abate_necessidade: false,
     saldo_pos_cascata: Number(saldo.toFixed(2)),
     price_ref_gbp: priceInfo ? toNumber(priceInfo.valor_unitario) : null,
     price_ref_fonte: priceInfo?.fonte_exibicao || priceInfo?.fonte_preco || priceInfo?.fonte || (context.priceMap.has(pn) ? 'PRICE LIST' : null),
@@ -1180,6 +1423,23 @@ function buildGeneratorPreview(selection, context) {
     horizonDays: 730,
   });
 
+
+  const deficiencyByPn = new Map((recipeDeficiency.rows || []).map((row) => [normalizeKey(row.pn), row]));
+  sections.comprar = (sections.comprar || []).map((row) => {
+    const policy = deficiencyByPn.get(normalizeKey(row.pn));
+    return {
+      ...row,
+      necessidade_politica_2_anos: policy?.necessidade_2_anos ?? 0,
+      ppu_politica: policy?.ppu_efetivo ?? 0,
+      ceimspa_politica: policy?.ceimspa_disponivel ?? 0,
+      oda_politica: policy?.oda_a_receber_total ?? 0,
+      deficit_politica_2_anos: policy?.deficit_a_providenciar ?? 0,
+      odc_politica_em_andamento: policy?.odc_em_andamento ?? row.odc_em_andamento ?? 0,
+      politica_receitas_texto: policy?.receitas_texto || '',
+      politica_status: policy?.status || '',
+    };
+  });
+
   const summary = {
     receitas_selecionadas: selectedReceitas.length,
     sbs_selecionadas: selectedSbs.length,
@@ -1194,7 +1454,18 @@ function buildGeneratorPreview(selection, context) {
     coberto_ppu: totals.ppu,
     coberto_ceimspa: totals.ceimspa,
     coberto_oda: totals.oda,
-    coberto_odc: totals.odc,
+    coberto_odc: 0,
+    cobertura_efetiva_ppu: totals.ppu_aplicado,
+    cobertura_efetiva_ceimspa: totals.ceimspa_aplicado,
+    cobertura_efetiva_oda: totals.oda_aplicado,
+    cobertura_efetiva_total: totals.cobertura_efetiva,
+    odc_em_andamento: totals.odc,
+    politica_necessidade_2_anos: recipeDeficiency.summary?.necessidade_2_anos || 0,
+    politica_ppu_efetivo: recipeDeficiency.summary?.ppu_efetivo || 0,
+    politica_ceimspa_disponivel: recipeDeficiency.summary?.ceimspa_disponivel || 0,
+    politica_oda_a_receber: recipeDeficiency.summary?.oda_a_receber || 0,
+    politica_odc_em_andamento: recipeDeficiency.summary?.odc_em_andamento || 0,
+    politica_deficit_a_providenciar: recipeDeficiency.summary?.deficit_a_providenciar || 0,
     comprar_qtd: totals.comprar,
     comprar_valor_gbp: totals.valorComprar,
   };
@@ -1536,6 +1807,69 @@ exports.deleteReceitaItem = async (req, res) => {
   }
 };
 
+exports.importPimSnapshot = async (req, res) => {
+  try {
+    const parsed = parsePimSnapshotWorkbook(req.file);
+    (parsed.issues || []).forEach((issue) => recordAuditIssue(req, issue));
+
+    const { data, error } = await supabase.rpc('sisha_replace_pim_snapshot_atomic', {
+      p_rows: parsed.rows,
+      p_source_file_name: req.file?.originalname || 'PIM',
+      p_source_file_sha256: parsed.sha256,
+      p_actor_email: req.user?.email || '',
+      p_actor_role: req.user?.role || '',
+    });
+    if (error) throw error;
+
+    invalidateNeedsCache();
+    const ignored = Math.max(0, parsed.physicalRows - parsed.rows.length);
+    setAuditSummary(req, {
+      status: parsed.issues.length ? 'SUCESSO_COM_ALERTAS' : 'SUCESSO',
+      mensagem: `PIM atual aplicado: ${parsed.rows.length} linha(s) válida(s). O snapshot de arquivo anterior foi preservado como histórico e desativado para o Gerador.`,
+      tabelaAlvo: 'pim_demandas',
+      linhasLidas: parsed.physicalRows,
+      linhasImportadas: parsed.rows.length,
+      linhasIgnoradas: ignored,
+      detalhes: {
+        modo: 'PIM_SNAPSHOT_ATUAL',
+        source_sha256: parsed.sha256,
+        planilha: { abas_encontradas: parsed.sheetStats.length, abas: parsed.sheetStats },
+        regra: 'NOVO_ARQUIVO_PIM_SUBSTITUI_SOMENTE_SNAPSHOT_DE_ARQUIVO; MANUAL_PRESERVADO; SEM_DELETE',
+      },
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      message: `PIM atualizado com ${parsed.rows.length} linha(s) válida(s).`,
+      data: {
+        ...(data || {}),
+        valid_rows: parsed.rows.length,
+        ignored_rows: ignored,
+        warnings: parsed.issues.length,
+        file_name: req.file?.originalname || null,
+        file_sha256: parsed.sha256,
+        sheets: parsed.sheetStats,
+      },
+    });
+  } catch (error) {
+    (error?.pimIssues || []).forEach((issue) => recordAuditIssue(req, issue));
+    const migrationMissing = String(error?.message || '').includes('sisha_replace_pim_snapshot_atomic');
+    const message = migrationMissing
+      ? 'PIM: migration 20260821_HF_PIM_CURRENT_SNAPSHOT_001 ainda não foi aplicada no Supabase.'
+      : (error?.message || 'Falha ao importar o PIM atual.');
+    setAuditSummary(req, {
+      status: 'ERRO',
+      mensagem: message,
+      tabelaAlvo: 'pim_demandas',
+      linhasLidas: 0,
+      linhasImportadas: 0,
+      linhasIgnoradas: 0,
+      detalhes: { modo: 'PIM_SNAPSHOT_ATUAL' },
+    });
+    return res.status(error?.statusCode || 500).json({ status: 'error', message });
+  }
+};
+
 exports.listPims = async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
@@ -1559,7 +1893,7 @@ exports.listPims = async (req, res) => {
     const { data, error } = await query.limit(200);
     if (error) throw error;
 
-    const normalized = (data || []).map(hydratePimOrigem);
+    const normalized = (data || []).filter((row) => row.ativo !== false).map(hydratePimOrigem);
     return res.status(200).json({ status: 'success', data: normalized });
   } catch (_) {
     return res.status(500).json({ status: 'error', message: 'Falha ao listar PIMs.' });
@@ -1587,6 +1921,8 @@ exports.upsertPim = async (req, res) => {
       origem_codigo: origem.origem_codigo,
       origem_descricao: origem.origem_descricao,
       fator_multiplicador: 1,
+      ativo: true,
+      origem_importacao: 'MANUAL',
       updated_at: new Date().toISOString(),
     };
 
@@ -1634,7 +1970,7 @@ exports.listPoliticas = async (req, res) => {
     const { data, error } = await query.limit(200);
     if (error) throw error;
 
-    const normalized = (data || []).map(hydratePimOrigem);
+    const normalized = (data || []).filter((row) => row.ativo !== false).map(hydratePimOrigem);
     return res.status(200).json({ status: 'success', data: normalized });
   } catch (_) {
     return res.status(500).json({ status: 'error', message: 'Falha ao listar políticas.' });
@@ -1719,7 +2055,7 @@ exports.getFoundationSnapshot = async (req, res) => {
   try {
     const [{ count: receitasCount }, { count: pimCount }, { count: politicaCount }] = await Promise.all([
       supabase.from('receita_itens').select('*', { count: 'exact', head: true }),
-      supabase.from('pim_demandas').select('*', { count: 'exact', head: true }),
+      supabase.from('pim_demandas').select('*', { count: 'exact', head: true }).eq('ativo', true),
       supabase.from('politica_estoque_tarefas').select('*', { count: 'exact', head: true }),
     ]);
 
@@ -1998,7 +2334,9 @@ function buildBatchQueryPreview(parsedFile, context) {
       coberto_ppu: totals.ppu,
       coberto_ceimspa: totals.ceimspa,
       coberto_oda: totals.oda,
-      coberto_odc: totals.odc,
+      coberto_odc: 0,
+      odc_em_andamento: totals.odc,
+      cobertura_efetiva_total: totals.cobertura_efetiva,
       comprar_qtd: totals.comprar,
       comprar_valor_gbp: totals.valorComprar,
       itens_usados_em_receita: inputRows.filter((row) => row.usado_em_receita === 'SIM').length,
@@ -2081,7 +2419,7 @@ exports.exportBatchQueryXlsx = async (req, res) => {
       { Indicador: 'Disponível PPU + recibos pendentes', Valor: preview.summary.disponivel_ppu ?? preview.summary.coberto_ppu },
       { Indicador: 'Disponível CeIMSPA', Valor: preview.summary.disponivel_ceimspa ?? preview.summary.coberto_ceimspa },
       { Indicador: 'Disponível ODA', Valor: preview.summary.disponivel_oda ?? preview.summary.coberto_oda },
-      { Indicador: 'Disponível ODC', Valor: preview.summary.disponivel_odc ?? preview.summary.coberto_odc },
+      { Indicador: 'ODC em andamento (não abate necessidade)', Valor: preview.summary.odc_em_andamento ?? preview.summary.disponivel_odc ?? 0 },
       { Indicador: 'Comprar qtd', Valor: preview.summary.comprar_qtd },
       { Indicador: 'Comprar valor GBP', Valor: preview.summary.comprar_valor_gbp },
       { Indicador: 'Itens usados em receita', Valor: preview.summary.itens_usados_em_receita },
@@ -2137,6 +2475,10 @@ exports.exportGeneratorXlsx = async (req, res) => {
       { Indicador: 'PNs planejados', Valor: preview.recipe_deficiency?.summary?.pns_planejados ?? 0 },
       { Indicador: 'PNs deficientes', Valor: preview.recipe_deficiency?.summary?.pns_deficientes ?? 0 },
       { Indicador: 'Necessidade Política × Receita (2 anos)', Valor: preview.recipe_deficiency?.summary?.necessidade_2_anos ?? 0 },
+      { Indicador: 'PPU efetivo aplicado à Política', Valor: preview.recipe_deficiency?.summary?.ppu_efetivo ?? 0 },
+      { Indicador: 'CeIMSPA disponível aplicado à Política', Valor: preview.recipe_deficiency?.summary?.ceimspa_disponivel ?? 0 },
+      { Indicador: 'ODA a receber aplicado à Política', Valor: preview.recipe_deficiency?.summary?.oda_a_receber ?? 0 },
+      { Indicador: 'ODC em andamento — não abate', Valor: preview.recipe_deficiency?.summary?.odc_em_andamento ?? 0 },
       { Indicador: 'Déficit a providenciar', Valor: preview.recipe_deficiency?.summary?.deficit_a_providenciar ?? 0 },
       { Indicador: 'Risco de cobertura no horizonte', Valor: preview.recipe_deficiency?.summary?.risco_cobertura_no_horizonte ?? 0 },
       { Indicador: 'Pendências de cadastro/cálculo', Valor: preview.recipe_deficiency?.summary?.blockers ?? 0 },

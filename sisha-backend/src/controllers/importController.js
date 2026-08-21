@@ -2621,15 +2621,21 @@ exports.deactivateRfqCotacao = async (req, res) => {
 
 exports.listImportLogs = async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const requestedLimit = Number(req.query?.limit || 50);
+        const limit = Math.min(500, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : 50));
+        const tipo = String(req.query?.tipo || '').trim();
+
+        let query = supabase
             .from('import_logs')
             .select('id, tipo_arquivo, nome_arquivo, status, tabela_alvo, linhas_lidas, linhas_importadas, linhas_ignoradas, mensagem, detalhes, uploaded_by_email, uploaded_by_role, created_at, finished_at')
             .order('created_at', { ascending: false })
-            .limit(20);
+            .limit(limit);
 
+        if (tipo) query = query.eq('tipo_arquivo', tipo);
+        const { data, error } = await query;
         if (error) throw error;
 
-        return res.status(200).json({ status: 'success', data: data || [] });
+        return res.status(200).json({ status: 'success', data: data || [], meta: { limit, tipo: tipo || null } });
     } catch (error) {
         return res.status(500).json({ status: 'error', message: 'Falha ao consultar logs de importação.' });
     }

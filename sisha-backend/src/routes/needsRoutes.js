@@ -5,6 +5,7 @@ const controller = require('../controllers/needsController');
 const operationalStateController = require('../controllers/aircraftOperationalStateController');
 const maintenancePlanningController = require('../controllers/maintenancePlanningController');
 const logisticsIntelligenceController = require('../controllers/logisticsIntelligenceController');
+const { createImportAudit } = require('../middlewares/importAuditMiddleware');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -47,6 +48,7 @@ router.put('/receitas/item/:id', adminOnly, controller.upsertReceitaItem);
 router.delete('/receitas/item/:id', adminOnly, controller.deleteReceitaItem);
 
 router.get('/pims', adminOnly, controller.listPims);
+router.post('/pims/import', adminOnly, upload.single('file'), createImportAudit('pim_snapshot'), controller.importPimSnapshot);
 router.post('/pims', adminOnly, controller.upsertPim);
 router.put('/pims/:id', adminOnly, controller.upsertPim);
 router.delete('/pims/:id', adminOnly, controller.deletePim);
