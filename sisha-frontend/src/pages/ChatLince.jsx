@@ -126,6 +126,7 @@ export default function ChatLince() {
   const conversationEndRef = useRef(null);
 
   const [pergunta, setPergunta] = useState('');
+  const [arquivoConversa, setArquivoConversa] = useState(null);
   const [contextoAberto, setContextoAberto] = useState(true);
   const [mensagens, setMensagens] = useState([
     {
@@ -176,6 +177,7 @@ export default function ChatLince() {
 
   const limparComposer = () => {
     setPergunta('');
+    setArquivoConversa(null);
     window.requestAnimationFrame(() => {
       if (composerRef.current) composerRef.current.style.height = '52px';
     });
@@ -374,16 +376,77 @@ export default function ChatLince() {
 
   const enviarPergunta = async (e) => {
     e.preventDefault();
-    const texto = pergunta.trim();
+    const textoDigitado = pergunta.trim();
+    const texto = textoDigitado || (arquivoConversa ? 'Compare este documento com o SISHA e me responda de forma objetiva.' : '');
     if (!texto || consultando) return;
 
     const respostaConfirmacao = texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
-    if (apelidoPendente && /^(sim|s|confirmo|confirma|isso|e isso|é isso|pode cadastrar|pode sim)$/.test(respostaConfirmacao)) {
+    if (!arquivoConversa && apelidoPendente && /^(sim|s|confirmo|confirma|isso|e isso|é isso|pode cadastrar|pode sim)$/.test(respostaConfirmacao)) {
       limparComposer();
       setMensagens((prev) => [...prev, { role: 'user', content: texto }]);
       setConsultando(true);
       await confirmarApelidoPendente();
       setConsultando(false);
+      return;
+    }
+
+    const textoNormalizado = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+    const querCotacao = /\b(COTACAO|RFQ)\b/.test(textoNormalizado) || (/\bPLANILHA\b/.test(textoNormalizado) && /\b(COTAR|COTACAO|PN|PNS)\b/.test(textoNormalizado));
+    const temPnExplicito = /\bP\/?N\s*[:#-]?\s*[A-Z0-9][A-Z0-9.\-/]{2,40}\b/i.test(texto)
+      || (textoNormalizado.match(/\b(?=[A-Z0-9.\-/]*\d)[A-Z0-9][A-Z0-9.\-/]{3,40}\b/g) || []).length >= 1;
+
+    if (querCotacao && (arquivoConversa || temPnExplicito)) {
+      const arquivoNome = arquivoConversa?.name || null;
+      limparComposer();
+      setConsultando(true);
+      setMensagens((prev) => [...prev, { role: 'user', content: arquivoNome ? `${texto}\n📎 ${arquivoNome}` : texto }]);
+      try {
+        const formData = new FormData();
+        formData.append('pergunta', texto);
+        if (arquivoConversa) formData.append('file', arquivoConversa);
+        const response = await apiFetch(
+          '/chat-lince/cotacao/gerar',
+          { method: 'POST', headers: buildAuthHeaders(token), body: formData },
+          token
+        );
+        await baixarResposta(response, 'SISHA_Solicitacao_Cotacao.xlsx');
+        setMensagens((prev) => [...prev, {
+          role: 'assistant',
+          content: 'Planilha de solicitação de cotação gerada no modelo oficial do SISHA. O arquivo foi preparado para download sem criar RFQ, OC, PD ou movimentação no banco.',
+        }]);
+        setUltimaPerguntaExportavel('');
+      } catch (error) {
+        setMensagens((prev) => [...prev, { role: 'assistant', content: error.message || 'Falha ao montar a planilha de cotação.' }]);
+      } finally {
+        setConsultando(false);
+      }
+      return;
+    }
+
+    if (arquivoConversa) {
+      const arquivoAtual = arquivoConversa;
+      limparComposer();
+      setConsultando(true);
+      setMensagens((prev) => [...prev, { role: 'user', content: `${texto}\n📎 ${arquivoAtual.name}` }]);
+      try {
+        const formData = new FormData();
+        formData.append('file', arquivoAtual);
+        formData.append('pergunta', texto);
+        const response = await apiFetch(
+          '/chat-lince/analista/auditar',
+          { method: 'POST', headers: buildAuthHeaders(token), body: formData },
+          token
+        );
+        const result = await response.json();
+        if (result.status !== 'success') throw new Error(result.message || 'Falha ao analisar o documento.');
+        setMensagens((prev) => [...prev, { role: 'assistant', content: result.data?.resposta || 'Documento analisado.' }]);
+        setFontes(result.data?.resultado_estruturado?.sources || []);
+        setUltimaPerguntaExportavel('');
+      } catch (error) {
+        setMensagens((prev) => [...prev, { role: 'assistant', content: error.message || 'Falha ao analisar o documento anexado.' }]);
+      } finally {
+        setConsultando(false);
+      }
       return;
     }
 
@@ -797,10 +860,25 @@ export default function ChatLince() {
                     className="block h-[52px] max-h-[180px] min-h-[52px] w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-0 bg-transparent px-3 py-3 text-[15px] font-semibold leading-6 text-slate-900 outline-none placeholder:text-slate-400 dark:text-white"
                   />
                   <div className="flex items-center justify-between gap-3 px-2 pb-1">
-                    <span className="text-[10px] font-bold text-slate-400">Enter envia • Shift+Enter quebra linha</span>
+                    <div className="flex min-w-0 items-center gap-2">
+                      <label className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-xl border border-slate-200 px-2.5 text-[10px] font-black text-slate-600 hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:text-slate-300">
+                        <Upload size={14} /> ANEXAR
+                        <input
+                          type="file"
+                          className="hidden"
+                          accept=".xlsx,.xls,.csv,.ods,.pdf,.doc,.docx,.txt"
+                          onChange={(e) => setArquivoConversa(e.target.files?.[0] || null)}
+                        />
+                      </label>
+                      {arquivoConversa ? (
+                        <button type="button" onClick={() => setArquivoConversa(null)} title="Remover anexo" className="max-w-[260px] truncate rounded-lg bg-blue-50 px-2 py-1 text-[10px] font-bold text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+                          📎 {arquivoConversa.name} ×
+                        </button>
+                      ) : <span className="text-[10px] font-bold text-slate-400">Enter envia • Shift+Enter quebra linha</span>}
+                    </div>
                     <button
-                      disabled={consultando || !pergunta.trim()}
-                      className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700"
+                      disabled={consultando || (!pergunta.trim() && !arquivoConversa)}
+                      className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700"
                       title="Enviar"
                     >
                       {consultando ? <LoaderCircle size={17} className="animate-spin" /> : <Send size={17} />}

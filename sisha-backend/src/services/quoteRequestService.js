@@ -222,6 +222,25 @@ async function recordRequestItems({ ref, source, items, user }) {
   if (error) throw error;
 }
 
+
+async function buildQuoteRequestFile({ items = [], prefix = 'chat_lince_cotacao' } = {}) {
+  const prepared = await prepareQuoteRequestItems(items);
+  if (!prepared.length) {
+    const error = new Error('Nenhum PN válido foi informado para montar a planilha de cotação.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const workbook = buildWorkbook(prepared);
+  const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+  return {
+    buffer,
+    filename: `${String(prefix || 'chat_lince_cotacao').replace(/[^a-zA-Z0-9_-]/g, '_')}_${stamp}.xlsx`,
+    items: prepared,
+  };
+}
+
 async function exportQuoteRequest({ items = [], source = 'SISHA', user = null }) {
   const prepared = await prepareQuoteRequestItems(items);
   if (!prepared.length) {
@@ -262,6 +281,7 @@ async function markRequestsAnswered({ pns = [], quotationNumber = null }) {
 
 module.exports = {
   prepareQuoteRequestItems,
+  buildQuoteRequestFile,
   exportQuoteRequest,
   markRequestsAnswered,
 };

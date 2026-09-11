@@ -1438,7 +1438,8 @@ function buildAgentPlan(question = '', context = {}) {
       usa_rag_vetorial: false,
     },
     diretriz_resposta: [
-      'Responda em linguagem natural, como um auxiliar logístico experiente.',
+      'Responda em linguagem natural, curta e objetiva, como um auxiliar logístico experiente.',
+      'Comece pela resposta direta em 1 a 3 frases; só expanda detalhes quando a pergunta exigir ou o usuário pedir.',
       'Não exponha rótulos internos como Resposta direta, Fontes/evidências ou Confiança, salvo se o usuário pedir relatório.',
       'Diga o que encontrou, onde encontrou e qual cuidado operacional tomar.',
       'Quando não houver evidência, seja claro e ofereça próximo passo seguro.',
@@ -1479,7 +1480,7 @@ Estilo da resposta ao usuário:
 - Entenda perguntas em linguagem comum, abreviações e continuações curtas. Priorize PN/SN/documento explicitamente escrito pelo usuário antes de qualquer busca ampla ou semântica.
 - Se o usuário pedir dossiê, cruzamento ou rastreio completo, sintetize as fontes em uma única narrativa coerente: identidade PN+SN, localização atual, linha do tempo, OS/WO/PIM/STC, recebimentos, compras e pendências.
 - Diferencie claramente fato físico confirmado, intenção/escrituração (por exemplo OS aberta), documento histórico e possibilidade externa. Não repita a mesma ressalva várias vezes.
-- Seja humano e útil: responda primeiro o que interessa, depois explique por que chegou à conclusão e só então apresente detalhes adicionais.
+- Seja humano e útil: responda primeiro o que interessa em 1 a 3 frases. Só acrescente justificativas, listas ou detalhes quando forem necessários para responder ou quando o usuário pedir.
 - Não use cabeçalhos robóticos como "Resposta direta", "Fontes/evidências" ou "Confiança", salvo se o usuário pedir relatório.
 - Diga o que encontrou, onde encontrou e qual cuidado operacional tomar.
 - Se houver conflito entre fontes, não escolha silenciosamente: explique o conflito e diga qual evidência é mais recente/forte ou que depende de revisão.

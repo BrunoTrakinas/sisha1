@@ -29,6 +29,7 @@ const { registrarAuditoria } = require('../utils/auditLogger');
 const { extractLegacyDocText } = require('../services/receiptDocumentParser');
 const { extractOfficeDocument } = require('../utils/officeDocumentText');
 const { publicChatLinceSecurityReadiness } = require('../services/chatLinceSecurityReadinessService');
+const { buildQuoteRequestFile } = require('../services/quoteRequestService');
 const {
   spreadsheetRecords,
   analysisRecords,
@@ -257,6 +258,77 @@ async function analystRecordsFromUploadedFile(file, question = '') {
   return analysisRecords(analysis);
 }
 
+
+function normalizeQuoteHeader(value = '') {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function quoteItemsFromSpreadsheet(file) {
+  if (!file?.buffer) return [];
+  const workbook = xlsx.read(file.buffer, { type: 'buffer', raw: false, cellDates: false });
+  const items = [];
+  const pnAliases = new Set(['PN', 'PARTNUMBER', 'PARTNO', 'P/N'].map(normalizeQuoteHeader));
+  const qtyAliases = new Set(['QTD', 'QTDE', 'QUANTIDADE', 'QTY', 'QUANTITY'].map(normalizeQuoteHeader));
+  const nameAliases = new Set(['NOMENCLATURA', 'NOME', 'DESCRICAO', 'DESCRIPTION', 'ITEM'].map(normalizeQuoteHeader));
+  const nsnAliases = new Set(['NSN', 'PI', 'NSNPI'].map(normalizeQuoteHeader));
+
+  workbook.SheetNames.forEach((sheetName) => {
+    const matrix = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '', raw: false });
+    const headerIndex = matrix.findIndex((row) => (row || []).some((cell) => pnAliases.has(normalizeQuoteHeader(cell))));
+    if (headerIndex < 0) return;
+    const headers = matrix[headerIndex].map(normalizeQuoteHeader);
+    const findIndex = (aliases) => headers.findIndex((value) => aliases.has(value));
+    const pnIndex = findIndex(pnAliases);
+    const qtyIndex = findIndex(qtyAliases);
+    const nameIndex = findIndex(nameAliases);
+    const nsnIndex = findIndex(nsnAliases);
+    matrix.slice(headerIndex + 1).forEach((row) => {
+      const pn = String(row?.[pnIndex] || '').trim().toUpperCase().replace(/\s+/g, '');
+      if (!pn) return;
+      const qtyRaw = qtyIndex >= 0 ? Number(String(row?.[qtyIndex] || '').replace(',', '.')) : 1;
+      items.push({
+        pn,
+        qtd: Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1,
+        nomenclatura: nameIndex >= 0 ? String(row?.[nameIndex] || '').trim() : '',
+        nsn: nsnIndex >= 0 ? String(row?.[nsnIndex] || '').trim() : '',
+      });
+    });
+  });
+  return items;
+}
+
+function quoteItemsFromPrompt(text = '') {
+  const upper = String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  const found = [];
+  const seen = new Set();
+  const add = (value) => {
+    const pn = String(value || '').replace(/[.,;:]+$/g, '').replace(/\s+/g, '').trim();
+    if (!pn || pn.length < 3 || seen.has(pn)) return;
+    seen.add(pn);
+    found.push({ pn, qtd: 1 });
+  };
+  let match;
+  const explicit = /\bP\/?N\s*[:#-]?\s*([A-Z0-9][A-Z0-9.\-/]{2,40})\b/g;
+  while ((match = explicit.exec(upper))) add(match[1]);
+  if (!found.length) {
+    const candidates = upper.match(/\b(?=[A-Z0-9.\-/]*\d)[A-Z0-9][A-Z0-9.\-/]{3,40}\b/g) || [];
+    const ignored = new Set(['COTACAO', 'PLANILHA', 'SOLICITACAO', 'GERADOR', 'NECESSIDADES']);
+    candidates.forEach((candidate) => { if (!ignored.has(candidate)) add(candidate); });
+  }
+  return found;
+}
+
+function uniqueQuoteItems(items = []) {
+  const map = new Map();
+  (items || []).forEach((item) => {
+    const pn = String(item?.pn || '').trim().toUpperCase().replace(/\s+/g, '');
+    if (!pn) return;
+    if (!map.has(pn)) map.set(pn, { ...item, pn, qtd: Math.max(1, Number(item?.qtd) || 1) });
+    else map.get(pn).qtd += Math.max(1, Number(item?.qtd) || 1);
+  });
+  return Array.from(map.values());
+}
+
 exports.securityReadiness = async (_req, res) => {
   try {
     return res.status(200).json({
@@ -345,6 +417,49 @@ exports.perguntar = async (req, res) => {
   }
 };
 
+
+
+exports.gerarCotacao = async (req, res) => {
+  try {
+    const perguntaRecebida = String(req.body?.pergunta || '').trim();
+    const safety = inspectUserPrompt(perguntaRecebida || 'Gerar planilha de cotação a partir dos PNs informados.');
+    if (!safety.allowed) {
+      return res.status(400).json({ status: 'error', code: `CHAT_LINCE_${safety.code}`, message: safety.publicMessage });
+    }
+
+    let items = quoteItemsFromPrompt(safety.normalized || perguntaRecebida);
+    if (req.file?.buffer) {
+      try {
+        items = items.concat(quoteItemsFromSpreadsheet(req.file));
+      } catch (error) {
+        return res.status(422).json({ status: 'error', message: 'Não consegui ler a lista anexada. Use XLSX, XLS ou CSV com uma coluna PN/P/N/Part Number.' });
+      }
+    }
+    items = uniqueQuoteItems(items);
+    if (!items.length) {
+      return res.status(422).json({ status: 'error', message: 'Informe os PNs no texto ou anexe uma planilha com coluna PN/P/N/Part Number.' });
+    }
+
+    const result = await buildQuoteRequestFile({ items, prefix: 'chat_lince_solicitacao_cotacao' });
+    await registrarAuditoria({
+      req,
+      action: 'CHAT_LINCE_COTACAO_XLSX_GERADA',
+      entity: 'CHAT_LINCE',
+      entityId: result.filename,
+      summary: `${req.user?.email || 'Usuário'} gerou uma planilha de solicitação de cotação pelo Chat Lince em modo somente leitura.`,
+      details: { itens: result.items.length, arquivo_origem: req.file?.originalname || null, gravou_solicitacao: false },
+      level: 'INFO',
+      visibility: 'GOD',
+    }).catch(() => null);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    return res.status(200).send(result.buffer);
+  } catch (error) {
+    console.error('[Chat Lince] Falha ao gerar cotação:', error);
+    return res.status(error.statusCode || 500).json({ status: 'error', message: error.message || 'Falha ao gerar a planilha de cotação.' });
+  }
+};
 
 exports.exportarConsultaAnalista = async (req, res) => {
   try {

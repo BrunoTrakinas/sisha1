@@ -18,6 +18,8 @@ const SOURCE_LABELS = {
     CEIMSPA_VIA_DICIONARIO: 'CeIMSPA via manual',
     CEIMSPA_SEM_PN_CONFIRMADO: 'CeIMSPA sem PN confirmado',
     ESTOQUE_CEIMSPA: 'Estoque CeIMSPA',
+    CEIMSPA_SEM_DEMANDA: 'CeIMSPA — Sem Demanda',
+    IDENTIDADE_PI_COMPARTILHADA: 'Mesmo PI',
     RECIBO_CEIMSPA: 'Recibo destinado ao CeIMSPA',
     SERVICE_BULLETIN: 'Service Bulletin',
     MANUAL_TECNICO_WTP: 'WTP / Manual técnico',
@@ -349,7 +351,9 @@ export default function ConsultaItens() {
                                                         ? <>Recibo {c.numero_recibo || 'sem número'} • {c.uf || 'local não informado'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
                                                         : c.origem_saldo === 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'
                                                             ? <>LOC {c.localizacao_fisica || c.uf || 'não informada'}{c.sn ? <> • SN {c.sn}</> : null}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
-                                                            : <>PI: {c.pi || 'N/I'} | {c.sj || 'N/I'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>}
+                                                            : c.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA'
+                                                                ? <>SEM DEMANDA • PI: {c.pi || 'N/I'} • saldo compartilhado: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
+                                                                : <>PI: {c.pi || 'N/I'} | {c.sj || 'N/I'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>}
                                                 </p>
                                             ))}
                                             {(item.recibos_incorporados || []).filter((row) => row.destino_estoque === 'CEIMSPA').map((row) => (
@@ -521,9 +525,12 @@ export default function ConsultaItens() {
                                                         <div key={idx} className="bg-white border border-slate-200 p-3 rounded-xl shadow-sm hover:border-amber-300 transition-all">
                                                             <div className="flex justify-between items-center mb-1 gap-2">
                                                                 <span className="font-mono text-sm font-black text-slate-800 break-all">{alt.pn}</span>
-                                                                <span className={`text-[10px] font-black px-2 py-0.5 rounded border whitespace-nowrap ${alt.ppu_qtd > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-50 text-slate-500'}`}>
-                                                                    PPU: {alt.ppu_qtd}
-                                                                </span>
+                                                                <div className="flex flex-wrap justify-end gap-1">
+                                                                    <span className={`text-[10px] font-black px-2 py-0.5 rounded border whitespace-nowrap ${alt.ppu_qtd > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-50 text-slate-500'}`}>
+                                                                        PPU: {alt.ppu_qtd}
+                                                                    </span>
+                                                                    {Number(alt.ceimspa_qtd || 0) > 0 ? <span className="text-[10px] font-black px-2 py-0.5 rounded border whitespace-nowrap bg-purple-100 text-purple-800 border-purple-200">CeIMSPA: {formatQuantity(alt.ceimspa_qtd)}</span> : null}
+                                                                </div>
                                                             </div>
                                                             <span className="block text-[10px] font-bold text-slate-500">NSN: {alt.nsn || 'N/A'}</span>
                                                             <span className="block text-[10px] font-bold text-slate-500 mt-2">

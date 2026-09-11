@@ -56,6 +56,20 @@ function normalizeUpper(value) {
     return String(value || '').trim().toUpperCase();
 }
 
+function normalizePiKey(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const digits = raw.replace(/\D/g, '');
+    if (!digits) return normalizeUpper(raw);
+    if (digits.length >= 13) return digits.slice(-9);
+    return digits.padStart(9, '0');
+}
+
+function referencePnsFromSemDemandRow(row = {}) {
+    const refs = Array.isArray(row.referencias) ? row.referencias : [];
+    return Array.from(new Set(refs.map((entry) => normalizeUpper(entry?.ref || entry?.pn)).filter(Boolean)));
+}
+
 function isRfqPriceCurrent(validade, row = {}) {
     const end = resolveRfqValidityEnd({ ...row, validade }) || parseRfqValidityEnd(validade);
     if (!end) return null;
@@ -380,8 +394,14 @@ exports.searchItems = async (req, res) => {
         // em uma LOC excluída da disponibilidade. A quantidade NÃO entra no card PPU por esta consulta.
         const p18 = supabase.from('estoque_ppu').select('id,pn,nomenclatura,nsn_pi,sn,quantidade,localizacao').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_pi', 'sn'], textFields: ['nomenclatura'] })).limit(120);
         const p19 = supabase.from('v_sisha_ppu_custodia_externa_atual').select('pn,nomenclature,nsn_normalized,nsn_original,sn,quantity,box_code,original_location').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_normalized', 'nsn_original', 'sn'], textFields: ['nomenclature'] })).limit(120);
+        const semDemandTerm = query.replace(/[(),%]/g, ' ').replace(/\s+/g, ' ').trim();
+        const p20 = supabase.from('estoque_ceimspa')
+            .select('id,pi,pn,nomenclatura,quantidade,quantidade_existente,sj,uf,fonte_identificacao,referencias,referencias_text,arquivo_fonte')
+            .eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA')
+            .or(`pi.ilike.${semDemandTerm}%,referencias_text.ilike.%${semDemandTerm}%`)
+            .limit(120);
 
-        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19]);
+        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20]);
         const getRes = (index) => results[index].status === 'fulfilled' ? results[index].value.data : null;
 
         const itemsMatch = getRes(0) || [];
@@ -403,6 +423,19 @@ exports.searchItems = async (req, res) => {
         const technicalManualMatch = getRes(16) || [];
         const rawPpuMatch = getRes(17) || [];
         const externalCustodyMatch = getRes(18) || [];
+        const semDemandaMatch = getRes(19) || [];
+        const semDemandaPiByPn = new Map();
+
+        semDemandaMatch.forEach((row) => {
+            const pi = normalizePiKey(row.pi);
+            referencePnsFromSemDemandRow(row).forEach((pn) => {
+                pnsEncontrados.add(pn);
+                semDemandaPiByPn.set(pn, pi);
+                registerSource(fontesEncontradas, pn, 'CEIMSPA_SEM_DEMANDA');
+                setBestName(baseNomes, origemNomenclaturaBase, pn, row.nomenclatura, 'ESTOQUE_CEIMSPA');
+                setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, pi, 'ESTOQUE_CEIMSPA');
+            });
+        });
 
         externalCustodyMatch.forEach((i) => {
             const pn = normalizeUpper(i.pn);
@@ -616,6 +649,50 @@ exports.searchItems = async (req, res) => {
             }
         }
 
+        // Identidade PI compartilhada: se o PN exato possui PI/NSN conhecido,
+        // preserve também os PNs da mesma família de PI. Isso evita que o guard
+        // de PN exato elimine referências válidas de Manual/CeIMSPA.
+        const identityPis = new Set();
+        const addIdentityPi = (value) => { const pi = normalizePiKey(value); if (pi) identityPis.add(pi); };
+        dicMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => { addIdentityPi(row.pi); addIdentityPi(row.nsn); });
+        ppuMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.nsn_pi));
+        itemsMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.nsn));
+        plMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.nsn));
+        ceimspaMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.pi));
+        altDocMatch.filter((row) => normalizeUpper(row.pn) === query || normalizeUpper(row.pn_alt) === query).forEach((row) => addIdentityPi(row.pi));
+        if (semDemandaPiByPn.has(query)) addIdentityPi(semDemandaPiByPn.get(query));
+
+        const samePiPns = new Set();
+        if (identityPis.size > 0) {
+            const safeIdentityPis = Array.from(identityPis).slice(0, 50);
+            const [dicFamilyResult, semDemandFamilyResult] = await Promise.allSettled([
+                supabase.from('dicionario_mestre').select('pn,pi,nomenclatura,nsn').in('pi', safeIdentityPis),
+                supabase.from('estoque_ceimspa').select('pi,nomenclatura,referencias').eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA').in('pi', safeIdentityPis),
+            ]);
+            const dicFamily = dicFamilyResult.status === 'fulfilled' ? (dicFamilyResult.value.data || []) : [];
+            const semFamily = semDemandFamilyResult.status === 'fulfilled' ? (semDemandFamilyResult.value.data || []) : [];
+            dicFamily.forEach((row) => {
+                const pn = normalizeUpper(row.pn);
+                if (!pn) return;
+                samePiPns.add(pn);
+                pnsEncontrados.add(pn);
+                registerSource(fontesEncontradas, pn, 'IDENTIDADE_PI_COMPARTILHADA');
+                setBestName(baseNomes, origemNomenclaturaBase, pn, row.nomenclatura, 'DICIONARIO_MESTRE');
+                setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, row.pi || row.nsn, 'DICIONARIO_MESTRE');
+            });
+            semFamily.forEach((row) => {
+                const pi = normalizePiKey(row.pi);
+                referencePnsFromSemDemandRow(row).forEach((pn) => {
+                    samePiPns.add(pn);
+                    pnsEncontrados.add(pn);
+                    semDemandaPiByPn.set(pn, pi);
+                    registerSource(fontesEncontradas, pn, 'CEIMSPA_SEM_DEMANDA');
+                    setBestName(baseNomes, origemNomenclaturaBase, pn, row.nomenclatura, 'ESTOQUE_CEIMSPA');
+                    setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, pi, 'ESTOQUE_CEIMSPA');
+                });
+            });
+        }
+
         // Se a consulta é exatamente um PN conhecido, esse PN define a identidade
         // do cartão. Ocorrências do mesmo texto em nomenclaturas/manuais continuam
         // como referências técnicas e não podem criar cartões concorrentes.
@@ -629,7 +706,7 @@ exports.searchItems = async (req, res) => {
             || adminDocMatch.some((row) => normalizeUpper(row.assunto_pn) === query);
 
         if (exactPnIdentity && pnsEncontrados.has(query)) {
-            pnsEncontrados = new Set([query]);
+            pnsEncontrados = new Set([query, ...samePiPns]);
 
             const hasWtpTextReference = technicalManualMatch.some((row) => {
                 const manualCode = normalizeUpper(row.manual_codigo);
@@ -823,8 +900,9 @@ exports.searchItems = async (req, res) => {
         }
 
         const pisToSearch = new Set();
-        dicData.forEach((d) => { if (d.pi) pisToSearch.add(d.pi); });
-        allAlternativosRaw.forEach((a) => { if (a.pi) pisToSearch.add(a.pi); });
+        dicData.forEach((d) => { if (d.pi) pisToSearch.add(normalizePiKey(d.pi)); });
+        allAlternativosRaw.forEach((a) => { if (a.pi) pisToSearch.add(normalizePiKey(a.pi)); });
+        semDemandaPiByPn.forEach((pi) => { if (pi) pisToSearch.add(normalizePiKey(pi)); });
 
         let allCeimspa = [];
         const safePis = Array.from(pisToSearch).slice(0, 100);
@@ -835,12 +913,15 @@ exports.searchItems = async (req, res) => {
         if (arrayPns.length > 0) {
             ceimspaQueries.push(supabase.from('v_sisha_ceimspa_disponibilidade').select('*').in('pn', arrayPns));
         }
+        if (safePis.length > 0) {
+            ceimspaQueries.push(supabase.from('estoque_ceimspa').select('*').eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA').in('pi', safePis));
+        }
         if (ceimspaQueries.length > 0) {
             const ceimspaResults = await Promise.allSettled(ceimspaQueries);
             const ceimspaMap = new Map();
             ceimspaResults.forEach((result) => {
                 if (result.status !== 'fulfilled') return;
-                (result.value.data || []).forEach((row) => ceimspaMap.set(row.id, row));
+                (result.value.data || []).forEach((row, index) => ceimspaMap.set(row.id || `${row.fonte_identificacao || row.origem_saldo || 'CEIMSPA'}|${row.pi || ''}|${row.pn || ''}|${index}`, row));
             });
             allCeimspa = Array.from(ceimspaMap.values());
         }
@@ -1251,6 +1332,50 @@ exports.searchItems = async (req, res) => {
                 });
             });
 
+            const meusPisParaAlternativos = new Set(item.dicionario.map((d) => normalizePiKey(d.pi || d.nsn)).filter(Boolean));
+            const piSemDemandaAtual = semDemandaPiByPn.get(pnUpper);
+            if (piSemDemandaAtual) meusPisParaAlternativos.add(piSemDemandaAtual);
+            meusPisParaAlternativos.forEach((pi) => {
+                arrayPns.forEach((candidatePn) => {
+                    const altPn = normalizeUpper(candidatePn);
+                    if (!altPn || altPn === pnUpper) return;
+                    const candidatePis = new Set(
+                        dicData.filter((d) => normalizeUpper(d.pn) === altPn).map((d) => normalizePiKey(d.pi || d.nsn)).filter(Boolean)
+                    );
+                    const semPi = semDemandaPiByPn.get(altPn);
+                    if (semPi) candidatePis.add(semPi);
+                    if (!candidatePis.has(pi)) return;
+                    const existente = altsUnicosMap.get(altPn) || {};
+                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+                    const ceimspaAltRows = allCeimspa.filter((row) => {
+                        const rowPn = normalizeUpper(row.pn);
+                        const rowPi = normalizePiKey(row.pi);
+                        if (rowPn === altPn) return true;
+                        return !rowPn && row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA' && rowPi === pi;
+                    });
+                    const sharedSemDemandSeen = new Set();
+                    const ceimspaAltQty = ceimspaAltRows.reduce((acc, row) => {
+                        if (row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA') {
+                            const key = normalizePiKey(row.pi);
+                            if (sharedSemDemandSeen.has(key)) return acc;
+                            sharedSemDemandSeen.add(key);
+                        }
+                        return acc + (Number(row.quantidade) || 0);
+                    }, 0);
+                    altsUnicosMap.set(altPn, {
+                        pn: altPn,
+                        nsn: existente.nsn || baseNsns[altPn] || pi,
+                        ppu_qtd: Math.max(Number(existente.ppu_qtd || 0), altQty),
+                        ceimspa_qtd: Math.max(Number(existente.ceimspa_qtd || 0), ceimspaAltQty),
+                        fonte: mergeSourceLabels(existente.fonte, ['Alternativo pelo critério de mesmo PI']),
+                        origem: existente.origem || 'mesmo_pi',
+                        sub_item: existente.sub_item || null,
+                        prioridade_manual: existente.prioridade_manual ?? 999,
+                        pi_compartilhado: pi,
+                    });
+                });
+            });
+
             item.alternativos = Array.from(altsUnicosMap.values()).sort(compareAlternativeCards);
 
             // Relações especiais da WTP são informativas e fail-closed:
@@ -1289,8 +1414,10 @@ exports.searchItems = async (req, res) => {
                 || item.wtp_referencias.length > 0;
             item.fontes_alternativos = mergeSourceLabels(item.alternativos.map((alt) => alt.fonte));
 
-            const meusPis = [...new Set(item.dicionario.map((d) => d.pi).filter(Boolean))];
-            const ceimspaOficial = allCeimspa.filter((c) => normalizeUpper(c.pn) === pnUpper || meusPis.includes(c.pi));
+            const meusPisSet = new Set(item.dicionario.map((d) => normalizePiKey(d.pi || d.nsn)).filter(Boolean));
+            if (semDemandaPiByPn.get(pnUpper)) meusPisSet.add(semDemandaPiByPn.get(pnUpper));
+            const meusPis = Array.from(meusPisSet);
+            const ceimspaOficial = allCeimspa.filter((c) => normalizeUpper(c.pn) === pnUpper || meusPis.includes(normalizePiKey(c.pi)));
             const ceimspaPorClassificacaoPpu = myPpuRedirectedCeimspa.map((row) => ({
                 id: `PPU-LOC-CEIMSPA-${row.id}`,
                 pn: row.pn,
@@ -1304,8 +1431,19 @@ exports.searchItems = async (req, res) => {
                 localizacao_fisica: row.localizacao || null,
                 situacao_operacional: row.situacao_operacional || 'A_CONFIRMAR',
             }));
-            item.ceimspa_detalhes = [...ceimspaOficial, ...ceimspaPorClassificacaoPpu];
-            item.ceimspa_qtd = item.ceimspa_detalhes.reduce((acc, c) => acc + (Number(c.quantidade) || 0), 0);
+            item.ceimspa_detalhes = [...ceimspaOficial.map((row) => ({
+                ...row,
+                saldo_compartilhado_pi: row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA',
+            })), ...ceimspaPorClassificacaoPpu];
+            const saldosCeimspaContados = new Set();
+            item.ceimspa_qtd = item.ceimspa_detalhes.reduce((acc, c) => {
+                if (c.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA') {
+                    const key = `SEM_DEMANDA|${normalizePiKey(c.pi)}`;
+                    if (saldosCeimspaContados.has(key)) return acc;
+                    saldosCeimspaContados.add(key);
+                }
+                return acc + (Number(c.quantidade) || 0);
+            }, 0);
 
             item.itens_fora_linha = myPpuExcluded.map((row) => {
                 const sn = isRealStockSerial(row.sn) ? normalizeUpper(row.sn) : null;

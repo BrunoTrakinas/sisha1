@@ -61,7 +61,21 @@ function formatDate(value) {
 
 function isSensitiveQuestion(question = '') {
   const q = normalizeUpper(question);
-  return SENSITIVE_TERMS.some((term) => q.includes(term));
+  const tokens = new Set(q.split(/[^A-Z0-9_]+/).filter(Boolean));
+  return SENSITIVE_TERMS.some((term) => {
+    const normalized = normalizeUpper(term);
+    // Termos de uma palavra precisam coincidir com um token completo.
+    // Isso evita falsos positivos como ENV dentro de ENVIAR.
+    if (/^[A-Z0-9_]+$/.test(normalized)) return tokens.has(normalized);
+    return q.includes(normalized);
+  });
+}
+
+function isQuoteCapabilityQuestion(question = '') {
+  const q = normalizeUpper(question);
+  return /\b(PN|PNS|PART NUMBER|PART NUMBERS)\b/.test(q)
+    && /\b(COTACAO|COTACOES|RFQ|PLANILHA)\b/.test(q)
+    && /\b(ENVIAR|MANDAR|ANEXAR|DEVOLVER|MONTAR|GERAR|CONSEGUE|PODE|PODERIA)\b/.test(q);
 }
 
 function extractCandidateTokens(text = '') {
@@ -802,6 +816,94 @@ async function runDocumentTool(question, sources, modules) {
   return { answer: buildDocumentAnswer(question, sources, docs), intent: 'CONSULTA_DOCUMENTO', tokens: docs };
 }
 
+
+function extractPnPrefix(question = '') {
+  const q = normalizeUpper(question);
+  const patterns = [
+    /\b(?:PN|PNS|P\/N)\b.{0,45}\b(?:COMECA|COMECAM|INICIA|INICIAM|PREFIXO)\b\s*(?:COM\s*)?([A-Z0-9.\-/]{2,24})/,
+    /\b(?:COMECA|COMECAM|INICIA|INICIAM)\b\s*(?:COM\s*)?([A-Z0-9.\-/]{2,24})/,
+  ];
+  for (const regex of patterns) {
+    const match = q.match(regex);
+    if (match?.[1]) return normalizePn(match[1]);
+  }
+  return null;
+}
+
+async function runPnPrefixTool(question, sources, modules) {
+  const prefix = extractPnPrefix(question);
+  if (!prefix) return null;
+  modules.consulta_pn = true;
+  const q = normalizeUpper(question);
+  const onlySemDemand = /\bSEM DEMANDA\b/.test(q) && !/\b(TODOS|TODAS|QUALQUER|GERAL|DOCUMENTOS|ESTOQUES|FONTES)\b/.test(q.replace('SEM DEMANDA', ''));
+  const tasks = [];
+
+  // Sem Demanda guarda múltiplos PNs/REFs no mesmo PI. A busca é feita no
+  // índice textual, mas a quantidade continua sendo contabilizada uma vez por PI.
+  tasks.push(safeSelect('estoque_ceimspa', 'pi,nomenclatura,quantidade,referencias,fonte_identificacao', (query) => query.eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA').ilike('referencias_text', `%${prefix}%`), { motivo: `CeIMSPA Sem Demanda por prefixo ${prefix}`, limit: 500 }));
+
+  if (!onlySemDemand) {
+    tasks.push(
+      safeSelect('items', 'pn,nomenclatura,nsn', (query) => query.ilike('pn', `${prefix}%`), { motivo: `Cadastro mestre por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('dicionario_mestre', 'pn,pi,nsn,nomenclatura', (query) => query.ilike('pn', `${prefix}%`), { motivo: `Manual/dicionário por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('v_sisha_ppu_disponibilidade_efetiva', 'pn,nomenclatura,nsn_pi,quantidade,localizacao', (query) => query.ilike('pn', `${prefix}%`), { motivo: `PPU por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('v_sisha_ceimspa_disponibilidade', 'pn,pi,nomenclatura,quantidade,fonte_identificacao', (query) => query.ilike('pn', `${prefix}%`), { motivo: `CeIMSPA por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('compras_pds', 'pn,numero_pd,numero_oc,status_grupo,quantidade', (query) => query.ilike('pn', `${prefix}%`), { motivo: `PD/OC por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('work_orders', 'pn,numero_wo,status,qtd', (query) => query.ilike('pn', `${prefix}%`), { motivo: `WO por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('price_list', 'pn,nomenclatura,nsn,valor_unitario', (query) => query.ilike('pn', `${prefix}%`), { motivo: `Price List por prefixo ${prefix}`, limit: 500 }),
+      safeSelect('rfq_cotacoes', 'pn,cotacao_numero,valor_unitario,data_cotacao', (query) => query.ilike('pn', `${prefix}%`), { motivo: `RFQ por prefixo ${prefix}`, limit: 500 }),
+    );
+  }
+
+  const settled = await Promise.all(tasks);
+  settled.forEach((result) => addSource(sources, result));
+
+  const byPn = new Map();
+  const add = (pnRaw, source, extra = {}) => {
+    const pn = normalizePn(pnRaw);
+    if (!pn || !pn.startsWith(prefix)) return;
+    if (!byPn.has(pn)) byPn.set(pn, { PN: pn, PI: '', Nomenclatura: '', Quantidade: '', Fontes: new Set() });
+    const row = byPn.get(pn);
+    if (extra.pi && !row.PI) row.PI = String(extra.pi);
+    if (extra.nomenclatura && !row.Nomenclatura) row.Nomenclatura = String(extra.nomenclatura);
+    if (extra.quantidade !== undefined && extra.quantidade !== null && row.Quantidade === '') row.Quantidade = safeNumber(extra.quantidade);
+    row.Fontes.add(sourcePublicLabel(source));
+  };
+
+  sources.forEach((source) => {
+    (source.linhas || []).forEach((row) => {
+      if (source.tabela === 'estoque_ceimspa' && normalizeUpper(row.fonte_identificacao) === 'CEIMSPA_SEM_DEMANDA') {
+        const refs = Array.isArray(row.referencias) ? row.referencias : [];
+        refs.forEach((ref) => add(ref?.ref || ref?.pn, source.tabela, { pi: row.pi, nomenclatura: row.nomenclatura, quantidade: row.quantidade }));
+      } else {
+        add(row.pn, source.tabela, { pi: row.pi || row.nsn_pi || row.nsn, nomenclatura: row.nomenclatura, quantidade: row.quantidade });
+      }
+    });
+  });
+
+  const rows = Array.from(byPn.values()).sort((a, b) => a.PN.localeCompare(b.PN)).map((row) => ({ ...row, Fontes: Array.from(row.Fontes).join(' | ') }));
+  const preview = rows.slice(0, 20).map((row) => `${row.PN}${row.PI ? ` • PI ${row.PI}` : ''}${row.Quantidade !== '' ? ` • qtd ${row.Quantidade}` : ''} • ${row.Fontes}`).join('\n');
+  const scope = onlySemDemand ? 'no CeIMSPA Sem Demanda' : 'nas fontes logísticas consultáveis do SISHA';
+  const answer = rows.length
+    ? `Encontrei ${rows.length} PN(s) começando com ${prefix} ${scope}.${preview ? `\n${preview}` : ''}${rows.length > 20 ? `\nMostrei 20 aqui. Use EXCEL para baixar a relação completa com as fontes.` : ''}`
+    : `Não encontrei PN começando com ${prefix} ${scope}.`;
+
+  return {
+    answer,
+    intent: 'CONSULTA_PN_PREFIXO',
+    tokens: [prefix],
+    structured: {
+      title: `PNs com prefixo ${prefix}`,
+      question,
+      summary: `Foram encontrados ${rows.length} PN(s) com o prefixo ${prefix}.`,
+      columns: ['PN', 'PI', 'Nomenclatura', 'Quantidade', 'Fontes'],
+      rows,
+      sources: sourceSummary(sources),
+      fileBase: `SISHA_PNs_${prefix}`,
+    },
+  };
+}
+
 async function runPnTool(question, sources, modules) {
   const pns = unique(extractCandidateTokens(question).map(normalizePn)).slice(0, 12);
   const q = normalizeUpper(question);
@@ -892,8 +994,24 @@ async function answerWithDbTools(question = '', user = null) {
     };
   }
 
-  let result = null;
-  const serialLookup = await structuredSerialsByPn(question).catch(() => null);
+  if (isQuoteCapabilityQuestion(question)) {
+    return {
+      handled: true,
+      data: {
+        resposta: 'Sim. Envie os PNs ou anexe uma lista. Posso montar a planilha de solicitação de cotação no modelo oficial do Gerador de Necessidades e disponibilizá-la para download.',
+        modelo: 'chat-lince-capability-v1',
+        aviso_ia: null,
+        contexto: {
+          agente: { versao: 'CHAT_LINCE_DB_TOOLS_V1', intencao: 'COTACAO_CAPACIDADE', rotulo: 'Geração de planilha de cotação', confianca_intencao: 1 },
+          tokens: [], sn: [], identificadores_documentais: [], os: [], modulos: modules, trilha_sn: [], aplicacoes_manual: [], fontes: [], helpdesk: null,
+        },
+        exportavel: false,
+      },
+    };
+  }
+
+  let result = await runPnPrefixTool(question, sources, modules);
+  const serialLookup = result ? null : await structuredSerialsByPn(question).catch(() => null);
   if (serialLookup) {
     modules.consulta_pn = true;
     modules.equipamentos = true;

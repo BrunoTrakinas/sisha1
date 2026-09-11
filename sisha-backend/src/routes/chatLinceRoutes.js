@@ -20,6 +20,7 @@ const upload = multer({
 });
 
 router.post('/perguntar', guardChatLinceConsult, chatLinceController.perguntar);
+router.post('/cotacao/gerar', upload.single('file'), guardChatLinceConsult, chatLinceController.gerarCotacao);
 router.post('/analista/exportar', guardChatLinceConsult, chatLinceController.exportarConsultaAnalista);
 router.post('/analista/auditar', guardChatLinceDocumentAnalysis, upload.single('file'), chatLinceController.auditarDocumentoComparandoSisha);
 router.post('/analista/auditar/exportar', guardChatLinceDocumentAnalysis, upload.single('file'), chatLinceController.exportarAuditoriaComparativa);

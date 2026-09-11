@@ -85,6 +85,13 @@ const orientacoesUploadPorTipo = {
         comportamento: 'Lê o inventário e abre a conferência na página Equipamentos. Cada linha identifica uma unidade por PN + SN; não soma quantidade ao PPU.',
         observacao: 'Use uma linha por equipamento. Exemplo: se o PPU possui 5 unidades e este arquivo identifica 5 SN no mesmo PN/local, o total permanece 5 e os cinco SN passam a explicar essas cinco unidades.',
     },
+    ceimspa_sem_demanda: {
+        titulo: 'CeIMSPA — Itens Sem Demanda',
+        obrigatorias: ['PI', 'REF', 'QTDE_DISPONIVEL'],
+        recomendadas: ['NOME_PORT', 'NOME_COL', 'RNVC', 'OM', 'MEIO', 'NOME', 'QTDE_APL', 'QTDE_DOT', 'CAM', 'QTDE_EXISTENTE'],
+        comportamento: 'Substitui somente o snapshot Sem Demanda. O saldo é único por PI; os PNs/REFs ligados ao mesmo PI compartilham a mesma quantidade e não são somados entre si.',
+        observacao: 'Na pesquisa, cada PN/REF permanece localizável. PNs do mesmo PI aparecem como “Alternativo pelo critério de mesmo PI”.',
+    },
     ceimspa: {
         titulo: 'Estoque CeIMSPA',
         obrigatorias: ['PI / NSN / NSN-PI'],
@@ -250,7 +257,11 @@ export default function Cadastro() {
     const handleFileChange = (e) => {
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
-            if (e.target.files[0].name.toLowerCase().includes('ceimspa')) {
+            const nomeArquivo = e.target.files[0].name.toLowerCase();
+            if (/sem[ _-]?demanda/.test(nomeArquivo)) {
+                setTipoArquivo('ceimspa_sem_demanda');
+                setModalCeimspaConfirm(false);
+            } else if (nomeArquivo.includes('ceimspa')) {
                 setTipoArquivo('ceimspa');
                 setModalCeimspaConfirm(true);
             }
@@ -936,6 +947,7 @@ export default function Cadastro() {
                             <option value="saida_movimentacao_ppu">SaidaMovimentacaoPorPeriodo</option>
                             <option value="master_os">MASTER OS — Histórico e Orquestração de Ordens de Serviço</option>
                             <option value="ceimspa">Estoque CeIMSPA</option>
+                            <option value="ceimspa_sem_demanda">CeIMSPA — Itens Sem Demanda</option>
                             <option value="historico_movimentacao">Histórico de Movimentação</option>
                             <option value="disponibilidade_anv">Mapa de Disponibilidade / Inspeções</option>
                             <option value="controle_inspecao">CONTROLE INSPEÇÃO</option>

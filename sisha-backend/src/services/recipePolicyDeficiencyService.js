@@ -115,6 +115,62 @@ function ceimspaQuantity(rows = [], pn, piSet = new Set()) {
   }, 0));
 }
 
+function normalizePi(value) {
+  const raw = clean(value);
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return upper(raw);
+  if (digits.length >= 13) return digits.slice(-9);
+  return digits.padStart(9, '0');
+}
+
+function buildCeimspaLedger(rows = []) {
+  const ledger = new Map();
+  (rows || []).forEach((row, index) => {
+    const pi = normalizePi(row.pi);
+    const shared = upper(row.fonte_identificacao) === 'CEIMSPA_SEM_DEMANDA';
+    const key = shared
+      ? `SEM_DEMANDA_PI:${pi || ''}`
+      : `CEIMSPA_ROW:${row.id || `${upper(row.fonte_identificacao || row.origem_saldo) || 'CEIMSPA'}|${normalizePn(row.pn) || ''}|${pi || ''}|${index}`}`;
+    const qty = positive(row.quantidade);
+    if (shared && ledger.has(key)) {
+      ledger.get(key).remaining = Math.max(ledger.get(key).remaining, qty);
+      return;
+    }
+    ledger.set(key, { row, pi, shared, remaining: qty });
+  });
+  return ledger;
+}
+
+function consumeCeimspa(ledger, pn, piSet = new Set(), need = Infinity) {
+  const targetPn = normalizePn(pn);
+  const pis = new Set(Array.from(piSet || []).map(normalizePi).filter(Boolean));
+  let available = 0;
+  let applied = 0;
+  for (const entry of ledger.values()) {
+    const rowPn = normalizePn(entry.row?.pn);
+    const rowPi = normalizePi(entry.row?.pi);
+    const direct = rowPn && rowPn === targetPn;
+    const byPi = !rowPn && rowPi && pis.has(rowPi);
+    if (!direct && !byPi) continue;
+    const current = positive(entry.remaining);
+    if (current <= 0) continue;
+    available += current;
+    const remainingNeed = Math.max(0, Number.isFinite(Number(need)) ? Number(need) - applied : current);
+    const take = Math.min(current, remainingNeed);
+    applied += take;
+    entry.remaining = round(current - take);
+  }
+  return { available: round(available), applied: round(applied) };
+}
+
+function setEntry(map, pn) {
+  const entry = mapEntry(map, pn);
+  if (entry instanceof Set) return entry;
+  if (Array.isArray(entry)) return new Set(entry);
+  return new Set();
+}
+
 function mapEntry(map, pn) {
   const target = normalizePn(pn);
   if (!target || !map?.get) return null;
@@ -143,6 +199,7 @@ function buildRecipePolicyDeficiency({
   ppuMap = new Map(),
   ceimspaRows = [],
   pnPiMap = new Map(),
+  pnAlternativeMap = new Map(),
   pnMetaMap = new Map(),
   purchaseRows = [],
   odaFallbackMap = new Map(),
@@ -224,12 +281,50 @@ function buildRecipePolicyDeficiency({
   }
 
   const deficientRecipes = new Set();
+  const ppuRemaining = new Map();
+  (ppuMap || new Map()).forEach((info, pn) => ppuRemaining.set(normalizePn(pn), positive(info?.quantidade)));
+  const ceimspaLedger = buildCeimspaLedger(ceimspaRows);
+  const consumePpu = (pn, need = Infinity) => {
+    const key = normalizePn(pn);
+    const available = positive(ppuRemaining.get(key));
+    const requested = Math.max(0, Number.isFinite(Number(need)) ? Number(need) : available);
+    const applied = Math.min(available, requested);
+    ppuRemaining.set(key, round(available - applied));
+    return { available: round(available), applied: round(applied) };
+  };
+
   const rows = Array.from(demandByPn.values()).map((entry) => {
     const need = round(entry.necessidade_2_anos);
-    const ppu = round(mapQuantity(ppuMap, entry.pn));
-    const ceimspa = ceimspaQuantity(ceimspaRows, entry.pn, mapEntry(pnPiMap, entry.pn) || new Set());
-    const physicalCoverage = round(Math.min(need, ppu + ceimspa));
-    const afterPhysical = round(Math.max(0, need - ppu - ceimspa));
+    let remaining = need;
+    const ppuStock = consumePpu(entry.pn, remaining);
+    const ppu = ppuStock.available;
+    remaining = round(Math.max(0, remaining - ppuStock.applied));
+    const directPis = setEntry(pnPiMap, entry.pn);
+    const ceimspaStock = consumeCeimspa(ceimspaLedger, entry.pn, directPis, remaining);
+    const ceimspa = ceimspaStock.available;
+    remaining = round(Math.max(0, remaining - ceimspaStock.applied));
+
+    const alternativeDetails = [];
+    let alternativeAvailable = 0;
+    let alternativeApplied = 0;
+    Array.from(setEntry(pnAlternativeMap, entry.pn)).sort().forEach((altPnRaw) => {
+      const altPn = normalizePn(altPnRaw);
+      if (!altPn || altPn === entry.pn) return;
+      const altPpu = consumePpu(altPn, remaining);
+      remaining = round(Math.max(0, remaining - altPpu.applied));
+      const altCeimspa = consumeCeimspa(ceimspaLedger, altPn, setEntry(pnPiMap, altPn), remaining);
+      remaining = round(Math.max(0, remaining - altCeimspa.applied));
+      const available = round(altPpu.available + altCeimspa.available);
+      const applied = round(altPpu.applied + altCeimspa.applied);
+      alternativeAvailable += available;
+      alternativeApplied += applied;
+      const sharedPi = Array.from(directPis).map(normalizePi).filter(Boolean).find((pi) => Array.from(setEntry(pnPiMap, altPn)).map(normalizePi).includes(pi));
+      alternativeDetails.push({ pn: altPn, disponivel: available, aplicado: applied, fonte: sharedPi ? 'Alternativo pelo critério de mesmo PI' : 'Alternativo técnico/documental' });
+    });
+    alternativeAvailable = round(alternativeAvailable);
+    alternativeApplied = round(alternativeApplied);
+    const physicalCoverage = round(Math.min(need, ppuStock.applied + ceimspaStock.applied + alternativeApplied));
+    const afterPhysical = round(remaining);
     const canonical = buildPurchaseCoverage(purchaseRows, entry.pn, { now, horizonDays });
 
     let odaWithin = canonical.committed_within_horizon;
@@ -273,7 +368,7 @@ function buildRecipePolicyDeficiency({
     const confirmedCoveragePct = need > 0 ? round((coverageForPurchase / need) * 100, 1) : 100;
 
     let status = 'DEFICIENTE';
-    if (afterPhysical <= 0) status = 'COBERTO_PPU_CEIMSPA';
+    if (afterPhysical <= 0) status = alternativeApplied > 0 ? 'COBERTO_COM_ALTERNATIVOS' : 'COBERTO_PPU_CEIMSPA';
     else if (deficitToProvide <= 0 && odaRiskQty <= 0) status = 'COBERTO_COM_ODA_NO_HORIZONTE';
     else if (deficitToProvide <= 0) status = 'COBERTO_COM_ODA_RISCO_PRAZO';
     else if (odcTotal > 0) status = 'DEFICIENTE_COM_ODC_EM_ANDAMENTO';
@@ -288,6 +383,9 @@ function buildRecipePolicyDeficiency({
       necessidade_2_anos: need,
       ppu_efetivo: ppu,
       ceimspa_disponivel: ceimspa,
+      alternativos_disponivel: alternativeAvailable,
+      alternativos_aplicado: alternativeApplied,
+      alternativos_texto: alternativeDetails.map((item) => `${item.pn}: ${item.disponivel} un (${item.fonte})`).join(' | '),
       cobertura_fisica_atual: physicalCoverage,
       deficit_apos_estoques: afterPhysical,
       oda_no_horizonte: round(odaWithin),
@@ -313,11 +411,11 @@ function buildRecipePolicyDeficiency({
       fonte_compra: purchaseSource,
       nota: deficitToProvide > 0
         ? (odcTotal > 0
-          ? `Faltam ${deficitToProvide} un para cumprir a Política × Receita após PPU, CeIMSPA e ODA. Existe ODC em andamento (${odcTotal} un), que não abate a necessidade e deve ser priorizado para suplementação/liberação.`
-          : `Faltam ${deficitToProvide} un para cumprir a Política × Receita após PPU, CeIMSPA e ODA. FAT/EMB/REC são históricos de material já entregue/recebido e não são somados novamente.`)
+          ? `Faltam ${deficitToProvide} un para cumprir a Política × Receita após PPU, CeIMSPA, Alternativos e ODA. Existe ODC em andamento (${odcTotal} un), que não abate a necessidade e deve ser priorizado para suplementação/liberação.`
+          : `Faltam ${deficitToProvide} un para cumprir a Política × Receita após PPU, CeIMSPA, Alternativos e ODA. FAT/EMB/REC são históricos de material já entregue/recebido e não são somados novamente.`)
         : odaRiskQty > 0
           ? `A quantidade de aquisição já está coberta por ODA, porém ${odaRiskQty} un não possuem previsão dentro do horizonte de 2 anos. Acompanhar prazo sem duplicar compra.`
-          : 'Cobertura suficiente por PPU, CeIMSPA e/ou saldo ODA ainda a receber.',
+          : 'Cobertura suficiente por PPU, CeIMSPA, Alternativos e/ou saldo ODA ainda a receber.',
     };
   }).sort((a, b) => {
     const aDef = a.deficit_a_providenciar > 0 ? 0 : 1;
@@ -340,6 +438,7 @@ function buildRecipePolicyDeficiency({
     necessidade_2_anos: round(rows.reduce((sum, row) => sum + row.necessidade_2_anos, 0)),
     ppu_efetivo: round(rows.reduce((sum, row) => sum + Math.min(row.ppu_efetivo, row.necessidade_2_anos), 0)),
     ceimspa_disponivel: round(rows.reduce((sum, row) => sum + Math.min(row.ceimspa_disponivel, Math.max(0, row.necessidade_2_anos - row.ppu_efetivo)), 0)),
+    alternativos_aplicado: round(rows.reduce((sum, row) => sum + positive(row.alternativos_aplicado), 0)),
     oda_a_receber: round(rows.reduce((sum, row) => sum + row.oda_aplicada_na_necessidade, 0)),
     odc_em_andamento: round(rows.reduce((sum, row) => sum + row.odc_em_andamento, 0)),
     deficit_a_providenciar: round(rows.reduce((sum, row) => sum + row.deficit_a_providenciar, 0)),
@@ -355,7 +454,8 @@ function buildRecipePolicyDeficiency({
     rules: [
       'Demanda = Qtde planejada em 2 anos na Política × Qtd por ciclo da Receita.',
       'Demandas de um mesmo PN são consolidadas antes da cobertura para não reutilizar o mesmo estoque em duas receitas.',
-      'PPU efetivo e CeIMSPA disponível reduzem a necessidade porque representam disponibilidade atual consultável.',
+      'PPU efetivo, CeIMSPA disponível e estoque de PNs alternativos reduzem a necessidade porque representam disponibilidade atual consultável.',
+      'Alternativos pelo mesmo PI compartilham o mesmo saldo contábil; esse saldo é consumido uma única vez na simulação.',
       'Somente o saldo ODA ainda a receber reduz a necessidade de nova aquisição.',
       'ODC não reduz a necessidade: permanece em evidência como processo em andamento que requer suplementação/liberação.',
       'FAT, EMB e REC são evidências históricas de material já entregue/recebido e nunca são somados novamente como cobertura futura.',
@@ -376,8 +476,10 @@ function formatRecipePolicyDeficiencyRows(rows = []) {
     Necessidade_2_Anos: row.necessidade_2_anos,
     PPU_Efetivo: row.ppu_efetivo,
     CeIMSPA_Disponivel: row.ceimspa_disponivel,
+    Alternativos: row.alternativos_texto || '',
+    Alternativos_Aplicado: row.alternativos_aplicado || 0,
     Cobertura_Fisica_Atual: row.cobertura_fisica_atual,
-    Deficit_Apos_PPU_CeIMSPA: row.deficit_apos_estoques,
+    Deficit_Apos_PPU_CeIMSPA_Alternativos: row.deficit_apos_estoques,
     ODA_Com_Previsao_2_Anos: row.oda_no_horizonte,
     ODA_Sem_Data: row.oda_sem_data,
     ODA_Fora_2_Anos: row.oda_fora_horizonte,

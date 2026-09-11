@@ -22,6 +22,7 @@ const { importMasterOsHistory } = require('../services/masterOsImportService');
 const { parsePpuExternalCustodyWorkbook } = require('../services/ppuExternalCustodyParserService');
 const { importExternalCustodySnapshot, saveReconciliationDecision } = require('../services/ppuExternalCustodyService');
 const { getExternalCustodyReconciliation } = require('../services/ppuEffectiveAvailabilityService');
+const { parseCeimspaSemDemandaRows } = require('../services/ceimspaSemDemandaService');
 
 const cleanCurrency = (val) => val ? parseFloat(String(val).replace(/[^0-9.,]/g, '').replace(',', '.')) || 0 : 0;
 const safeString = (val) => val ? String(val).trim() : null;
@@ -1546,6 +1547,54 @@ exports.importData = async (req, res) => {
         // ---------------------------------------------------
         // ROTA 7: ESTOQUE CEIMSPA (TABULAÇÕES E ZEROS BLINDADOS)
         // ---------------------------------------------------
+        else if (tipoArquivo === 'ceimspa_sem_demanda') {
+            const sheetName = workbook.SheetNames[0];
+            const sheet = workbook.Sheets[sheetName];
+            const rawRows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+            const parsed = parseCeimspaSemDemandaRows(rawRows, { fileName: req.file?.originalname || null });
+            const ceimspaData = parsed.rows || [];
+
+            if (!ceimspaData.length) {
+                return respondError(400, 'Nenhum PI válido foi encontrado no arquivo CeIMSPA Sem Demanda.', { tabelaAlvo: 'estoque_ceimspa' });
+            }
+
+            // Snapshot Sem Demanda é independente do estoque CeIMSPA regular.
+            // Substitui somente a fotografia anterior desta mesma fonte.
+            const { error: deleteError } = await supabase
+                .from('estoque_ceimspa')
+                .delete()
+                .eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA');
+            if (deleteError) throw deleteError;
+
+            const chunkSize = 1000;
+            for (let i = 0; i < ceimspaData.length; i += chunkSize) {
+                const { error: insertError } = await supabase.from('estoque_ceimspa').insert(ceimspaData.slice(i, i + chunkSize));
+                if (insertError) throw insertError;
+            }
+
+            await registrarAuditoria({
+                req,
+                action: 'CEIMSPA_SEM_DEMANDA_SUBSTITUIDO',
+                entity: 'ESTOQUE_CEIMSPA',
+                entityId: req.file?.originalname || 'ceimspa_sem_demanda',
+                summary: `${req.user?.email || 'Usuário'} atualizou o snapshot CeIMSPA Sem Demanda com ${ceimspaData.length} PI(s) únicos.`,
+                details: {
+                    linhas_lidas: Math.max(rawRows.length - (parsed.headerIndex + 1), 0),
+                    pis_importados: ceimspaData.length,
+                    arquivo: req.file?.originalname || null,
+                    regra_saldo: 'PI_UNICO_SALDO_COMPARTILHADO_ENTRE_REFERENCIAS',
+                },
+                level: 'INFO',
+                visibility: 'GOD',
+            });
+
+            return respondSuccess(
+                `CeIMSPA Sem Demanda atualizado: ${ceimspaData.length} PI(s) únicos. PNs/REFs do mesmo PI compartilham o mesmo saldo e não são somados entre si.`,
+                {},
+                { tabelaAlvo: 'estoque_ceimspa', linhasLidas: Math.max(rawRows.length - (parsed.headerIndex + 1), 0), linhasImportadas: ceimspaData.length }
+            );
+        }
+
         else if (tipoArquivo === 'ceimspa') {
             const sheetName = workbook.SheetNames[0];
             const sheet = workbook.Sheets[sheetName];
@@ -1604,7 +1653,7 @@ exports.importData = async (req, res) => {
 
                 if (ceimspaData.length > 0) {
                     if (deveSobrescrever) {
-                        await supabase.from('estoque_ceimspa').delete().not('id', 'is', null);
+                        await supabase.from('estoque_ceimspa').delete().or('fonte_identificacao.is.null,fonte_identificacao.neq.CEIMSPA_SEM_DEMANDA');
                     }
                     
                     const chunkSize = 1000;
