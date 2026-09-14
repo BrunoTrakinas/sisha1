@@ -2,11 +2,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const xlsx = require('xlsx');
 const supabase = require('../config/supabaseClient');
 const { setAuditSummary } = require('../utils/importAudit');
 const { registrarAuditoria } = require('../utils/auditLogger');
-const { parseCeimspaSemDemandaWorksheet } = require('../services/ceimspaSemDemandaService');
+const { parseCeimspaSemDemandaLegacyXls } = require('../services/ceimspaSemDemandaLegacyXlsService');
 
 const memoryMb = () => {
   const m = process.memoryUsage();
@@ -46,19 +45,41 @@ async function importCeimspaSemDemandaLowMemory(req, res) {
       memoria_mb: memoryMb(),
     });
 
-    workbook = xlsx.readFile(tempPath, {
-      dense: true,
-      cellStyles: false,
-      cellNF: false,
-      cellHTML: false,
-    });
+    const extension = path.extname(req.file?.originalname || tempPath).toLowerCase();
+    let parsed;
+    let memoryMode;
 
-    const sheetName = workbook.SheetNames?.[0];
-    const sheet = sheetName ? workbook.Sheets?.[sheetName] : null;
-    const parsed = parseCeimspaSemDemandaWorksheet(sheet, xlsx, {
-      fileName: req.file?.originalname || null,
-    });
+    if (extension === '.xls') {
+      parsed = parseCeimspaSemDemandaLegacyXls(tempPath, {
+        fileName: req.file?.originalname || null,
+      });
+      memoryMode = 'LEGACY_XLS_BIFF_INCREMENTAL';
+    } else {
+      // XLSX permanece no leitor homologado. O problema reproduzido em produção é
+      // específico do XLS/BIFF legado, que não passa mais pelo SheetJS.
+      const xlsx = require('xlsx');
+      const { parseCeimspaSemDemandaWorksheet } = require('../services/ceimspaSemDemandaService');
+      workbook = xlsx.readFile(tempPath, {
+        dense: true,
+        cellStyles: false,
+        cellNF: false,
+        cellHTML: false,
+      });
+      const sheetName = workbook.SheetNames?.[0];
+      const sheet = sheetName ? workbook.Sheets?.[sheetName] : null;
+      parsed = parseCeimspaSemDemandaWorksheet(sheet, xlsx, {
+        fileName: req.file?.originalname || null,
+      });
+      memoryMode = 'XLSX_DENSE_WORKBOOK_ROW_ITERATION';
+    }
+
     const ceimspaData = parsed.rows || [];
+    console.info('[SISHA][ceimspa-sem-demanda] LOW_MEMORY_PARSED', {
+      modo: memoryMode,
+      linhas: parsed.sourceRows || 0,
+      pis: ceimspaData.length,
+      memoria_mb: memoryMb(),
+    });
 
     if (!ceimspaData.length) {
       setAuditSummary(req, {
@@ -67,10 +88,7 @@ async function importCeimspaSemDemandaLowMemory(req, res) {
         tabelaAlvo: 'estoque_ceimspa',
         linhasLidas: parsed.sourceRows || 0,
       });
-      return res.status(400).json({
-        status: 'error',
-        message: 'Nenhum PI válido foi encontrado no arquivo CeIMSPA Sem Demanda.',
-      });
+      return res.status(400).json({ status: 'error', message: 'Nenhum PI válido foi encontrado no arquivo CeIMSPA Sem Demanda.' });
     }
 
     workbook = null;
@@ -101,7 +119,7 @@ async function importCeimspaSemDemandaLowMemory(req, res) {
         pis_importados: ceimspaData.length,
         arquivo: req.file?.originalname || null,
         bytes_upload: Number(req.file?.size || 0),
-        modo_memoria: 'TEMP_FILE_DENSE_WORKBOOK_ROW_ITERATION',
+        modo_memoria: memoryMode,
         regra_saldo: 'PI_UNICO_SALDO_COMPARTILHADO_ENTRE_REFERENCIAS',
       },
       level: 'INFO',
@@ -114,13 +132,11 @@ async function importCeimspaSemDemandaLowMemory(req, res) {
       tabelaAlvo: 'estoque_ceimspa',
       linhasLidas: parsed.sourceRows || 0,
       linhasImportadas: ceimspaData.length,
-      detalhes: {
-        modo_memoria: 'TEMP_FILE_DENSE_WORKBOOK_ROW_ITERATION',
-        linhas_validas: parsed.validRows || 0,
-      },
+      detalhes: { modo_memoria: memoryMode, linhas_validas: parsed.validRows || 0 },
     });
 
     console.info('[SISHA][ceimspa-sem-demanda] LOW_MEMORY_SUCCESS', {
+      modo: memoryMode,
       pis: ceimspaData.length,
       linhas: parsed.sourceRows || 0,
       memoria_mb: memoryMb(),
@@ -133,7 +149,7 @@ async function importCeimspaSemDemandaLowMemory(req, res) {
         pis_importados: ceimspaData.length,
         linhas_lidas: parsed.sourceRows || 0,
         linhas_validas: parsed.validRows || 0,
-        modo_memoria: 'low_memory',
+        modo_memoria: memoryMode,
       },
     });
   } catch (error) {
@@ -147,7 +163,7 @@ async function importCeimspaSemDemandaLowMemory(req, res) {
       status: 'ERRO',
       mensagem: error?.message || 'Falha ao importar CeIMSPA Sem Demanda.',
       tabelaAlvo: 'estoque_ceimspa',
-      detalhes: { modo_memoria: 'TEMP_FILE_DENSE_WORKBOOK_ROW_ITERATION' },
+      detalhes: { modo_memoria: 'LOW_MEMORY_IMPORT' },
     });
     return res.status(knownInputError ? 400 : 500).json({
       status: 'error',
