@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { normalizePn, normalizeLocation } = require('./ppuExternalCustodyParserService');
+const { normalizeReceipt, normalizeLocation: normalizeLocrecLocation } = require('./locrecParserService');
 
 function clean(value) { return String(value ?? '').trim(); }
 function getDb() { return require('../config/supabaseClient'); }
@@ -10,6 +11,114 @@ function isMissingCustodySchemaError(error) {
 }
 function num(value) { const n = Number(value); return Number.isFinite(n) ? n : 0; }
 function round(value) { return Number(num(value).toFixed(6)); }
+
+
+
+function groupLocrecRowsForAvailability(rows = []) {
+  const map = new Map();
+  (rows || []).forEach((row) => {
+    const receiptNo = normalizeReceipt(row.numero_recibo);
+    const pn = normalizePn(row.pn);
+    if (!receiptNo || !pn) return;
+    const key = `${receiptNo}|${pn}`;
+    if (!map.has(key)) map.set(key, { receipt_no: receiptNo, pn, locrec_document_qty: 0, source_rows: [], allocations: new Map() });
+    const group = map.get(key);
+    group.locrec_document_qty += Math.max(0, num(row.qtd_documental));
+    group.source_rows.push(row.source_row);
+    const audited = Math.max(0, num(row.qtd_auditada_aplicada ?? row.qtd_auditada_original));
+    const location = normalizeLocrecLocation(row.loc_escolhida);
+    const destiny = clean(row.destino_indicado).toUpperCase();
+    if (audited <= 0 || !location || location === '-' || destiny === 'PENDENTE') return;
+    if (!group.allocations.has(location)) group.allocations.set(location, { quantity: 0, destino_indicado: destiny, source_rows: [] });
+    const allocation = group.allocations.get(location);
+    allocation.quantity += audited;
+    allocation.source_rows.push(row.source_row);
+    if (destiny === 'CEIMSPA') allocation.destino_indicado = 'CEIMSPA';
+    else if (destiny === 'CAIXA' && allocation.destino_indicado !== 'CEIMSPA') allocation.destino_indicado = 'CAIXA';
+  });
+  return map;
+}
+
+function operationalQuantity(row = {}) {
+  const explicit = Number(row.quantidade_disponivel);
+  if (Number.isFinite(explicit)) return Math.max(0, explicit);
+  if (clean(row.origem_saldo).toUpperCase() === 'PPU_CUSTODIA_EXTERNA') return 0;
+  return Math.max(0, num(row.quantidade));
+}
+
+function isOperationalPpuRow(row = {}) {
+  return operationalQuantity(row) > 0;
+}
+
+function applyLocrecReceiptLocations(baseRows = [], locrecRows = []) {
+  const locrecMap = groupLocrecRowsForAvailability(locrecRows);
+  const passthrough = [];
+  const receiptGroups = new Map();
+
+  (baseRows || []).forEach((row, index) => {
+    const origem = clean(row.origem_saldo).toUpperCase();
+    if (!origem.startsWith('RECIBO_PENDENTE')) {
+      passthrough.push(row);
+      return;
+    }
+    const pn = normalizePn(row.pn);
+    const receiptNo = normalizeReceipt(row.numero_recibo);
+    const key = receiptNo && pn ? `${receiptNo}|${pn}` : `UNMATCHED|${row.recebimento_item_id || row.recebimento_id || index}`;
+    if (!receiptGroups.has(key)) receiptGroups.set(key, { key, pn, receiptNo, rows: [], quantity: 0 });
+    const group = receiptGroups.get(key);
+    group.rows.push(row);
+    group.quantity += Math.max(0, num(row.quantidade));
+  });
+
+  const projected = [];
+  receiptGroups.forEach((group) => {
+    const template = group.rows[0] || {};
+    const locrec = group.receiptNo && group.pn ? locrecMap.get(`${group.receiptNo}|${group.pn}`) : null;
+    let remaining = round(group.quantity);
+    const allocations = locrec
+      ? Array.from(locrec.allocations.entries()).map(([location, data]) => ({ location, ...data }))
+      : [];
+    const distinctSns = [...new Set(group.rows.map((row) => clean(row.sn).toUpperCase()).filter(Boolean))];
+    const preserveSingleSn = distinctSns.length === 1 && allocations.length <= 1;
+
+    allocations.forEach((allocation) => {
+      if (remaining <= 0) return;
+      const qty = round(Math.min(remaining, Math.max(0, num(allocation.quantity))));
+      if (qty <= 0) return;
+      projected.push({
+        ...template,
+        sn: preserveSingleSn ? distinctSns[0] : null,
+        quantidade: qty,
+        localizacao: allocation.location,
+        locrec_consultivo: true,
+        locrec_status: 'PROCESSADO',
+        locrec_destino_indicado: allocation.destino_indicado || null,
+        locrec_source_rows: allocation.source_rows || [],
+        locrec_quantidade_documental: round(locrec.locrec_document_qty),
+      });
+      remaining = round(Math.max(0, remaining - qty));
+    });
+
+    if (remaining > 0 || !allocations.length) {
+      const qty = allocations.length ? remaining : round(group.quantity);
+      if (qty > 0) {
+        projected.push({
+          ...template,
+          sn: distinctSns.length === 1 ? distinctSns[0] : null,
+          quantidade: qty,
+          localizacao: 'HANGAR',
+          locrec_consultivo: true,
+          locrec_status: allocations.length ? 'PROCESSAMENTO_PARCIAL' : 'AGUARDANDO_PROCESSAMENTO',
+          locrec_destino_indicado: 'PENDENTE',
+          locrec_source_rows: locrec?.source_rows || [],
+          locrec_quantidade_documental: locrec ? round(locrec.locrec_document_qty) : null,
+        });
+      }
+    }
+  });
+
+  return [...passthrough, ...projected];
+}
 
 function extractBoxCode(location = '') {
   const text = clean(location).toUpperCase();
@@ -149,6 +258,9 @@ function buildEffectivePpuAvailability(baseRows = [], custodyRows = [], decision
         nsn_pi: group.nsn_pi || null,
         sn: group.sns.length === 1 ? group.sns[0] : null,
         quantidade: round(syntheticQty),
+        quantidade_controlada: round(syntheticQty),
+        quantidade_disponivel: 0,
+        disponivel_operacional: false,
         localizacao: boxDisplay(group.box_code),
         origem_saldo: 'PPU_CUSTODIA_EXTERNA',
         custodia: 'PPU',
@@ -197,6 +309,9 @@ function buildEffectivePpuAvailability(baseRows = [], custodyRows = [], decision
       nsn_pi: group.nsn_pi,
       sn: group.sn || null,
       quantidade: round(reduced),
+      quantidade_controlada: round(reduced),
+      quantidade_disponivel: round(reduced),
+      disponivel_operacional: true,
       localizacao: box ? boxDisplay(box) : group.localizacao,
       origem_saldo: group.origem_saldo || 'PPU_OFICIAL',
       numero_recibo: group.numero_recibo || null,
@@ -213,6 +328,8 @@ function buildEffectivePpuAvailability(baseRows = [], custodyRows = [], decision
     summary: {
       official_qty: round(Array.from(baseMap.values()).reduce((sum, row) => sum + num(row.quantidade), 0)),
       effective_qty: round([...effectiveBase, ...synthetic].reduce((sum, row) => sum + num(row.quantidade), 0)),
+      operational_qty: round([...effectiveBase, ...synthetic].reduce((sum, row) => sum + operationalQuantity(row), 0)),
+      custody_qty: round(synthetic.reduce((sum, row) => sum + num(row.quantidade_controlada ?? row.quantidade), 0)),
       custody_declared_qty: round(groups.reduce((sum, row) => sum + num(row.quantity), 0)),
       custody_counted_qty: round(reconciliation.reduce((sum, row) => sum + num(row.absorbed_qty) + num(row.reallocated_qty) + num(row.confirmed_extra_qty), 0)),
       blocked_qty: round(reconciliation.reduce((sum, row) => sum + num(row.blocked_qty), 0)),
@@ -269,16 +386,53 @@ async function loadAllBaseRows() {
   return rows;
 }
 
+
+async function loadActiveLocrecRowsByPns(pns = []) {
+  const supabase = getDb();
+  const safe = [...new Set((pns || []).map(normalizePn).filter(Boolean))];
+  if (!safe.length) return { available: true, active: null, rows: [] };
+  const { data: active, error: activeError } = await supabase
+    .from('locrec_importacoes')
+    .select('id,status')
+    .eq('status', 'ACTIVE')
+    .order('imported_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (activeError) {
+    if (isMissingCustodySchemaError(activeError) || ['42P01', 'PGRST204', 'PGRST205'].includes(clean(activeError.code).toUpperCase())) {
+      return { available: false, active: null, rows: [] };
+    }
+    throw activeError;
+  }
+  if (!active) return { available: true, active: null, rows: [] };
+  const rows = [];
+  for (let i = 0; i < safe.length; i += 80) {
+    const chunk = safe.slice(i, i + 80);
+    const { data, error } = await supabase.from('locrec_itens').select('*').eq('import_id', active.id).in('pn', chunk).limit(10000);
+    if (error) throw error;
+    rows.push(...(data || []));
+  }
+  return { available: true, active, rows };
+}
+
 async function loadEffectivePpuRowsByPns(pns = []) {
   const safe = [...new Set((pns || []).map(normalizePn).filter(Boolean))];
   if (!safe.length) return [];
-  const [baseRows, state] = await Promise.all([loadBaseRowsByPns(safe), loadCustodyState({ pns: safe })]);
-  return buildEffectivePpuAvailability(baseRows, state.items, state.decisions).rows;
+  const [baseRows, state, locrecState] = await Promise.all([
+    loadBaseRowsByPns(safe),
+    loadCustodyState({ pns: safe }),
+    loadActiveLocrecRowsByPns(safe),
+  ]);
+  const receiptAwareRows = locrecState.available ? applyLocrecReceiptLocations(baseRows, locrecState.rows) : baseRows;
+  return buildEffectivePpuAvailability(receiptAwareRows, state.items, state.decisions).rows;
 }
 
 async function loadAllEffectivePpuRows() {
   const [baseRows, state] = await Promise.all([loadAllBaseRows(), loadCustodyState()]);
-  return buildEffectivePpuAvailability(baseRows, state.items, state.decisions).rows;
+  const safePns = [...new Set(baseRows.map((row) => normalizePn(row.pn)).filter(Boolean))];
+  const locrecState = await loadActiveLocrecRowsByPns(safePns);
+  const receiptAwareRows = locrecState.available ? applyLocrecReceiptLocations(baseRows, locrecState.rows) : baseRows;
+  return buildEffectivePpuAvailability(receiptAwareRows, state.items, state.decisions).rows;
 }
 
 async function getExternalCustodyReconciliation() {
@@ -294,6 +448,9 @@ module.exports = {
   extractBoxCode,
   boxDisplay,
   aggregateCustodyRows,
+  applyLocrecReceiptLocations,
+  operationalQuantity,
+  isOperationalPpuRow,
   buildEffectivePpuAvailability,
   loadEffectivePpuRowsByPns,
   loadAllEffectivePpuRows,

@@ -10,7 +10,7 @@ const { buildAircraftAvailabilityMap, buildMtAvailabilityDecision } = require('.
 const { loadCurrentAvailabilityRows, loadCurrentMaintenanceIndicators } = require('../services/aircraftAvailabilityService');
 const { loadGeneratorOperationalRows, classifyMaintenanceIndicatorSemantic } = require('../services/aircraftOperationalStateService');
 const { loadMaintenanceProgram } = require('../services/maintenancePlanningService');
-const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
+const { loadAllEffectivePpuRows, operationalQuantity } = require('../services/ppuEffectiveAvailabilityService');
 const { buildRecipePolicyDeficiency, formatRecipePolicyDeficiencyRows } = require('../services/recipePolicyDeficiencyService');
 const { pendingPurchaseQty, isFuturePurchaseCoverageStatus, isOdcProcessStatus } = require('../services/pdLifecyclePolicyService');
 const { setAuditSummary, recordAuditIssue } = require('../utils/importAudit');
@@ -1291,7 +1291,7 @@ async function loadGeneratorContext(force = false) {
     if (!pn) return;
     if (!ppuMap.has(pn)) ppuMap.set(pn, { quantidade: 0, locais: new Map() });
     const ref = ppuMap.get(pn);
-    const quantidade = toNumber(row.quantidade);
+    const quantidade = operationalQuantity(row);
     ref.quantidade += quantidade;
     if (row.localizacao) {
       const local = String(row.localizacao).trim();

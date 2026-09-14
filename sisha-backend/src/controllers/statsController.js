@@ -1,7 +1,7 @@
 // src/controllers/statsController.js
 const { getSupabaseAdmin } = require('../config/supabaseAdminClient');
 const { isGodUser } = require('../utils/auditLogger');
-const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
+const { loadAllEffectivePpuRows, operationalQuantity } = require('../services/ppuEffectiveAvailabilityService');
 const { computeStockValuationFallback } = require('../utils/stockValuation');
 
 const PAGE_SIZE = 1000;
@@ -226,7 +226,7 @@ async function getDashboardStatsViaFallback() {
         computeStockValuationFallback(),
     ]);
 
-    const totalPPU = ppuData.reduce((acc, item) => acc + (Number(item.quantidade) || 0), 0);
+    const totalPPU = ppuData.reduce((acc, item) => acc + operationalQuantity(item), 0);
     const totalPPU_PNs = new Set(ppuData.map(item => normalizeKey(item.pn)).filter(Boolean)).size;
 
     const totalODA = odaData.reduce((acc, item) => acc + (Number(item.qtd_pendente) || 0), 0);
@@ -270,7 +270,7 @@ async function computeLowStockAlerts(limit = 8) {
             if (!pn) return;
             if (!ppuMap.has(pn)) ppuMap.set(pn, { qtd: 0, locais: new Set() });
             const ref = ppuMap.get(pn);
-            ref.qtd += Number(row.quantidade) || 0;
+            ref.qtd += operationalQuantity(row);
             if (row.localizacao) ref.locais.add(row.localizacao);
         });
 

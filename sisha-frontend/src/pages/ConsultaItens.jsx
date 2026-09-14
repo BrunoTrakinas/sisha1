@@ -301,17 +301,24 @@ export default function ConsultaItens() {
 
                             <div className="w-full md:w-auto md:min-w-[11rem] mt-0 md:mt-0 flex flex-col items-stretch md:items-end">
                                 <span className={`py-2.5 px-5 sm:px-6 rounded-xl text-lg sm:text-xl font-black shadow-sm text-center ${item.ppu_qtd > 0 ? 'bg-blue-600 text-white' : 'bg-slate-800 text-white'}`}>
-                                    PPU: {item.ppu_qtd || 0} un
+                                    PPU disponível: {formatQuantity(item.ppu_qtd || 0)} un
                                 </span>
+                                {Number(item.ppu_custodia_qtd || 0) > 0 ? (
+                                    <div className="mt-1 text-[10px] sm:text-[11px] font-black text-slate-500 text-center md:text-right">
+                                        Controlado no PPU: {formatQuantity(item.ppu_total_controlado_qtd || 0)} un • em caixa: {formatQuantity(item.ppu_custodia_qtd || 0)} un
+                                    </div>
+                                ) : null}
                                 {(item.ppu_qtd > 0 || (item.recibos_incorporados || []).some((row) => row.destino_estoque === 'PPU')) && (
                                     <div className="mt-2 w-full md:w-[23rem] space-y-1.5">
                                         {(item.ppu_detalhes || []).map((saldo, saldoIndex) => (
                                             <div key={`${saldo.origem_saldo}-${saldo.recebimento_item_id || saldoIndex}`} className={`text-[10px] sm:text-[11px] font-black px-2.5 py-2 rounded-lg border ${saldo.origem_saldo === 'RECIBO_PENDENTE' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>
                                                 <span>{formatQuantity(saldo.quantidade)} un • {saldo.origem_saldo === 'RECIBO_PENDENTE' ? simplifyReceiptLocation(saldo.localizacao, saldo.numero_recibo) : saldo.localizacao}</span>
                                                 {saldo.origem_saldo === 'RECIBO_PENDENTE'
-                                                    ? <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} — aguardando incorporação ao inventário oficial</span>
+                                                    ? saldo.locrec_consultivo
+                                                        ? <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} • {saldo.locrec_status === 'AGUARDANDO_PROCESSAMENTO' ? 'LOCREC sem direcionamento — HANGAR' : saldo.locrec_status === 'PROCESSAMENTO_PARCIAL' ? 'LOCREC parcialmente processado' : 'localização informada pelo LOCREC'}</span>
+                                                        : <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} — aguardando incorporação ao inventário oficial</span>
                                                     : saldo.origem_saldo === 'PPU_CUSTODIA_EXTERNA'
-                                                        ? <span className="block mt-0.5">Custódia PPU • localização física em caixa no CEIMSPA</span>
+                                                        ? <span className="block mt-0.5">Custódia PPU • localização física em caixa no CEIMSPA • não disponível operacionalmente</span>
                                                         : <span className="block mt-0.5">Inventário oficial do PPU</span>}
                                                 {saldo.sn ? <span className="block mt-0.5">SN: {saldo.sn}</span> : null}
                                             </div>

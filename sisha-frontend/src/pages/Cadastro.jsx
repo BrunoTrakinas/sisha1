@@ -36,6 +36,13 @@ const orientacoesUploadPorTipo = {
         comportamento: 'Fonte oficial única do inventário PPU: substitui a fotografia atual do PPU, separa Equipamentos de Sobressalentes, herda a LOCALIZAÇÃO de cada bloco e sincroniza os Equipamentos identificados por PN + SN com o Livro de Equipamentos.',
         observacao: 'Envie o InventarioPPUGeralLoc sem filtro nem alteração manual. QNTD é a quantidade de estoque; DOTAÇÃO não é saldo. Equipamentos com SN são preservados individualmente e sobressalentes permanecem por quantidade. O importador genérico PN + SN continua disponível somente na página Equipamentos para uso excepcional.',
     },
+    locrec: {
+        titulo: 'LOCREC — Processamento e Localização de Itens Recebidos',
+        obrigatorias: ['Recibo', 'PN', 'Qtd', 'QTD Auditada'],
+        recomendadas: ['PD', 'LOC Escolhida', 'Nip', 'Data', 'Restante'],
+        comportamento: 'Importa o LOCREC como evidência consultiva versionada. O Recibo continua sendo a origem documental do item; o SISHA cruza Recibo + PN com o LOCREC para saber se o material foi processado e onde foi alocado.',
+        observacao: 'Este fluxo não cria estoque, não altera quantidade e não reescreve o Recibo. Sem direcionamento válido no LOCREC, o material recebido permanece no HANGAR. O Backend_Auditoria_Paiol continua independente e trata apenas redistribuição física de estoque PPU já existente.',
+    },
     custodia_externa_ppu: {
         titulo: 'Backend_Auditoria_Paiol — Caixas CEIMSPA sob custódia PPU',
         obrigatorias: ['Abas FECHADA CX-001 ... FECHADA CX-XXX', 'Data/Hora', 'PN', 'NSN', 'Nomenclatura', 'Qtd', 'SN', 'Localizacao', 'Auditor_Nome', 'Auditor_NIP'],
@@ -230,6 +237,10 @@ export default function Cadastro() {
     const [custodiaExterna, setCustodiaExterna] = useState({ active: null, rows: [], summary: {} });
     const [custodiaCarregando, setCustodiaCarregando] = useState(false);
     const [custodiaMsg, setCustodiaMsg] = useState(null);
+    const [modalLocrec, setModalLocrec] = useState(false);
+    const [locrec, setLocrec] = useState({ active: null, rows: [], summary: {} });
+    const [locrecCarregando, setLocrecCarregando] = useState(false);
+    const [locrecMsg, setLocrecMsg] = useState(null);
 
     const [email, setEmail] = useState('');
     const [roleCadastro, setRoleCadastro] = useState('operador');
@@ -258,7 +269,10 @@ export default function Cadastro() {
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
             const nomeArquivo = e.target.files[0].name.toLowerCase();
-            if (/sem[ _-]?demanda/.test(nomeArquivo)) {
+            if (nomeArquivo.includes('locrec')) {
+                setTipoArquivo('locrec');
+                setModalCeimspaConfirm(false);
+            } else if (/sem[ _-]?demanda/.test(nomeArquivo)) {
                 setTipoArquivo('ceimspa_sem_demanda');
                 setModalCeimspaConfirm(false);
             } else if (nomeArquivo.includes('ceimspa')) {
@@ -380,6 +394,7 @@ export default function Cadastro() {
                 } else {
                     setUploadMsg({ tipo: 'success', texto: data.message });
                     if (tipoArquivo === 'custodia_externa_ppu') carregarCustodiaExterna(false);
+                    if (tipoArquivo === 'locrec') carregarLocrec(false);
                     carregarAtualizacoes(true);
                 }
             } else {
@@ -390,6 +405,23 @@ export default function Cadastro() {
         } finally {
             setUploadCarregando(false);
             setFile(null);
+        }
+    };
+
+    const carregarLocrec = async (abrir = true) => {
+        setLocrecCarregando(true);
+        setLocrecMsg(null);
+        try {
+            const response = await apiFetch('/import/locrec/reconciliacao', {}, token);
+            const result = await response.json();
+            if (!response.ok || result.status !== 'success') throw new Error(result.message || 'Falha ao carregar o cruzamento do LOCREC.');
+            setLocrec(result.data || { active: null, rows: [], summary: {} });
+            if (abrir) setModalLocrec(true);
+        } catch (error) {
+            setLocrecMsg({ tipo: 'error', texto: error.message || 'Falha ao carregar o cruzamento do LOCREC.' });
+            if (abrir) setModalLocrec(true);
+        } finally {
+            setLocrecCarregando(false);
         }
     };
 
@@ -942,6 +974,7 @@ export default function Cadastro() {
                             <option value="order_book">Order Book</option>
                             <option value="price_list">Price List</option>
                             <option value="inventario_ppu">InventarioPPUGeralLoc — Inventário Geral PPU por Localização</option>
+                            <option value="locrec">LOCREC — Processamento e Localização de Recebidos</option>
                             <option value="custodia_externa_ppu">Backend_Auditoria_Paiol — Caixas CEIMSPA sob custódia PPU</option>
                             <option value="controle_equipamentos_criticos">Controle de Equipamentos Criticos da Aeronave</option>
                             <option value="saida_movimentacao_ppu">SaidaMovimentacaoPorPeriodo</option>
@@ -1041,6 +1074,17 @@ export default function Cadastro() {
                                     <span className="font-black text-blue-900 dark:text-blue-200">Observação: </span>
                                     {orientacaoUpload.observacao}
                                 </p>
+                            )}
+
+                            {tipoArquivo === 'locrec' && (
+                                <div className="rounded-xl border border-cyan-200 dark:border-cyan-800 bg-cyan-50 dark:bg-cyan-950/30 p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                    <div className="font-bold text-cyan-900 dark:text-cyan-200">
+                                        LOCREC é consultivo: Recibo cria a origem documental; LOCREC explica processamento/localização. Backend_Auditoria_Paiol é uma trilha independente do estoque PPU já existente.
+                                    </div>
+                                    <button type="button" onClick={() => carregarLocrec(true)} className="shrink-0 rounded-xl bg-cyan-700 px-4 py-2 text-xs font-black text-white hover:bg-cyan-800">
+                                        REVISAR CRUZAMENTO
+                                    </button>
+                                </div>
                             )}
 
                             {tipoArquivo === 'custodia_externa_ppu' && (
@@ -1786,6 +1830,69 @@ export default function Cadastro() {
                                 {adminMsg.texto}
                             </p>
                         )}
+                    </div>
+                </div>
+            )}
+
+            {modalLocrec && (
+                <div className="fixed inset-0 z-[121] bg-slate-950/70 p-4 flex items-center justify-center">
+                    <div className="w-full max-w-7xl max-h-[88vh] overflow-hidden rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl flex flex-col">
+                        <div className="p-5 border-b border-slate-200 dark:border-slate-700 flex items-start justify-between gap-4">
+                            <div>
+                                <h3 className="text-lg font-black text-slate-900 dark:text-white uppercase">LOCREC — cruzamento consultivo</h3>
+                                <p className="text-sm font-bold text-slate-600 dark:text-slate-300">Recibo = origem documental. Sem direcionamento no LOCREC, a localização permanece HANGAR. O Backend_Auditoria_Paiol não participa deste cruzamento.</p>
+                            </div>
+                            <button type="button" onClick={() => setModalLocrec(false)} className="p-2 rounded-xl border border-slate-200 dark:border-slate-700"><X size={18} /></button>
+                        </div>
+                        <div className="p-5 overflow-auto space-y-4">
+                            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2 text-xs font-black">
+                                <div className="rounded-xl bg-slate-100 dark:bg-slate-800 p-3">Grupos: {locrec.summary?.groups || 0}</div>
+                                <div className="rounded-xl bg-emerald-50 dark:bg-emerald-950/30 p-3 text-emerald-800 dark:text-emerald-200">Recibo OK: {locrec.summary?.receipt_matched_groups || 0}</div>
+                                <div className="rounded-xl bg-blue-50 dark:bg-blue-950/30 p-3 text-blue-800 dark:text-blue-200">Estoque PPU: {locrec.summary?.processed_ppu_groups || 0}</div>
+                                <div className="rounded-xl bg-purple-50 dark:bg-purple-950/30 p-3 text-purple-800 dark:text-purple-200">Caixa LOCREC: {locrec.summary?.processed_box_groups || 0}</div>
+                                <div className="rounded-xl bg-cyan-50 dark:bg-cyan-950/30 p-3 text-cyan-800 dark:text-cyan-200">CEIMSPA informado: {locrec.summary?.ceimspa_informed_groups || 0}</div>
+                                <div className="rounded-xl bg-amber-50 dark:bg-amber-950/30 p-3 text-amber-800 dark:text-amber-200">Parcial: {locrec.summary?.partial_groups || 0}</div>
+                                <div className="rounded-xl bg-orange-50 dark:bg-orange-950/30 p-3 text-orange-800 dark:text-orange-200">Hangar / aguardando: {locrec.summary?.hangar_groups ?? locrec.summary?.pending_groups ?? 0}</div>
+                                <div className="rounded-xl bg-red-50 dark:bg-red-950/30 p-3 text-red-800 dark:text-red-200">Divergências: {(locrec.summary?.divergence_groups || 0) + (locrec.summary?.missing_receipt_groups || 0)}</div>
+                            </div>
+                            {locrecMsg && <p className={`font-bold ${locrecMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>{locrecMsg.texto}</p>}
+                            {locrecCarregando ? <p className="font-bold text-slate-500">CARREGANDO...</p> : null}
+                            {!locrecCarregando && !(locrec.rows || []).length ? (
+                                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 font-bold text-slate-700">Ainda não há snapshot LOCREC ativo.</div>
+                            ) : (
+                                <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700">
+                                    <table className="min-w-full text-xs">
+                                        <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
+                                            <tr>
+                                                <th className="p-3 text-left">Recibo</th>
+                                                <th className="p-3 text-left">PN</th>
+                                                <th className="p-3 text-right">Qtd Recibo</th>
+                                                <th className="p-3 text-right">Auditada</th>
+                                                <th className="p-3 text-right">Pendente</th>
+                                                <th className="p-3 text-left">Localização</th>
+                                                <th className="p-3 text-left">Situação</th>
+                                                <th className="p-3 text-left">Fonte da localização</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {(locrec.rows || []).slice(0, 500).map((row) => (
+                                                <tr key={row.key} className="border-t border-slate-200 dark:border-slate-800 align-top">
+                                                    <td className="p-3 font-black text-slate-800 dark:text-slate-100">{row.numero_recibo}</td>
+                                                    <td className="p-3 font-black text-blue-700 dark:text-blue-300">{row.pn}</td>
+                                                    <td className="p-3 text-right font-bold">{row.qtd_recibo ?? '—'}</td>
+                                                    <td className="p-3 text-right font-bold">{row.qtd_auditada ?? 0}</td>
+                                                    <td className="p-3 text-right font-bold">{row.qtd_pendente ?? 0}</td>
+                                                    <td className="p-3 font-bold">{row.localizacao_consolidada || (row.locations || []).join(' / ') || '—'}</td>
+                                                    <td className="p-3"><span className="font-black">{row.status_label || row.status}</span><div className="mt-1 text-[10px] font-bold text-slate-500">Confiança: {row.confidence || '—'}</div></td>
+                                                    <td className="p-3 font-bold">{row.localizacao_fonte === 'LOCREC' ? 'LOCREC' : row.localizacao_fonte === 'RECIBO_DEFAULT_HANGAR' ? 'Recibo → HANGAR' : '—'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {(locrec.rows || []).length > 500 && <p className="text-xs font-bold text-slate-500">Exibindo os primeiros 500 grupos. O snapshot completo permanece preservado no backend.</p>}
+                        </div>
                     </div>
                 </div>
             )}

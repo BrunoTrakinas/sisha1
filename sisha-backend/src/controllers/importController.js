@@ -23,6 +23,9 @@ const { parsePpuExternalCustodyWorkbook } = require('../services/ppuExternalCust
 const { importExternalCustodySnapshot, saveReconciliationDecision } = require('../services/ppuExternalCustodyService');
 const { getExternalCustodyReconciliation } = require('../services/ppuEffectiveAvailabilityService');
 const { parseCeimspaSemDemandaRows } = require('../services/ceimspaSemDemandaService');
+const { parseLocrecWorkbook } = require('../services/locrecParserService');
+const { importLocrecSnapshot } = require('../services/locrecSnapshotService');
+const { getLocrecReconciliation } = require('../services/locrecReconciliationService');
 
 const cleanCurrency = (val) => val ? parseFloat(String(val).replace(/[^0-9.,]/g, '').replace(',', '.')) || 0 : 0;
 const safeString = (val) => val ? String(val).trim() : null;
@@ -507,6 +510,55 @@ exports.importData = async (req, res) => {
                 linhasIgnoradas: (parsed.issues || []).length,
                 detalhes: { formato_detectado: parsed.format },
             });
+        }
+
+        // ---------------------------------------------------
+        // LOCREC — EVIDÊNCIA CONSULTIVA DE PROCESSAMENTO/LOCALIZAÇÃO
+        // ---------------------------------------------------
+        else if (tipoArquivo === 'locrec') {
+            const parsed = parseLocrecWorkbook(xlsx, getWorkbook());
+            if (!parsed.items.length) return respondError(400, 'Nenhuma linha válida foi reconhecida no LOCREC.', {
+                tabelaAlvo: 'locrec_importacoes/locrec_itens',
+                linhasIgnoradas: parsed.issues.length,
+            });
+
+            const imported = await importLocrecSnapshot(parsed, {
+                buffer: req.file.buffer,
+                fileName: req.file.originalname || 'LOCREC.xlsx',
+                user: req.user || {},
+            });
+            const reconciliation = await getLocrecReconciliation().catch((error) => ({
+                active: null,
+                rows: [],
+                summary: {},
+                warning: error?.message || 'Reconciliação ainda não disponível.',
+            }));
+
+            (parsed.issues || []).slice(0, 500).forEach((issue) => recordAuditIssue(req, {
+                linha_numero: issue.row || null,
+                campo: issue.field || 'linha',
+                valor_original: issue.value || issue.sheet || null,
+                motivo: issue.reason,
+            }));
+
+            const summary = reconciliation.summary || {};
+            return respondSuccess(
+                `LOCREC atualizado como evidência consultiva: ${parsed.summary.valid_rows} linha(s), ${parsed.summary.receipts} recibo(s), ${summary.receipt_matched_groups || 0} grupo(s) conciliado(s) com Recibos do SISHA. Nenhum estoque foi criado ou alterado.`,
+                { data: { importacao: imported, leitura: parsed.summary, reconciliacao: reconciliation } },
+                {
+                    tabelaAlvo: 'locrec_importacoes/locrec_itens',
+                    linhasLidas: parsed.summary.source_rows,
+                    linhasImportadas: parsed.summary.valid_rows,
+                    linhasIgnoradas: parsed.summary.blocked_rows,
+                    detalhes: {
+                        ...parsed.summary,
+                        import_id: imported.import_id || null,
+                        arquivo_reutilizado: Boolean(imported.reused),
+                        reconciliacao: summary,
+                        regra: 'LOCREC é consultivo. Recibo é a origem documental; o LOCREC informa processamento/localização. Backend_Auditoria_Paiol é uma trilha separada do estoque PPU já existente.',
+                    },
+                }
+            );
         }
 
         // ---------------------------------------------------
@@ -2687,6 +2739,16 @@ exports.listImportLogs = async (req, res) => {
         return res.status(200).json({ status: 'success', data: data || [], meta: { limit, tipo: tipo || null } });
     } catch (error) {
         return res.status(500).json({ status: 'error', message: 'Falha ao consultar logs de importação.' });
+    }
+};
+
+
+exports.getLocrecReconciliation = async (req, res) => {
+    try {
+        const data = await getLocrecReconciliation();
+        return res.status(200).json({ status: 'success', data });
+    } catch (error) {
+        return res.status(500).json({ status: 'error', message: error?.message || 'Falha ao carregar reconciliação consultiva do LOCREC.' });
     }
 };
 

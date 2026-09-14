@@ -317,6 +317,15 @@ function sumQuantity(rows = []) {
   return round((rows || []).reduce((sum, row) => sum + positive(row.quantidade ?? row.qtd), 0), 3) || 0;
 }
 
+function sumOperationalPpuQuantity(rows = []) {
+  return round((rows || []).reduce((sum, row) => {
+    const explicit = numeric(row.quantidade_disponivel);
+    if (explicit !== null) return sum + Math.max(0, explicit);
+    if (upper(row.origem_saldo) === 'PPU_CUSTODIA_EXTERNA') return sum;
+    return sum + positive(row.quantidade ?? row.qtd);
+  }, 0), 3) || 0;
+}
+
 function buildRecommendation({ shortageStrict, shortageAfterPotential, ceimspaQty, repairPotential, purchasePotential, leadTimeDays, horizonDays, criticality }) {
   const actions = [];
   let remaining = Math.max(0, shortageStrict);
@@ -379,7 +388,7 @@ function buildA4PnAnalysis({
   const repairs = buildRepairSnapshot(repairRows, horizon, now);
   const criticality = deriveCriticality([...(purchaseRows || []), ...(repairRows || [])]);
 
-  const ppuQty = sumQuantity(ppuRows);
+  const ppuQty = sumOperationalPpuQuantity(ppuRows);
   const ceimspaQty = sumQuantity(ceimspaRows);
   const demandSourcesReady = Boolean(consumption.ready || reliability.ready || scheduled.projected_qty > 0);
   const rawDemand = (consumption.ready ? Number(consumption.projected_qty || 0) : 0)

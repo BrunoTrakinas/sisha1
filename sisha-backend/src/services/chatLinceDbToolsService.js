@@ -183,7 +183,14 @@ async function safeCount(table, builderFn, meta = {}) {
 async function safeEffectivePpuSelect(pns = [], meta = {}) {
   try {
     const data = await loadEffectivePpuRowsByPns(pns);
-    return { table: 'v_sisha_ppu_disponibilidade_efetiva', ok: true, data: data || [], meta };
+    const normalized = (data || []).map((row) => ({
+      ...row,
+      quantidade_controlada_ppu: Number(row.quantidade_controlada ?? row.quantidade) || 0,
+      quantidade: Number.isFinite(Number(row.quantidade_disponivel))
+        ? Number(row.quantidade_disponivel)
+        : (String(row.origem_saldo || '').toUpperCase() === 'PPU_CUSTODIA_EXTERNA' ? 0 : (Number(row.quantidade) || 0)),
+    }));
+    return { table: 'v_sisha_ppu_disponibilidade_efetiva', ok: true, data: normalized, meta };
   } catch (error) {
     return { table: 'v_sisha_ppu_disponibilidade_efetiva', ok: false, error: error.message, data: [], meta };
   }

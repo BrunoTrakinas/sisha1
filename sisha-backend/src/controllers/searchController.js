@@ -4,7 +4,7 @@ const { parseRfqValidityEnd, resolveRfqValidityEnd, loadReferencePriceRows } = r
 const { getSubItemPriority } = require('../services/pnRelationsService');
 const { buildWtpReferences, buildWtpTextReferences } = require('../services/wtpReferenceService');
 const { loadTrackingRowsByPns } = require('../services/ppuLocationPolicyService');
-const { loadEffectivePpuRowsByPns } = require('../services/ppuEffectiveAvailabilityService');
+const { loadEffectivePpuRowsByPns, operationalQuantity } = require('../services/ppuEffectiveAvailabilityService');
 const { buildRadarOrFilter, normalizeRadarSearchTerm } = require('../services/radarSearchPolicyService');
 
 function addUndirectedEdge(graph, a, b) {
@@ -242,12 +242,22 @@ function aggregatePpuDetails(rows = []) {
                 recebimento_item_id: row.recebimento_item_id || null,
                 sn,
                 tipo_item: row.tipo_item || null,
+                locrec_consultivo: Boolean(row.locrec_consultivo),
+                locrec_status: row.locrec_status || null,
+                locrec_destino_indicado: row.locrec_destino_indicado || null,
+                quantidade_controlada: 0,
+                quantidade_disponivel: 0,
             });
         }
 
         const current = grouped.get(key);
         current.quantidade += Number(row.quantidade || 0);
+        current.quantidade_controlada += Number(row.quantidade_controlada ?? row.quantidade) || 0;
+        current.quantidade_disponivel += operationalQuantity(row);
         if (!current.numero_recibo && row.numero_recibo) current.numero_recibo = row.numero_recibo;
+        if (row.locrec_consultivo) current.locrec_consultivo = true;
+        if (row.locrec_status) current.locrec_status = row.locrec_status;
+        if (row.locrec_destino_indicado) current.locrec_destino_indicado = row.locrec_destino_indicado;
     });
 
     return Array.from(grouped.values()).sort((a, b) => {
@@ -939,7 +949,6 @@ exports.searchItems = async (req, res) => {
             const myPpu = ppuData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const myPpuTracking = ppuTrackingData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const myPpuExcluded = myPpuTracking.filter((p) => p.contabiliza_ppu === false);
-            const myPpuRedirectedCeimspa = myPpuExcluded.filter((p) => normalizeUpper(p.destino_contabilizacao) === 'CEIMSPA');
             const myPl = plData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const myRfqDirect = rfqDataFull.filter((r) => normalizeUpper(r.pn) === pnUpper);
             const myRfqRelated = rfqDataFull.filter((r) => normalizeUpper(r.pn_relacionado) === pnUpper);
@@ -1202,13 +1211,19 @@ exports.searchItems = async (req, res) => {
                 status_preco: resolvedPrice.status_preco || null,
             } : null;
 
-            item.ppu_qtd = myPpu.reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+            // PPU disponível = saldo operacional. Material já deslocado pelo Backend para
+            // caixa continua sob custódia/contabilidade PPU, mas não fica disponível na LOC.
+            item.ppu_qtd = myPpu.reduce((acc, p) => acc + operationalQuantity(p), 0);
+            item.ppu_total_controlado_qtd = myPpu.reduce((acc, p) => acc + (Number(p.quantidade_controlada ?? p.quantidade) || 0), 0);
+            item.ppu_custodia_qtd = myPpu
+                .filter((p) => p.origem_saldo === 'PPU_CUSTODIA_EXTERNA')
+                .reduce((acc, p) => acc + (Number(p.quantidade_controlada ?? p.quantidade) || 0), 0);
             item.ppu_oficial_qtd = myPpu
-                .filter((p) => p.origem_saldo !== 'RECIBO_PENDENTE')
-                .reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+                .filter((p) => p.origem_saldo !== 'RECIBO_PENDENTE' && p.origem_saldo !== 'PPU_CUSTODIA_EXTERNA')
+                .reduce((acc, p) => acc + operationalQuantity(p), 0);
             item.recibos_pendentes_qtd = myPpu
                 .filter((p) => p.origem_saldo === 'RECIBO_PENDENTE')
-                .reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+                .reduce((acc, p) => acc + operationalQuantity(p), 0);
             item.ppu_detalhes = aggregatePpuDetails(myPpu);
             item.ppu_locais = item.ppu_detalhes.length > 0
                 ? item.ppu_detalhes.map((p) => `${p.localizacao} (${p.quantidade})`).join(' | ')
@@ -1289,7 +1304,7 @@ exports.searchItems = async (req, res) => {
 
                 irmaos.forEach((irmao) => {
                     const altPn = normalizeUpper(irmao.pn);
-                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + operationalQuantity(p), 0);
                     const prioridadeManual = getSubItemPriority(irmao.sub_item);
                     const existente = altsUnicosMap.get(altPn) || {};
                     altsUnicosMap.set(altPn, {
@@ -1346,7 +1361,7 @@ exports.searchItems = async (req, res) => {
                     if (semPi) candidatePis.add(semPi);
                     if (!candidatePis.has(pi)) return;
                     const existente = altsUnicosMap.get(altPn) || {};
-                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
+                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + operationalQuantity(p), 0);
                     const ceimspaAltRows = allCeimspa.filter((row) => {
                         const rowPn = normalizeUpper(row.pn);
                         const rowPi = normalizePiKey(row.pi);
@@ -1418,23 +1433,12 @@ exports.searchItems = async (req, res) => {
             if (semDemandaPiByPn.get(pnUpper)) meusPisSet.add(semDemandaPiByPn.get(pnUpper));
             const meusPis = Array.from(meusPisSet);
             const ceimspaOficial = allCeimspa.filter((c) => normalizeUpper(c.pn) === pnUpper || meusPis.includes(normalizePiKey(c.pi)));
-            const ceimspaPorClassificacaoPpu = myPpuRedirectedCeimspa.map((row) => ({
-                id: `PPU-LOC-CEIMSPA-${row.id}`,
-                pn: row.pn,
-                pi: row.nsn_pi || null,
-                nomenclatura: row.nomenclatura || null,
-                quantidade: Number(row.quantidade || 0),
-                sj: 'LOC PPU',
-                uf: row.localizacao || null,
-                sn: row.sn || null,
-                origem_saldo: 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA',
-                localizacao_fisica: row.localizacao || null,
-                situacao_operacional: row.situacao_operacional || 'A_CONFIRMAR',
-            }));
-            item.ceimspa_detalhes = [...ceimspaOficial.map((row) => ({
+            // Backend_Auditoria_Paiol é uma redistribuição física do próprio PPU.
+            // Nunca aparece como saldo CEIMSPA: a caixa permanece rastreada em ppu_detalhes.
+            item.ceimspa_detalhes = ceimspaOficial.map((row) => ({
                 ...row,
                 saldo_compartilhado_pi: row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA',
-            })), ...ceimspaPorClassificacaoPpu];
+            }));
             const saldosCeimspaContados = new Set();
             item.ceimspa_qtd = item.ceimspa_detalhes.reduce((acc, c) => {
                 if (c.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA') {

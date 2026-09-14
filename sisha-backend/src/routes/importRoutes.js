@@ -34,6 +34,7 @@ router.get('/rfq/cotacoes', requireRole(['admin']), importController.listRfqCota
 router.put('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rfq_manual_editar'), importController.updateRfqCotacao);
 router.delete('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rfq_manual_desativar'), importController.deactivateRfqCotacao);
 router.get('/logs', requireRole(['admin']), importController.listImportLogs);
+router.get('/locrec/reconciliacao', requireRole(['admin']), importController.getLocrecReconciliation);
 router.get('/custodia-externa-ppu/reconciliacao', requireRole(['admin']), importController.getPpuExternalCustodyReconciliation);
 router.post('/custodia-externa-ppu/reconciliacao', requireRole(['admin']), createImportAudit('ppu_custodia_externa_decisao'), importController.decidePpuExternalCustodyReconciliation);
 
