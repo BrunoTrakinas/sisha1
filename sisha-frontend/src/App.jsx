@@ -138,7 +138,7 @@ const DashboardLayout = ({ children }) => {
   const allMenuItems = [
     { path: '/', icon: LayoutDashboard, label: 'Visão Geral', roles: ['dono', 'admin', 'operador'] },
     { path: '/consulta', icon: PackageSearch, label: 'Consulta de Itens', roles: ['dono', 'admin', 'operador'] },
-    { path: '/sb', icon: FileText, label: 'Service Bulletin', roles: ['dono', 'admin'] },
+    { path: '/sb', icon: FileText, label: 'SB / PAN', roles: ['dono', 'admin'] },
     { path: '/gerador', icon: PenTool, label: 'Gerador de Necessidades', roles: ['dono', 'admin', 'operador'] },
     { path: '/custo', icon: Calculator, label: 'Central de Custos', roles: ['dono', 'admin', 'operador'] },
     { path: '/compras', icon: ShoppingCart, label: 'Ordens de Compras', roles: ['dono', 'admin', 'operador'] },

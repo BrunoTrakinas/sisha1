@@ -14,7 +14,7 @@ const tiposDocumento = [
   ['recibo_material', 'Recibo Material / Garantia'],
   ['recibo_pd', 'Recibo de PD'],
   ['qnna', 'QNNA'],
-  ['sb', 'Service Bulletin'],
+  ['sb', 'Publicação Técnica (SB / PAN)'],
   ['receitas', 'Receitas'],
   ['pim', 'PIM'],
   ['politica_estoque_tarefas', 'Política de Estoque'],

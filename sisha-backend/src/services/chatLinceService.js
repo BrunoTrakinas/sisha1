@@ -365,7 +365,7 @@ function inferDocumentClass(tipoDocumento = '', text = '', fileName = '') {
   if (/CUSTO OPERACIONAL|CUSTO DE EXECUCAO|CUSTO DE EXECUÇÃO|VALOR PLANEJADO|VALOR EXECUCAO|VALOR EXECUÇÃO/.test(base)) return 'CUSTO_OPERACIONAL';
   if (/GERADOR DE NECESSIDADES|NECESSIDADE TOTAL|SALDO APOS ETAPA|SALDO APÓS ETAPA|COBERTURA PPU|COBERTURA CEIMSPA/.test(base)) return 'GERADOR_NECESSIDADES';
   if (/ORDEM DE SERVI[CÇ]O|\bOS\b|INSTALA[CÇ][AÃ]O|REMO[CÇ][AÃ]O|REMOVAL|INSTALLATION/.test(base)) return 'OS_INSTALACAO_REMOCAO';
-  if (/SERVICE BULLETIN|\bSB\b|LX\d{3}-\d{2}-\d{4}|MANDATORY|OPTIONAL|ALERT/.test(base)) return 'SERVICE_BULLETIN';
+  if (/SERVICE BULLETIN|PRODUCT ADVISORY NOTICE|\bSB\b|\bPAN\b|LX\d{3}-\d{2}-\d{4}|LX\/PAN\/\d+|MANDATORY|OPTIONAL|ALERT/.test(base)) return 'SERVICE_BULLETIN';
   if (/ORDER BOOK|SPARES|REPAIRS|WARRANTY|LEONARDO/.test(base)) return 'ORDER_BOOK';
   if (/PRICE LIST|UNIT PRICE|VALIDITY|QUOTATION|RFQ|COTA[CÇ][AÃ]O/.test(base)) return 'PRICE_LIST_RFQ';
   if (/CEIMSPA/.test(base)) return 'ESTOQUE_CEIMSPA';
@@ -1369,7 +1369,7 @@ function detectChatLinceIntent(question = '', context = {}) {
   const hasEvidence = (table) => hasRows(context, table);
   const entities = detectEntities(question);
   const hasSn = entities.sn_candidatos.length > 0 || /\b(SN|S\/N|SERIAL|S[ÉE]RIE|SERIE)\b/.test(q);
-  const hasDoc = entities.identificadores_documentais.length > 0 || /\b(OC|ODC|ODA|PD|SEPD|WO|OS|PIM|SB|RFQ|COTACAO|COTAÇÃO)\b/.test(q);
+  const hasDoc = entities.identificadores_documentais.length > 0 || /\b(OC|ODC|ODA|PD|SEPD|WO|OS|PIM|SB|PAN|RFQ|COTACAO|COTAÇÃO)\b/.test(q);
   const hasPi = /\b(PI|NSN)\b/.test(q) || entities.nsn.length > 0 || entities.tokens.some((token) => /^\d{6,13}$/.test(normalizePn(token)));
   const hasPn = /\b(PN|P\/N|PART\s*NUMBER|PARTNUMBER)\b/.test(q) || entities.tokens.length > 0;
 
@@ -1377,7 +1377,7 @@ function detectChatLinceIntent(question = '', context = {}) {
   const add = (intent, score, motivo) => scores.push({ intent, score, motivo });
 
   if (/\b(MTBF|MTTR|HISTORICO|HISTÓRICO|MOVIMENTACAO|MOVIMENTAÇÃO|SAIDA|SAÍDA|CONSUMO|OS)\b/.test(q)) add('CONSULTA_HISTORICO_MOVIMENTACAO', 0.82, 'pedido menciona histórico, movimentação, saída, consumo, OS, MTBF ou MTTR');
-  if (/\b(SERVICE\s*BULLETIN|SB|BOLETIM)\b/.test(q) || hasEvidence('service_bulletins') || hasEvidence('service_bulletin_items')) add('CONSULTA_SB', 0.78, 'pedido/documento relacionado a Service Bulletin');
+  if (/\b(SERVICE\s*BULLETIN|PRODUCT\s+ADVISORY\s+NOTICE|SB|PAN|BOLETIM)\b/.test(q) || hasEvidence('service_bulletins') || hasEvidence('service_bulletin_items')) add('CONSULTA_SB', 0.78, 'pedido/documento relacionado a publicação técnica SB/PAN');
   if (/\b(RFQ|COTACAO|COTAÇÃO|QUOTATION|PRICE\s*LIST|PRECO|PREÇO|LEAD\s*TIME|VALIDADE)\b/.test(q) || hasEvidence('rfq_cotacoes')) add('CONSULTA_RFQ', 0.78, 'pedido relacionado a RFQ, cotação, preço ou lead time');
   if (hasSn || hasEvidence('equipamentos_serializados') || hasEvidence('equipamento_eventos')) add('CONSULTA_SN', 0.88, 'pedido ou evidência aponta para serial number/SN');
   if (hasDoc || hasEvidence('compras_ordens') || hasEvidence('compras_pds') || hasEvidence('work_orders') || hasEvidence('pim_demandas')) add('CONSULTA_DOCUMENTO', 0.75, 'pedido ou evidência aponta para documento operacional');

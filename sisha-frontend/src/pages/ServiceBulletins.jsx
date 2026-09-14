@@ -12,6 +12,10 @@ function statusColor(status) {
   return 'bg-red-500';
 }
 
+function publicationKind(row = {}) {
+  return /(?:^|\/)PAN(?:\/|$)/i.test(String(row.sb_numero || '')) ? 'PAN' : 'SB';
+}
+
 export default function ServiceBulletins() {
   const { token } = useAuth();
   const [loading, setLoading] = useState(true);
@@ -29,11 +33,11 @@ export default function ServiceBulletins() {
       setError(null);
       const response = await apiFetch('/needs/sb/list', {}, token);
       const json = await response.json();
-      if (json.status !== 'success') throw new Error(json.message || 'Falha ao carregar SBs.');
+      if (json.status !== 'success') throw new Error(json.message || 'Falha ao carregar publicações técnicas.');
       setList(json.data || []);
       setSelected((current) => current || json.data?.[0]?.sb_numero || null);
     } catch (err) {
-      setError(err.message || 'Falha ao carregar SBs.');
+      setError(err.message || 'Falha ao carregar publicações técnicas.');
     } finally {
       setLoading(false);
     }
@@ -52,7 +56,7 @@ export default function ServiceBulletins() {
         setStatusAcao(json.data.header.status_acao || 'SEM_ACAO');
         setObservacao(json.data.header.observacao || '');
       } catch (err) {
-        setError(err.message || 'Falha ao carregar detalhe da SB.');
+        setError(err.message || 'Falha ao carregar detalhe da publicação técnica.');
       }
     };
     loadDetail();
@@ -71,10 +75,10 @@ export default function ServiceBulletins() {
         body: JSON.stringify({ status_acao: statusAcao, observacao }),
       }, token);
       const json = await response.json();
-      if (json.status !== 'success') throw new Error(json.message || 'Falha ao salvar SB.');
+      if (json.status !== 'success') throw new Error(json.message || 'Falha ao salvar publicação técnica.');
       await loadList();
     } catch (err) {
-      setError(err.message || 'Falha ao salvar SB.');
+      setError(err.message || 'Falha ao salvar publicação técnica.');
     } finally {
       setSaving(false);
     }
@@ -83,9 +87,9 @@ export default function ServiceBulletins() {
   return (
     <div className="space-y-8 animate-fade-in">
       <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm p-8">
-        <h1 className="text-2xl font-black text-slate-900 dark:text-slate-100 uppercase">Service Bulletin</h1>
+        <h1 className="text-2xl font-black text-slate-900 dark:text-slate-100 uppercase">Publicações Técnicas (SB / PAN)</h1>
         <p className="text-sm text-slate-600 dark:text-slate-400 font-bold mt-2 max-w-4xl">
-          Aqui o admin acompanha as SBs, vê o resumo automático, a ação principal, a cobertura dos PN e atualiza o status operacional.
+          Aqui o admin acompanha Service Bulletins e Product Advisory Notices (PAN), vê o resumo automático, a ação principal, a cobertura dos PN e atualiza o status operacional.
         </p>
         {error ? <div className="mt-4 rounded-2xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-4 py-3 text-red-700 dark:text-red-300 font-bold">{error}</div> : null}
       </section>
@@ -93,7 +97,7 @@ export default function ServiceBulletins() {
       <div className="grid grid-cols-1 xl:grid-cols-[420px_minmax(0,1fr)] gap-8">
         <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80">
-            <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">SBs cadastradas</h3>
+            <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">Publicações cadastradas</h3>
           </div>
           <div className="max-h-[70vh] overflow-auto p-4 space-y-3">
             {loading ? <div className="p-4 text-slate-500 dark:text-slate-400 font-bold inline-flex items-center gap-2"><LoaderCircle className="animate-spin" size={18} /> Carregando...</div> : null}
@@ -104,7 +108,7 @@ export default function ServiceBulletins() {
                   <div className="min-w-0">
                     <div className="font-black text-slate-900 dark:text-slate-100 break-all">{item.sb_numero}</div>
                     <div className="text-sm font-bold text-slate-700 dark:text-slate-300 mt-1">{item.titulo}</div>
-                    <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">{item.tipo_sb} • {item.total_itens} item(ns)</div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">{publicationKind(item)} • {item.tipo_sb} • {item.total_itens} item(ns)</div>
                     <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">{item.resumo_curto}</div>
                   </div>
                 </div>
@@ -116,7 +120,7 @@ export default function ServiceBulletins() {
         <section className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80 flex items-center justify-between gap-4">
             <div>
-              <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">{selectedRow?.sb_numero || 'Selecione uma SB'}</h3>
+              <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">{selectedRow?.sb_numero || 'Selecione uma publicação'}</h3>
               <p className="text-sm font-bold text-slate-500 dark:text-slate-400">{selectedRow?.titulo || '—'}</p>
             </div>
             <div className="flex items-center gap-2 text-sm font-black text-slate-700 dark:text-slate-300">
@@ -129,7 +133,7 @@ export default function ServiceBulletins() {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80 p-4">
                   <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Tipo</p>
-                  <p className="text-lg font-black text-slate-900 dark:text-slate-100 mt-2">{detail.header.tipo_sb}</p>
+                  <p className="text-lg font-black text-slate-900 dark:text-slate-100 mt-2">{publicationKind(detail.header)} • {detail.header.tipo_sb}</p>
                 </div>
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80 p-4">
                   <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400 font-black">Ação principal</p>

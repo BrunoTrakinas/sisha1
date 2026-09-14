@@ -475,7 +475,7 @@ export default function GeradorNecessidades() {
           </div>
 
           <div className="space-y-3">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400 font-black">Service Bulletins</p>
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400 font-black">Publicações Técnicas (SB / PAN)</p>
             <div className="flex gap-2 flex-wrap">
               <ChipToggle active={sbMode === 'open'} onClick={() => setSbMode('open')}>Abertas</ChipToggle>
               <ChipToggle active={sbMode === 'all'} onClick={() => setSbMode('all')}>Todas com itens</ChipToggle>

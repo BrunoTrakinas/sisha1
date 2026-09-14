@@ -1075,6 +1075,7 @@ function isOpenSbStatus(status) {
 
 function inferSbActionType(header = {}, items = []) {
   const haystack = `${header.titulo || ''} ${header.observacao || ''}`.toUpperCase();
+  if (/INTERIM SERVICING|SERVICING|MAINTENANCE|MANUTENÇÃO|MANUTENCAO/.test(haystack)) return 'MANUTENÇÃO PROGRAMADA';
   if (/ALERT|ALERTA|INSPECT|INSPECTION|CHECK/.test(haystack)) return 'INSPEÇÃO';
   if (/REPLACE|CHANGE TO|CHANGE|SUBSTITU/i.test(haystack)) return 'SUBSTITUIÇÃO';
   if (/INTRODUCTION OF MODIFICATION|MODIFICATION|MODIFICAÇÃO|MODIFICACAO/.test(haystack)) return 'MODIFICAÇÃO';
@@ -1096,7 +1097,8 @@ function buildSbShortSummary(header = {}, items = []) {
 function buildSbActions(header = {}, items = [], coverage = []) {
   const actions = [];
   const actionType = inferSbActionType(header, items);
-  if (actionType === 'INSPEÇÃO') actions.push('Executar inspeção/cumprimento técnico conforme a SB.');
+  if (actionType === 'MANUTENÇÃO PROGRAMADA') actions.push('Planejar o servicing/manutenção conforme a periodicidade e a publicação técnica aplicável.');
+  if (actionType === 'INSPEÇÃO') actions.push('Executar inspeção/cumprimento técnico conforme a publicação técnica.');
   if (actionType === 'SUBSTITUIÇÃO') actions.push('Avaliar substituição dos PNs afetados e registrar cumprimento documental.');
   if (actionType === 'MODIFICAÇÃO') actions.push('Planejar a modificação/intervenção e validar aplicabilidade antes da execução.');
   if (items.length > 0) actions.push('Conferir cobertura logística dos itens e abrir compra/cadastro apenas para o saldo não coberto.');
@@ -1580,7 +1582,7 @@ function buildGeneratorPreview(selection, context) {
 
   selectedSbs.forEach((sbNumero) => {
     const header = (context.sbRows || []).find((row) => row.sb_numero === sbNumero) || {};
-    const itens = context.sbItemsByNumero.get(sbNumero) || [];
+    const itens = (context.sbItemsByNumero.get(sbNumero) || []).filter((item) => normalizeUpper(item.item_num) !== 'APLICABILIDADE');
     itens.forEach((item) => {
       const qtyRaw = toNumber(item.qtd);
       const qtyGerador = qtyRaw > 0 ? qtyRaw : 1;
@@ -1881,7 +1883,9 @@ function buildOperationalCostPreview(selection, context) {
 }
 
 function buildSbDetail(header, context) {
-  const items = (context.sbItemsByNumero.get(header.sb_numero) || []).map((item) => buildSbCoverageItem(item, context));
+  const items = (context.sbItemsByNumero.get(header.sb_numero) || [])
+    .filter((item) => normalizeUpper(item.item_num) !== 'APLICABILIDADE')
+    .map((item) => buildSbCoverageItem(item, context));
   const acaoPrincipal = inferSbActionType(header, items);
   const acoes = buildSbActions(header, items, items);
   const totalEstimado = items.reduce((acc, item) => {

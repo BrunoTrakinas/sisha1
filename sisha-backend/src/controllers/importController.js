@@ -26,6 +26,8 @@ const { parseCeimspaSemDemandaRows } = require('../services/ceimspaSemDemandaSer
 const { parseLocrecWorkbook } = require('../services/locrecParserService');
 const { importLocrecSnapshot } = require('../services/locrecSnapshotService');
 const { getLocrecReconciliation } = require('../services/locrecReconciliationService');
+const { extractTechnicalPublicationTextWithLocalOcr } = require('../services/technicalPublicationOcrService');
+const { parsePanPublicationText } = require('../services/technicalPublicationPanService');
 
 const cleanCurrency = (val) => val ? parseFloat(String(val).replace(/[^0-9.,]/g, '').replace(',', '.')) || 0 : 0;
 const safeString = (val) => val ? String(val).trim() : null;
@@ -261,7 +263,26 @@ const extractSbLegacyPnSummary = (oldRows = []) => {
 
 const parseSbPdfBuffer = async (buffer, originalName = 'Service Bulletin.pdf') => {
     const parsed = await pdfParse(buffer);
-    const rawText = String(parsed.text || '').replace(/\r/g, '');
+    let rawText = String(parsed.text || '').replace(/\r/g, '');
+    let extractionMethod = 'PDF_TEXT';
+
+    // Publicações técnicas Leonardo podem chegar como PDF escaneado.
+    // Se não houver camada textual suficiente, reutilizamos o OCR local determinístico
+    // (Tesseract + Poppler) antes de classificar/extrair SB ou PAN.
+    if (rawText.trim().length < 80) {
+        const ocr = await extractTechnicalPublicationTextWithLocalOcr(buffer, { maxPages: 12 });
+        rawText = String(ocr?.text || '').replace(/\r/g, '');
+        extractionMethod = ocr?.method || 'OCR_LOCAL_TESSERACT_POPPLER_TECHPUB';
+    }
+
+    const parsedPan = parsePanPublicationText(rawText, originalName);
+    if (parsedPan) {
+        return {
+            ...parsedPan,
+            observacao: [parsedPan.observacao, `Leitura documental: ${extractionMethod}.`].filter(Boolean).join(' '),
+        };
+    }
+
     const flat = rawText.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
     const lines = splitSbLines(rawText);
 
@@ -334,11 +355,12 @@ const parseSbPdfBuffer = async (buffer, originalName = 'Service Bulletin.pdf') =
     const observacao = [extractSbSummarySnippet(flat), extractSbLegacyPnSummary(tableOld)].filter(Boolean).join(' ');
 
     return {
+        documentType: 'SB',
         sbNumero,
         titulo,
         tipoSb,
         dataPublicacao,
-        observacao: observacao || null,
+        observacao: [observacao || null, `Leitura documental: ${extractionMethod}.`].filter(Boolean).join(' ') || null,
         itensSb,
     };
 };
@@ -1986,6 +2008,7 @@ exports.importData = async (req, res) => {
             let dataPublicacao = null;
             let observacao = null;
             let itensSb = [];
+            let documentType = 'SB';
 
             if (isPdfFile) {
                 const parsedSb = await parseSbPdfBuffer(req.file.buffer, req.file?.originalname || 'Service Bulletin.pdf');
@@ -1995,6 +2018,7 @@ exports.importData = async (req, res) => {
                 dataPublicacao = parsedSb.dataPublicacao || null;
                 observacao = parsedSb.observacao || null;
                 itensSb = parsedSb.itensSb || [];
+                documentType = parsedSb.documentType || 'SB';
             } else {
                 const sheetName = workbook.SheetNames[0];
                 const sheet = workbook.Sheets[sheetName];
@@ -2061,10 +2085,10 @@ exports.importData = async (req, res) => {
                 }
             }
 
-            return respondSuccess(`SB ${sbNumero} processada com ${itensSb.length} itens vinculados.`, {}, {
+            return respondSuccess(`Publicação técnica ${sbNumero} (${documentType}) processada com ${itensSb.length} itens vinculados.`, {}, {
                 tabelaAlvo: 'service_bulletins',
                 linhasImportadas: itensSb.length,
-                detalhes: { sb_numero: sbNumero, tipo_sb: tipoSb, pdf: isPdfFile },
+                detalhes: { sb_numero: sbNumero, tipo_sb: tipoSb, tipo_documento: documentType, pdf: isPdfFile },
             });
         }
 

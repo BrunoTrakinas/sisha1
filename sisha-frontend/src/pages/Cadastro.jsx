@@ -156,11 +156,11 @@ const orientacoesUploadPorTipo = {
         observacao: 'Use para registrar necessidades planejadas sem confundir com estoque real ou compra já aprovada.',
     },
     sb: {
-        titulo: 'Service Bulletin',
-        obrigatorias: ['PDF original da SB ou planilha com PN'],
+        titulo: 'Publicação Técnica (SB / PAN)',
+        obrigatorias: ['PDF original da SB/PAN ou planilha com PN'],
         recomendadas: ['PN / P/N / PART NUMBER', 'NSN / PI', 'NOMENCLATURA / DESCRIPTION', 'QTD / QTY / QUANTIDADE', 'CAPITULO / DMC', 'ITEM', 'APLICABILIDADE'],
-        comportamento: 'Cadastra a SB e seus itens vinculados, preservando número, tipo, título e observações quando extraídos.',
-        observacao: 'Para PDF, o sistema tenta extrair automaticamente o número da SB, tipo, título e peças citadas.',
+        comportamento: 'Cadastra a publicação técnica SB/PAN e seus itens vinculados, preservando referência, classificação, título, aplicabilidade e observações quando extraídos.',
+        observacao: 'Para PDF, o sistema reconhece Service Bulletin e Product Advisory Notice (PAN). PDFs escaneados usam OCR local determinístico; materiais estruturados são vinculados à publicação.',
     },
     receitas: {
         titulo: 'Receitas / Inspeções',
@@ -269,7 +269,10 @@ export default function Cadastro() {
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
             const nomeArquivo = e.target.files[0].name.toLowerCase();
-            if (nomeArquivo.includes('locrec')) {
+            if (/(?:^|[ _-])pan(?:[ _-]|\d)|service[ _-]*bulletin|lx[ _-]*pan/.test(nomeArquivo)) {
+                setTipoArquivo('sb');
+                setModalCeimspaConfirm(false);
+            } else if (nomeArquivo.includes('locrec')) {
                 setTipoArquivo('locrec');
                 setModalCeimspaConfirm(false);
             } else if (/sem[ _-]?demanda/.test(nomeArquivo)) {
@@ -990,7 +993,7 @@ export default function Cadastro() {
                             <option value="manual_tecnico">WTP / Manual Técnico</option>
                             <option value="pn_alternativos">PN Alternativos</option>
                             <option value="qnna">QNNA</option>
-                            <option value="sb">SB</option>
+                            <option value="sb">Publicação Técnica (SB / PAN)</option>
                             <option value="receitas" disabled>Receitas — use Chat Lince (importador operacional em preparação)</option>
                             <option value="pim">PIM Pendentes — snapshot atual</option>
                             <option value="politica_estoque_tarefas" disabled>Política de Estoque — use Chat Lince (importador operacional em preparação)</option>
@@ -1578,7 +1581,7 @@ export default function Cadastro() {
                                     <option value="pim">PIM</option>
                                     <option value="os">OS</option>
                                     <option value="recex">RECEX</option>
-                                    <option value="sb">Service Bulletin</option>
+                                    <option value="sb">Publicação Técnica (SB / PAN)</option>
                                 </optgroup>
                             </select>
 

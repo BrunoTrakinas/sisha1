@@ -21,7 +21,7 @@ const SOURCE_LABELS = {
     CEIMSPA_SEM_DEMANDA: 'CeIMSPA — Sem Demanda',
     IDENTIDADE_PI_COMPARTILHADA: 'Mesmo PI',
     RECIBO_CEIMSPA: 'Recibo destinado ao CeIMSPA',
-    SERVICE_BULLETIN: 'Service Bulletin',
+    SERVICE_BULLETIN: 'Publicação técnica (SB / PAN)',
     MANUAL_TECNICO_WTP: 'WTP / Manual técnico',
 };
 
@@ -620,7 +620,7 @@ export default function ConsultaItens() {
 
                                 {item.sb_referencias && item.sb_referencias.length > 0 ? (
                                     <div className="space-y-3">
-                                        <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Service Bulletin / referência técnica</p>
+                                        <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Publicação técnica (SB / PAN) / referência técnica</p>
                                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                                             {item.sb_referencias.map((sb, idx) => (
                                                 <div key={`${sb.sb_numero}-${idx}`} className="bg-white border border-amber-200 p-4 rounded-xl shadow-sm">
