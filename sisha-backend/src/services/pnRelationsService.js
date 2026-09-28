@@ -5,6 +5,22 @@ function normalizeKey(value) {
   return normalizePn(value);
 }
 
+function normalizeManualFamilyToken(value) {
+  return String(value || '').trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+function buildManualFamilyKey(row = {}) {
+  const dmc = normalizeManualFamilyToken(row.dmc);
+  const item = normalizeManualFamilyToken(row.item_num);
+  if (!dmc || !item) return null;
+  return `${dmc}|${item}`;
+}
+
+function isSameManualAlternativeFamily(a = {}, b = {}) {
+  const familyA = buildManualFamilyKey(a);
+  return Boolean(familyA && familyA === buildManualFamilyKey(b));
+}
+
 function getSubItemPriority(value) {
   const text = String(value || '').trim().toUpperCase();
   if (!text) return 999;
@@ -44,8 +60,8 @@ async function loadManualRelations(pn) {
   for (const base of (bases || [])) {
     const dmc = String(base.dmc || '').trim();
     const item = String(base.item_num || '').trim();
-    if (!dmc || !item) continue;
-    const familyKey = `${dmc}|${item}`;
+    const familyKey = buildManualFamilyKey(base);
+    if (!familyKey) continue;
     if (seenFamilies.has(familyKey)) continue;
     seenFamilies.add(familyKey);
 
@@ -200,6 +216,9 @@ async function resolvePnRelations(pnInput, { includeRfq = true } = {}) {
 
 module.exports = {
   normalizeKey,
+  normalizeManualFamilyToken,
+  buildManualFamilyKey,
+  isSameManualAlternativeFamily,
   getSubItemPriority,
   compareRelations,
   normalizeRfqEvolution,

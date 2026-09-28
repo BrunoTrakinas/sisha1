@@ -43,6 +43,7 @@ router.get('/snapshot', adminOnly, controller.getFoundationSnapshot);
 
 router.get('/receitas', adminOnly, controller.listReceitas);
 router.get('/receitas/:inspecao', adminOnly, controller.getReceitaItens);
+router.put('/receitas/:inspecao', adminOnly, controller.renameReceita);
 router.post('/receitas/item', adminOnly, controller.upsertReceitaItem);
 router.put('/receitas/item/:id', adminOnly, controller.upsertReceitaItem);
 router.delete('/receitas/item/:id', adminOnly, controller.deleteReceitaItem);

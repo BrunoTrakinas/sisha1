@@ -35,15 +35,33 @@ function filtrarBuscaAdministrativa(rows = [], q = '', fields = []) {
     return rows.filter((row) => fields.some((field) => normalizarIdentificador(row?.[field]).includes(termo)));
 }
 
+const ADMIN_DATA_PAGE_SIZE = 1000;
+
+async function carregarBaseAdministrativaCompleta(table, columns, orderColumn) {
+    const rows = [];
+    for (let from = 0; ; from += ADMIN_DATA_PAGE_SIZE) {
+        const { data, error } = await supabase
+            .from(table)
+            .select(columns)
+            .order(orderColumn, { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, from + ADMIN_DATA_PAGE_SIZE - 1);
+        if (error) throw error;
+        const page = data || [];
+        rows.push(...page);
+        if (page.length < ADMIN_DATA_PAGE_SIZE) break;
+    }
+    return rows;
+}
+
 exports.listarPpuAdministrativo = async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('estoque_ppu')
-            .select('id,pn,nsn_pi,nomenclatura,quantidade,localizacao,sn,data_chegada,data_garantia')
-            .order('pn', { ascending: true })
-            .limit(20000);
-        if (error) throw error;
-        const rows = filtrarBuscaAdministrativa(data || [], req.query.q || '', ['pn', 'nsn_pi', 'nomenclatura', 'localizacao', 'sn']);
+        const data = await carregarBaseAdministrativaCompleta(
+            'estoque_ppu',
+            'id,pn,nsn_pi,nomenclatura,quantidade,localizacao,sn,data_chegada,data_garantia',
+            'pn'
+        );
+        const rows = filtrarBuscaAdministrativa(data, req.query.q || '', ['pn', 'nsn_pi', 'nomenclatura', 'localizacao', 'sn']);
         return res.status(200).json({ status: 'success', data: rows, meta: { total: rows.length } });
     } catch (error) {
         console.error('ERRO AO LISTAR PPU PARA ADMINISTRAÇÃO:', error);
@@ -166,13 +184,12 @@ exports.excluirPpuPorId = async (req, res) => {
 
 exports.listarCeimspaAdministrativo = async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('estoque_ceimspa')
-            .select('id,pi,pn,pn_confirmado,fonte_identificacao,nomenclatura,quantidade,sj,uf')
-            .order('pi', { ascending: true })
-            .limit(20000);
-        if (error) throw error;
-        const rows = filtrarBuscaAdministrativa(data || [], req.query.q || '', ['pi', 'pn', 'nomenclatura', 'sj', 'uf']);
+        const data = await carregarBaseAdministrativaCompleta(
+            'estoque_ceimspa',
+            'id,pi,pn,pn_confirmado,fonte_identificacao,nomenclatura,quantidade,sj,uf',
+            'pi'
+        );
+        const rows = filtrarBuscaAdministrativa(data, req.query.q || '', ['pi', 'pn', 'nomenclatura', 'sj', 'uf']);
         return res.status(200).json({ status: 'success', data: rows, meta: { total: rows.length } });
     } catch (error) {
         console.error('ERRO AO LISTAR CEIMSPA:', error);

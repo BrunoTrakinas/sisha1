@@ -80,6 +80,24 @@ function requireAdmin(req, res) {
   return true;
 }
 
+const ADMIN_MANAGER_PAGE_SIZE = 1000;
+
+function isAdminManagerRequest(req) {
+  return String(req.query.admin_manager || '').toLowerCase() === 'true';
+}
+
+async function fetchAllAdminManagerRows(buildQuery) {
+  const rows = [];
+  for (let from = 0; ; from += ADMIN_MANAGER_PAGE_SIZE) {
+    const { data, error } = await buildQuery().range(from, from + ADMIN_MANAGER_PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = data || [];
+    rows.push(...page);
+    if (page.length < ADMIN_MANAGER_PAGE_SIZE) break;
+  }
+  return rows;
+}
+
 async function auditCompra(req, action, entity, entityId, summary, details = {}, visibility = 'PUBLIC') {
   await registrarAuditoria({
     req,
@@ -734,6 +752,17 @@ exports.listarPds = async (req, res) => {
     const q = normalizeUpper(req.query.q || '');
     const status = normalizeUpper(req.query.status || '');
     const incluirInativos = String(req.query.incluir_inativos || '').toLowerCase() === 'true';
+    if (isAdminManagerRequest(req)) {
+      if (!requireAdmin(req, res)) return;
+      const rows = await fetchAllAdminManagerRows(() => {
+        let adminQuery = supabase.from('compras_pds').select('*').order('updated_at', { ascending: false }).order('id', { ascending: true });
+        if (!incluirInativos) adminQuery = adminQuery.neq('ativo', false);
+        if (status) adminQuery = adminQuery.eq('status_grupo', status);
+        return adminQuery;
+      });
+      const filtered = q ? rows.filter((pd) => pdMatches(pd, q)) : rows;
+      return res.status(200).json({ status: 'success', data: filtered, meta: { total: filtered.length, busca: q || null, admin_manager: true } });
+    }
     let query = supabase.from('compras_pds').select('*').order('updated_at', { ascending: false }).limit(10000);
     if (!incluirInativos) query = query.neq('ativo', false);
     if (status) query = query.eq('status_grupo', status);
@@ -910,6 +939,16 @@ exports.listarOrdens = async (req, res) => {
   try {
     const q = normalizeUpper(req.query.q || '');
     const status = normalizeUpper(req.query.status || '');
+    if (isAdminManagerRequest(req)) {
+      if (!requireAdmin(req, res)) return;
+      const rows = await fetchAllAdminManagerRows(() => {
+        let adminQuery = supabase.from('compras_ordens').select('*').eq('ativo', true).order('created_at', { ascending: false }).order('id', { ascending: true });
+        if (status) adminQuery = adminQuery.eq('status', status);
+        return adminQuery;
+      });
+      const filtered = q ? rows.filter((ordem) => ordemMatches(ordem, q, new Set())) : rows;
+      return res.status(200).json({ status: 'success', data: filtered, meta: { total: filtered.length, busca: q || null, admin_manager: true } });
+    }
     const linkedPns = await buscarPnsRelacionadosPorWoOuSn(q);
     let query = supabase.from('compras_ordens').select('*, compras_pds(*), compras_suplementacoes(*)').eq('ativo', true).order('created_at', { ascending: false }).limit(5000);
     if (status) query = query.eq('status', status);
@@ -1501,6 +1540,16 @@ exports.listarWorkOrders = async (req, res) => {
   try {
     const q = normalizeUpper(req.query.q || '');
     const status = normalizeUpper(req.query.status || '');
+    if (isAdminManagerRequest(req)) {
+      if (!requireAdmin(req, res)) return;
+      const rows = await fetchAllAdminManagerRows(() => {
+        let adminQuery = supabase.from('work_orders').select('*').eq('ativo', true).order('created_at', { ascending: false }).order('id', { ascending: true });
+        if (status) adminQuery = adminQuery.eq('status', status);
+        return adminQuery;
+      });
+      const filtered = q ? rows.filter((wo) => woMatches(wo, q)) : rows;
+      return res.status(200).json({ status: 'success', data: filtered, meta: { total: filtered.length, busca: q || null, admin_manager: true } });
+    }
     let query = supabase.from('work_orders').select('*, work_order_suplementacoes(*)').eq('ativo', true).order('created_at', { ascending: false }).limit(5000);
     if (status) query = query.eq('status', status);
     const [{ data, error }, wosOrderBook] = await Promise.all([query, listarWorkOrdersOrderBook(q, status)]);

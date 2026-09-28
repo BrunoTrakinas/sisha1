@@ -50,7 +50,7 @@ const SOURCES = {
   oc: {
     label: 'OC / ODC',
     description: 'Ordens de Compra locais do SISHA. ODC é tratado pelo status da OC; registros do Order Book continuam somente leitura.',
-    endpoint: '/purchases/ordens',
+    endpoint: '/purchases/ordens?admin_manager=true',
     createEndpoint: '/purchases/ordens',
     updateEndpoint: (id) => `/purchases/ordens/${id}`,
     deleteEndpoint: (id) => `/purchases/ordens/${id}`,
@@ -68,7 +68,7 @@ const SOURCES = {
   pd: {
     label: 'PD / SEPD',
     description: 'Pedidos locais com edição pelas regras do módulo de compras.',
-    endpoint: '/purchases/pds',
+    endpoint: '/purchases/pds?admin_manager=true',
     createEndpoint: '/purchases/pds',
     updateEndpoint: (id) => `/purchases/pds/${id}`,
     deleteEndpoint: (id) => `/purchases/pds/${id}`,
@@ -93,7 +93,7 @@ const SOURCES = {
   wo: {
     label: 'WO',
     description: 'Work Orders locais. Alterações continuam sincronizando o Livro do Equipamento pelas regras do 2B.5B.',
-    endpoint: '/purchases/work-orders',
+    endpoint: '/purchases/work-orders?admin_manager=true',
     createEndpoint: '/purchases/work-orders',
     updateEndpoint: (id) => `/purchases/work-orders/${id}`,
     deleteEndpoint: (id) => `/purchases/work-orders/${id}`,

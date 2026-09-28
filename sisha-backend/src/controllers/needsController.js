@@ -4,16 +4,17 @@ const supabase = require('../config/supabaseClient');
 const { normalizePn } = require('../utils/importAliases');
 const { loadReferencePriceRows, buildReferencePriceMap } = require('../services/pricingService');
 const { prepareQuoteRequestItems, exportQuoteRequest } = require('../services/quoteRequestService');
-const { resolvePnRelations } = require('../services/pnRelationsService');
+const { resolvePnRelations, buildManualFamilyKey } = require('../services/pnRelationsService');
 const { ACTIVE_AIRCRAFT_CODES, WORKSHOP_MAP, parseOsDomain, isMtCode } = require('../services/osDomainService');
 const { buildAircraftAvailabilityMap, buildMtAvailabilityDecision } = require('../services/mtNeedPolicyService');
 const { loadCurrentAvailabilityRows, loadCurrentMaintenanceIndicators } = require('../services/aircraftAvailabilityService');
 const { loadGeneratorOperationalRows, classifyMaintenanceIndicatorSemantic } = require('../services/aircraftOperationalStateService');
 const { loadMaintenanceProgram } = require('../services/maintenancePlanningService');
-const { loadAllEffectivePpuRows, operationalQuantity } = require('../services/ppuEffectiveAvailabilityService');
+const { loadAllEffectivePpuRows } = require('../services/ppuEffectiveAvailabilityService');
 const { buildRecipePolicyDeficiency, formatRecipePolicyDeficiencyRows } = require('../services/recipePolicyDeficiencyService');
 const { pendingPurchaseQty, isFuturePurchaseCoverageStatus, isOdcProcessStatus } = require('../services/pdLifecyclePolicyService');
 const { setAuditSummary, recordAuditIssue } = require('../utils/importAudit');
+const { registrarAuditoria } = require('../utils/auditLogger');
 
 const PAGE_SIZE = 1000;
 const ANV_CODES = ACTIVE_AIRCRAFT_CODES;
@@ -67,20 +68,6 @@ function normalizeKey(value) {
   return normalizeUpper(value);
 }
 
-function normalizePiKey(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  const digits = raw.replace(/\D/g, '');
-  if (!digits) return normalizeUpper(raw);
-  if (digits.length >= 13) return digits.slice(-9);
-  return digits.padStart(9, '0');
-}
-
-function referencePnsFromSemDemandRow(row = {}) {
-  const refs = Array.isArray(row.referencias) ? row.referencias : [];
-  return Array.from(new Set(refs.map((entry) => normalizeKey(entry?.ref || entry?.pn)).filter(Boolean)));
-}
-
 function toNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
@@ -96,73 +83,6 @@ function getCeimspaQuantity(context, pn, pis = []) {
     const manualPiMatch = !rowPn && rowPi && piSet.has(rowPi);
     return directPnMatch || manualPiMatch ? sum + toNumber(row.quantidade) : sum;
   }, 0);
-}
-
-function buildCeimspaAvailabilityLedger(rows = []) {
-  const ledger = new Map();
-  (rows || []).forEach((row, index) => {
-    const pi = normalizePiKey(row.pi);
-    const isSharedPi = row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA';
-    const key = isSharedPi
-      ? `SEM_DEMANDA_PI:${pi}`
-      : `CEIMSPA_ROW:${row.id || `${row.fonte_identificacao || row.origem_saldo || 'CEIMSPA'}|${row.pn || ''}|${pi}|${index}`}`;
-    const qty = Math.max(0, toNumber(row.quantidade));
-    // Sem Demanda repete a mesma disponibilidade em todas as referências do PI:
-    // o saldo contábil é único e por isso usa o maior valor, nunca a soma.
-    if (isSharedPi && ledger.has(key)) {
-      ledger.get(key).remaining = Math.max(ledger.get(key).remaining, qty);
-      ledger.get(key).initial = Math.max(ledger.get(key).initial, qty);
-      return;
-    }
-    ledger.set(key, { key, row, remaining: qty, initial: qty, pi, isSharedPi });
-  });
-  return ledger;
-}
-
-function consumeCeimspaAvailability(context, pn, pis = [], ledger = null, maxNeeded = Infinity) {
-  const pnKey = normalizeKey(pn);
-  const piSet = new Set((pis || []).map(normalizePiKey).filter(Boolean));
-  const stockLedger = ledger || buildCeimspaAvailabilityLedger(context.ceimspaRows || []);
-  const seen = new Set();
-  let quantidade = 0;
-  let aplicado = 0;
-  const detalhes = [];
-
-  for (const entry of stockLedger.values()) {
-    if (seen.has(entry.key)) continue;
-    seen.add(entry.key);
-    const row = entry.row || {};
-    const rowPn = normalizeKey(row.pn);
-    const rowPi = normalizePiKey(row.pi);
-    const directPnMatch = rowPn && rowPn === pnKey;
-    const sharedPiMatch = !rowPn && rowPi && piSet.has(rowPi);
-    if (!directPnMatch && !sharedPiMatch) continue;
-
-    const available = Math.max(0, toNumber(entry.remaining));
-    if (available <= 0) continue;
-    quantidade += available;
-
-    const remainingNeed = Math.max(0, Number.isFinite(Number(maxNeeded)) ? Number(maxNeeded) - aplicado : available);
-    const take = Math.min(available, remainingNeed);
-    if (take > 0 && ledger) entry.remaining = roundQuantity(available - take);
-    aplicado += take;
-    detalhes.push({
-      pn: rowPn || null,
-      pi: rowPi || null,
-      quantidade: roundQuantity(available),
-      aplicado: roundQuantity(take),
-      fonte: row.fonte_identificacao || row.origem_saldo || 'CEIMSPA',
-      saldo_compartilhado_pi: entry.isSharedPi,
-    });
-  }
-
-  return { quantidade: roundQuantity(quantidade), aplicado: roundQuantity(aplicado), detalhes };
-}
-
-function sharedPiBetween(context, pnA, pnB) {
-  const a = new Set(Array.from(context.pnPiMap.get(normalizeKey(pnA)) || []).map(normalizePiKey).filter(Boolean));
-  const b = new Set(Array.from(context.pnPiMap.get(normalizeKey(pnB)) || []).map(normalizePiKey).filter(Boolean));
-  return Array.from(a).find((pi) => b.has(pi)) || null;
 }
 
 function roundQuantity(value) {
@@ -181,43 +101,25 @@ function formatPpuLocationReference(ppuInfo) {
 }
 
 function buildAvailabilitySections(baseRows = [], context) {
-  const sections = { ppu: [], ceimspa: [], alternativos: [], oda: [], pricelist: [], odc: [], comprar: [] };
+  const sections = { ppu: [], ceimspa: [], oda: [], pricelist: [], odc: [], comprar: [] };
   let totalPpu = 0;
   let totalCeimspa = 0;
-  let totalAlternativos = 0;
   let totalOda = 0;
   let totalOdc = 0;
   let totalComprar = 0;
   let valorComprar = 0;
   let appliedPpu = 0;
   let appliedCeimspa = 0;
-  let appliedAlternativos = 0;
   let appliedOda = 0;
-
-  // Um único ledger é compartilhado por toda a simulação. Assim, estoque usado
-  // como alternativo não reaparece depois como saldo novo em outro PN.
-  const ppuRemaining = new Map();
-  (context.ppuMap || new Map()).forEach((info, pn) => ppuRemaining.set(normalizeKey(pn), Math.max(0, toNumber(info?.quantidade))));
-  const ceimspaLedger = buildCeimspaAvailabilityLedger(context.ceimspaRows || []);
-
-  const consumePpu = (pn, maxNeeded = Infinity) => {
-    const key = normalizeKey(pn);
-    const available = Math.max(0, toNumber(ppuRemaining.get(key)));
-    const needed = Math.max(0, Number.isFinite(Number(maxNeeded)) ? Number(maxNeeded) : available);
-    const applied = Math.min(available, needed);
-    ppuRemaining.set(key, roundQuantity(available - applied));
-    return { available: roundQuantity(available), applied: roundQuantity(applied) };
-  };
 
   baseRows.forEach((row) => {
     const necessidade = toNumber(row.necessidade_total);
     let faltam = necessidade;
 
     const ppuInfo = context.ppuMap.get(row.pn);
-    const ppuConsumed = consumePpu(row.pn, faltam);
-    const disponivelPpu = ppuConsumed.available;
-    const ppuAplicado = ppuConsumed.applied;
-    faltam = Math.max(0, faltam - ppuAplicado);
+    const disponivelPpu = Math.max(0, toNumber(ppuInfo?.quantidade));
+    const ppuAplicado = Math.min(faltam, disponivelPpu);
+    faltam = Math.max(0, faltam - disponivelPpu);
     totalPpu += disponivelPpu;
     appliedPpu += ppuAplicado;
     if (disponivelPpu > 0) {
@@ -233,11 +135,10 @@ function buildAvailabilitySections(baseRows = [], context) {
       });
     }
 
-    const pis = Array.from(context.pnPiMap.get(row.pn) || []).map(normalizePiKey).filter(Boolean);
-    const ceimspaPrincipal = consumeCeimspaAvailability(context, row.pn, pis, ceimspaLedger, faltam);
-    const disponivelCeimspa = Math.max(0, ceimspaPrincipal.quantidade);
-    const ceimspaAplicado = Math.max(0, ceimspaPrincipal.aplicado);
-    faltam = Math.max(0, faltam - ceimspaAplicado);
+    const pis = Array.from(context.pnPiMap.get(row.pn) || []);
+    const disponivelCeimspa = Math.max(0, getCeimspaQuantity(context, row.pn, pis));
+    const ceimspaAplicado = Math.min(faltam, disponivelCeimspa);
+    faltam = Math.max(0, faltam - disponivelCeimspa);
     totalCeimspa += disponivelCeimspa;
     appliedCeimspa += ceimspaAplicado;
     if (disponivelCeimspa > 0) {
@@ -249,55 +150,6 @@ function buildAvailabilitySections(baseRows = [], context) {
         cobertura_etapa: roundQuantity(ceimspaAplicado),
         saldo_apos_etapa: roundQuantity(faltam),
         documento_referencia: pis.join(' | '),
-        row_tone: faltam <= 0 ? 'full' : 'partial',
-      });
-    }
-
-    const alternativosDetalhes = [];
-    const alternativePns = Array.from(context.pnAlternativeMap.get(row.pn) || []).sort();
-    let disponivelAlternativos = 0;
-    let alternativosAplicado = 0;
-    alternativePns.forEach((altPn) => {
-      const altPpuConsumed = consumePpu(altPn, faltam);
-      const altPpu = altPpuConsumed.available;
-      let aplicado = altPpuConsumed.applied;
-      faltam = Math.max(0, faltam - altPpuConsumed.applied);
-      const altPis = Array.from(context.pnPiMap.get(altPn) || []).map(normalizePiKey).filter(Boolean);
-      const altCeimspaConsumed = consumeCeimspaAvailability(context, altPn, altPis, ceimspaLedger, faltam);
-      const altCeimspa = altCeimspaConsumed.quantidade;
-      aplicado += altCeimspaConsumed.aplicado;
-      faltam = Math.max(0, faltam - altCeimspaConsumed.aplicado);
-      const altDisponivel = roundQuantity(altPpu + altCeimspa);
-      disponivelAlternativos += altDisponivel;
-      alternativosAplicado += aplicado;
-      alternativosDetalhes.push({
-        pn: altPn,
-        pi: altPis.join(' | '),
-        ppu: roundQuantity(altPpu),
-        ceimspa: roundQuantity(altCeimspa),
-        disponivel: altDisponivel,
-        aplicado: roundQuantity(aplicado),
-        fonte: sharedPiBetween(context, row.pn, altPn) ? 'Alternativo pelo critério de mesmo PI' : 'Alternativo técnico/documental',
-      });
-    });
-    totalAlternativos += disponivelAlternativos;
-    appliedAlternativos += alternativosAplicado;
-    const alternativosTexto = alternativosDetalhes
-      .map((alt) => `${alt.pn}${alt.pi ? ` (PI ${alt.pi})` : ''}: ${alt.disponivel} un [${alt.fonte}]`)
-      .join(' | ');
-    if (disponivelAlternativos > 0) {
-      sections.alternativos.push({
-        ...row,
-        pi: pis.join(' | '),
-        alternativos: alternativosDetalhes,
-        alternativos_texto: alternativosTexto,
-        disponivel_etapa: roundQuantity(disponivelAlternativos),
-        aplicado_na_necessidade: roundQuantity(alternativosAplicado),
-        faltam_apos_etapa: roundQuantity(faltam),
-        cobertura_etapa: roundQuantity(alternativosAplicado),
-        saldo_apos_etapa: roundQuantity(faltam),
-        documento_referencia: alternativosTexto,
-        observacao: 'Estoque atual de PNs alternativos aplicado após o PN principal e antes da ODA. Saldos compartilhados pelo mesmo PI são contados uma única vez.',
         row_tone: faltam <= 0 ? 'full' : 'partial',
       });
     }
@@ -369,7 +221,7 @@ function buildAvailabilitySections(baseRows = [], context) {
       totalComprar += faltam;
       valorComprar += valorTotal;
       const priceMeta = buildPricePresentation(priceInfo || null);
-      const coberturaEfetiva = Math.min(necessidade, ppuAplicado + ceimspaAplicado + alternativosAplicado + odaAplicado);
+      const coberturaEfetiva = Math.min(necessidade, ppuAplicado + ceimspaAplicado + odaAplicado);
       sections.comprar.push({
         ...row,
         ...priceMeta,
@@ -378,10 +230,6 @@ function buildAvailabilitySections(baseRows = [], context) {
         ppu_aplicado: roundQuantity(ppuAplicado),
         ceimspa_disponivel: roundQuantity(disponivelCeimspa),
         ceimspa_aplicado: roundQuantity(ceimspaAplicado),
-        alternativos_disponiveis: alternativosDetalhes,
-        alternativos_texto: alternativosTexto,
-        alternativos_disponivel: roundQuantity(disponivelAlternativos),
-        alternativos_aplicado: roundQuantity(alternativosAplicado),
         oda_a_receber: roundQuantity(disponivelOda),
         oda_aplicado: roundQuantity(odaAplicado),
         odc_em_andamento: roundQuantity(disponivelOdc),
@@ -412,14 +260,12 @@ function buildAvailabilitySections(baseRows = [], context) {
     totals: {
       ppu: roundQuantity(totalPpu),
       ceimspa: roundQuantity(totalCeimspa),
-      alternativos: roundQuantity(totalAlternativos),
       oda: roundQuantity(totalOda),
       odc: roundQuantity(totalOdc),
       ppu_aplicado: roundQuantity(appliedPpu),
       ceimspa_aplicado: roundQuantity(appliedCeimspa),
-      alternativos_aplicado: roundQuantity(appliedAlternativos),
       oda_aplicado: roundQuantity(appliedOda),
-      cobertura_efetiva: roundQuantity(appliedPpu + appliedCeimspa + appliedAlternativos + appliedOda),
+      cobertura_efetiva: roundQuantity(appliedPpu + appliedCeimspa + appliedOda),
       comprar: roundQuantity(totalComprar),
       valorComprar: Number(valorComprar.toFixed(2)),
     },
@@ -795,7 +641,6 @@ function normalizeOrigemDisplay(row = {}) {
 function formatWorkbookRows(rows = []) {
   return rows.map((row) => ({
     PN: row.pn,
-    PI: row.pi || '',
     NSN: row.nsn || '',
     Nomenclatura: row.nomenclatura || '',
     Necessidade_Total: row.necessidade_total,
@@ -803,9 +648,6 @@ function formatWorkbookRows(rows = []) {
     Necessidade_Politica_2_Anos: row.necessidade_politica_2_anos ?? '',
     PPU_Atual: row.ppu_disponivel ?? '',
     CeIMSPA_Atual: row.ceimspa_disponivel ?? '',
-    Alternativos: row.alternativos_texto || '',
-    Alternativos_Disponivel: row.alternativos_disponivel ?? '',
-    Alternativos_Aplicado: row.alternativos_aplicado ?? '',
     ODA_A_Receber: row.oda_a_receber ?? '',
     ODC_Em_Andamento_Nao_Abate: row.odc_em_andamento ?? '',
     Cobertura_Efetiva_PPU_CeIMSPA_ODA: row.cobertura_total_efetiva ?? '',
@@ -889,7 +731,7 @@ function splitRecipePnList(value) {
     .filter(Boolean);
 }
 
-function buildPnAlternativeMap(dicRows = [], altDocRows = [], semDemandRows = []) {
+function buildPnAlternativeMap(dicRows = [], altDocRows = []) {
   const map = new Map();
   const families = new Map();
 
@@ -902,11 +744,9 @@ function buildPnAlternativeMap(dicRows = [], altDocRows = [], semDemandRows = []
   };
 
   (dicRows || []).forEach((row) => {
-    const dmc = String(row.dmc || '').trim();
-    const item = String(row.item_num || '').trim();
     const pn = normalizeKey(row.pn);
-    if (!dmc || !item || !pn) return;
-    const familyKey = `${dmc}|${item}`;
+    const familyKey = buildManualFamilyKey(row);
+    if (!familyKey || !pn) return;
     if (!families.has(familyKey)) families.set(familyKey, new Set());
     families.get(familyKey).add(pn);
   });
@@ -919,22 +759,6 @@ function buildPnAlternativeMap(dicRows = [], altDocRows = [], semDemandRows = []
   (altDocRows || []).forEach((row) => {
     add(row.pn, row.pn_alt);
     add(row.pn_alt, row.pn);
-  });
-
-  const piFamilies = new Map();
-  const addPiFamily = (piValue, pnValue) => {
-    const pi = normalizePiKey(piValue);
-    const pn = normalizeKey(pnValue);
-    if (!pi || !pn) return;
-    if (!piFamilies.has(pi)) piFamilies.set(pi, new Set());
-    piFamilies.get(pi).add(pn);
-  };
-  (dicRows || []).forEach((row) => addPiFamily(row.pi || row.nsn, row.pn));
-  (altDocRows || []).forEach((row) => { addPiFamily(row.pi, row.pn); addPiFamily(row.pi, row.pn_alt); });
-  (semDemandRows || []).forEach((row) => referencePnsFromSemDemandRow(row).forEach((pn) => addPiFamily(row.pi, pn)));
-  piFamilies.forEach((members) => {
-    const list = Array.from(members);
-    list.forEach((pn) => list.forEach((alt) => add(pn, alt)));
   });
 
   return map;
@@ -1075,7 +899,6 @@ function isOpenSbStatus(status) {
 
 function inferSbActionType(header = {}, items = []) {
   const haystack = `${header.titulo || ''} ${header.observacao || ''}`.toUpperCase();
-  if (/INTERIM SERVICING|SERVICING|MAINTENANCE|MANUTENÇÃO|MANUTENCAO/.test(haystack)) return 'MANUTENÇÃO PROGRAMADA';
   if (/ALERT|ALERTA|INSPECT|INSPECTION|CHECK/.test(haystack)) return 'INSPEÇÃO';
   if (/REPLACE|CHANGE TO|CHANGE|SUBSTITU/i.test(haystack)) return 'SUBSTITUIÇÃO';
   if (/INTRODUCTION OF MODIFICATION|MODIFICATION|MODIFICAÇÃO|MODIFICACAO/.test(haystack)) return 'MODIFICAÇÃO';
@@ -1097,8 +920,7 @@ function buildSbShortSummary(header = {}, items = []) {
 function buildSbActions(header = {}, items = [], coverage = []) {
   const actions = [];
   const actionType = inferSbActionType(header, items);
-  if (actionType === 'MANUTENÇÃO PROGRAMADA') actions.push('Planejar o servicing/manutenção conforme a periodicidade e a publicação técnica aplicável.');
-  if (actionType === 'INSPEÇÃO') actions.push('Executar inspeção/cumprimento técnico conforme a publicação técnica.');
+  if (actionType === 'INSPEÇÃO') actions.push('Executar inspeção/cumprimento técnico conforme a SB.');
   if (actionType === 'SUBSTITUIÇÃO') actions.push('Avaliar substituição dos PNs afetados e registrar cumprimento documental.');
   if (actionType === 'MODIFICAÇÃO') actions.push('Planejar a modificação/intervenção e validar aplicabilidade antes da execução.');
   if (items.length > 0) actions.push('Conferir cobertura logística dos itens e abrir compra/cadastro apenas para o saldo não coberto.');
@@ -1247,10 +1069,8 @@ async function loadGeneratorContext(force = false) {
     purchaseRows,
     priceRows,
     dicRows,
-    manualDicRows,
     altDocRows,
     ceimspaRows,
-    semDemandRows,
     referencePriceRows,
     itemRows,
     sbRows,
@@ -1267,10 +1087,8 @@ async function loadGeneratorContext(force = false) {
     fetchAllRows('compras_pds', '*').catch(() => []),
     fetchAllRows('price_list', 'pn, valor_unitario, nomenclatura, nsn').catch(() => []),
     fetchAllRows('dicionario_mestre', 'pn, pi, nsn, nomenclatura, dmc, item_num, sub_item').catch(() => []),
-    fetchAllRows('dicionario_manual', '*').catch(() => []),
     fetchAllRows('pn_alternativos_documento', 'pn, pn_alt, pi, fonte, ativo').then((rows) => (rows || []).filter((row) => row.ativo !== false)).catch(() => []),
-    fetchAllRows('v_sisha_ceimspa_disponibilidade', 'id, pn, pi, quantidade, nomenclatura, origem_saldo, numero_recibo, fonte_identificacao').catch(() => []),
-    fetchAllRows('estoque_ceimspa', 'pi,quantidade,referencias,fonte_identificacao').then((rows) => (rows || []).filter((row) => row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA')).catch(() => []),
+    fetchAllRows('v_sisha_ceimspa_disponibilidade', 'pn, pi, quantidade, nomenclatura, origem_saldo, numero_recibo').catch(() => []),
     loadReferencePriceRows().catch(() => []),
     fetchAllRows('items', 'pn, nomenclatura, nsn').catch(() => []),
     fetchAllRows('service_bulletins', 'sb_numero, titulo, tipo_sb, status_acao, data_publicacao, observacao, fonte_documento, updated_at').catch(() => []),
@@ -1281,10 +1099,7 @@ async function loadGeneratorContext(force = false) {
 
   const receitaOptions = buildReceitaOptions(receitaRows, politicaRows);
   const origemOptions = buildOrigemOptions(pimRows);
-  // O Radar usa também o dicionário do Manual. O Gerador precisa da mesma
-  // identidade PN→PI para não perder o PI na exportação (ex.: MA3352A0112).
-  const identityDictionaryRows = [...(dicRows || []), ...(manualDicRows || [])];
-  const pnAlternativeMap = buildPnAlternativeMap(identityDictionaryRows, altDocRows, semDemandRows);
+  const pnAlternativeMap = buildPnAlternativeMap(dicRows, altDocRows);
   const recipeApplicationMap = buildRecipeApplicationMap(receitaRows, pnAlternativeMap);
 
   const ppuMap = new Map();
@@ -1293,7 +1108,7 @@ async function loadGeneratorContext(force = false) {
     if (!pn) return;
     if (!ppuMap.has(pn)) ppuMap.set(pn, { quantidade: 0, locais: new Map() });
     const ref = ppuMap.get(pn);
-    const quantidade = operationalQuantity(row);
+    const quantidade = toNumber(row.quantidade);
     ref.quantidade += quantidade;
     if (row.localizacao) {
       const local = String(row.localizacao).trim();
@@ -1339,7 +1154,7 @@ async function loadGeneratorContext(force = false) {
       nomenclatura: safeString(row.nomenclatura),
     });
   });
-  (identityDictionaryRows || []).forEach((row) => {
+  (dicRows || []).forEach((row) => {
     const pn = normalizeKey(row.pn);
     if (!pn) return;
     if (!pnPiMap.has(pn)) pnPiMap.set(pn, new Set());
@@ -1348,22 +1163,6 @@ async function loadGeneratorContext(force = false) {
     pnMetaMap.set(pn, {
       nsn: current.nsn || safeString(row.nsn),
       nomenclatura: current.nomenclatura || safeString(row.nomenclatura),
-    });
-  });
-  (altDocRows || []).forEach((row) => {
-    const pi = normalizePiKey(row.pi);
-    [row.pn, row.pn_alt].forEach((value) => {
-      const pn = normalizeKey(value);
-      if (!pn || !pi) return;
-      if (!pnPiMap.has(pn)) pnPiMap.set(pn, new Set());
-      pnPiMap.get(pn).add(pi);
-    });
-  });
-  (semDemandRows || []).forEach((row) => {
-    const pi = normalizePiKey(row.pi);
-    referencePnsFromSemDemandRow(row).forEach((pn) => {
-      if (!pnPiMap.has(pn)) pnPiMap.set(pn, new Set());
-      if (pi) pnPiMap.get(pn).add(pi);
     });
   });
 
@@ -1388,9 +1187,8 @@ async function loadGeneratorContext(force = false) {
     });
   });
 
-  const operationalCeimspaRows = [...(ceimspaRows || []), ...(semDemandRows || [])];
   const ceimspaMap = new Map();
-  (operationalCeimspaRows || []).forEach((row) => {
+  (ceimspaRows || []).forEach((row) => {
     const pi = normalizeUpper(row.pi);
     if (!pi) return;
     if (!ceimspaMap.has(pi)) ceimspaMap.set(pi, { quantidade: 0 });
@@ -1421,7 +1219,6 @@ async function loadGeneratorContext(force = false) {
     receitaRows,
     politicaRows,
     pimRows,
-    manualDicRows,
     sbRows,
     sbItemRows,
     sbItemsByNumero,
@@ -1436,7 +1233,7 @@ async function loadGeneratorContext(force = false) {
     pnPiMap,
     pnMetaMap,
     ceimspaMap,
-    ceimspaRows: operationalCeimspaRows,
+    ceimspaRows,
     aircraftAvailabilityRows,
     aircraftAvailabilityMap: buildAircraftAvailabilityMap(aircraftAvailabilityRows),
     maintenanceProgram,
@@ -1582,7 +1379,7 @@ function buildGeneratorPreview(selection, context) {
 
   selectedSbs.forEach((sbNumero) => {
     const header = (context.sbRows || []).find((row) => row.sb_numero === sbNumero) || {};
-    const itens = (context.sbItemsByNumero.get(sbNumero) || []).filter((item) => normalizeUpper(item.item_num) !== 'APLICABILIDADE');
+    const itens = context.sbItemsByNumero.get(sbNumero) || [];
     itens.forEach((item) => {
       const qtyRaw = toNumber(item.qtd);
       const qtyGerador = qtyRaw > 0 ? qtyRaw : 1;
@@ -1604,7 +1401,6 @@ function buildGeneratorPreview(selection, context) {
     const meta = context.pnMetaMap.get(row.pn) || {};
     return {
       ...row,
-      pi: Array.from(context.pnPiMap.get(row.pn) || []).map(normalizePiKey).filter(Boolean).join(' | '),
       nsn: row.nsn || meta.nsn || null,
       nomenclatura: row.nomenclatura === 'N/A' ? (meta.nomenclatura || 'N/A') : row.nomenclatura,
     };
@@ -1619,7 +1415,6 @@ function buildGeneratorPreview(selection, context) {
     ppuMap: context.ppuMap || new Map(),
     ceimspaRows: context.ceimspaRows || [],
     pnPiMap: context.pnPiMap || new Map(),
-    pnAlternativeMap: context.pnAlternativeMap || new Map(),
     pnMetaMap: context.pnMetaMap || new Map(),
     purchaseRows: context.purchaseRows || [],
     odaFallbackMap: context.odaMap || new Map(),
@@ -1636,7 +1431,6 @@ function buildGeneratorPreview(selection, context) {
       necessidade_politica_2_anos: policy?.necessidade_2_anos ?? 0,
       ppu_politica: policy?.ppu_efetivo ?? 0,
       ceimspa_politica: policy?.ceimspa_disponivel ?? 0,
-      alternativos_politica: policy?.alternativos_aplicado ?? 0,
       oda_politica: policy?.oda_a_receber_total ?? 0,
       deficit_politica_2_anos: policy?.deficit_a_providenciar ?? 0,
       odc_politica_em_andamento: policy?.odc_em_andamento ?? row.odc_em_andamento ?? 0,
@@ -1654,7 +1448,6 @@ function buildGeneratorPreview(selection, context) {
     necessidade_total: Number(baseRows.reduce((acc, row) => acc + toNumber(row.necessidade_total), 0).toFixed(2)),
     disponivel_ppu: totals.ppu,
     disponivel_ceimspa: totals.ceimspa,
-    disponivel_alternativos: totals.alternativos,
     disponivel_oda: totals.oda,
     disponivel_odc: totals.odc,
     coberto_ppu: totals.ppu,
@@ -1663,14 +1456,12 @@ function buildGeneratorPreview(selection, context) {
     coberto_odc: 0,
     cobertura_efetiva_ppu: totals.ppu_aplicado,
     cobertura_efetiva_ceimspa: totals.ceimspa_aplicado,
-    cobertura_efetiva_alternativos: totals.alternativos_aplicado,
     cobertura_efetiva_oda: totals.oda_aplicado,
     cobertura_efetiva_total: totals.cobertura_efetiva,
     odc_em_andamento: totals.odc,
     politica_necessidade_2_anos: recipeDeficiency.summary?.necessidade_2_anos || 0,
     politica_ppu_efetivo: recipeDeficiency.summary?.ppu_efetivo || 0,
     politica_ceimspa_disponivel: recipeDeficiency.summary?.ceimspa_disponivel || 0,
-    politica_alternativos_aplicado: recipeDeficiency.summary?.alternativos_aplicado || 0,
     politica_oda_a_receber: recipeDeficiency.summary?.oda_a_receber || 0,
     politica_odc_em_andamento: recipeDeficiency.summary?.odc_em_andamento || 0,
     politica_deficit_a_providenciar: recipeDeficiency.summary?.deficit_a_providenciar || 0,
@@ -1883,9 +1674,7 @@ function buildOperationalCostPreview(selection, context) {
 }
 
 function buildSbDetail(header, context) {
-  const items = (context.sbItemsByNumero.get(header.sb_numero) || [])
-    .filter((item) => normalizeUpper(item.item_num) !== 'APLICABILIDADE')
-    .map((item) => buildSbCoverageItem(item, context));
+  const items = (context.sbItemsByNumero.get(header.sb_numero) || []).map((item) => buildSbCoverageItem(item, context));
   const acaoPrincipal = inferSbActionType(header, items);
   const acoes = buildSbActions(header, items, items);
   const totalEstimado = items.reduce((acc, item) => {
@@ -1922,29 +1711,119 @@ function buildSbDetail(header, context) {
 
 exports.listReceitas = async (req, res) => {
   try {
-    const q = String(req.query.q || '').trim();
-    let query = supabase
-      .from('receita_itens')
-      .select('inspecao')
-      .order('inspecao', { ascending: true });
-
-    if (q) query = query.ilike('inspecao', `%${q}%`);
-
-    const { data, error } = await query;
-    if (error) throw error;
+    const q = normalizeUpper(req.query.q || '');
+    const data = await fetchAllRows('receita_itens', 'inspecao');
 
     const grouped = new Map();
     (data || []).forEach((row) => {
-      if (!row.inspecao) return;
-      grouped.set(row.inspecao, (grouped.get(row.inspecao) || 0) + 1);
+      const inspecao = String(row.inspecao || '').trim();
+      if (!inspecao) return;
+      if (q && !normalizeUpper(inspecao).includes(q)) return;
+      grouped.set(inspecao, (grouped.get(inspecao) || 0) + 1);
     });
 
     return res.status(200).json({
       status: 'success',
-      data: Array.from(grouped.entries()).map(([inspecao, total_itens]) => ({ inspecao, total_itens })),
+      data: Array.from(grouped.entries())
+        .map(([inspecao, total_itens]) => ({ inspecao, total_itens }))
+        .sort((a, b) => a.inspecao.localeCompare(b.inspecao, 'pt-BR')),
     });
   } catch (_) {
     return res.status(500).json({ status: 'error', message: 'Falha ao listar receitas.' });
+  }
+};
+
+exports.renameReceita = async (req, res) => {
+  const nomeAnterior = String(req.params.inspecao || '').trim();
+  const nomeNovo = String(req.body?.inspecao || req.body?.novo_nome || '').trim();
+  if (!nomeAnterior || !nomeNovo) {
+    return res.status(400).json({ status: 'error', message: 'Informe o nome atual e o novo nome da receita.' });
+  }
+  if (nomeAnterior === nomeNovo) {
+    return res.status(200).json({ status: 'success', message: 'O nome da receita não foi alterado.', data: { inspecao: nomeNovo, itens_atualizados: 0, politicas_atualizadas: 0 } });
+  }
+
+  let receitaAtualizada = false;
+  let politicasAtualizadas = false;
+  let policyIds = [];
+  let recipeIds = [];
+  try {
+    const [receitaRows, policyRows] = await Promise.all([
+      fetchAllRows('receita_itens', 'id,inspecao'),
+      fetchAllRows('politica_estoque_tarefas', 'id,tarefas,tipo'),
+    ]);
+    const oldKey = normalizeUpper(nomeAnterior);
+    const newKey = normalizeUpper(nomeNovo);
+    const itensOrigem = (receitaRows || []).filter((row) => normalizeUpper(row.inspecao) === oldKey);
+    recipeIds = itensOrigem.map((row) => row.id).filter(Boolean);
+    if (!recipeIds.length) {
+      return res.status(404).json({ status: 'error', message: 'Receita não encontrada.' });
+    }
+    const colisaoReceita = (receitaRows || []).some((row) => normalizeUpper(row.inspecao) === newKey && normalizeUpper(row.inspecao) !== oldKey);
+    if (colisaoReceita) {
+      return res.status(409).json({ status: 'error', message: 'Já existe outra receita com esse nome. Escolha um nome diferente.' });
+    }
+
+    const policiesReceita = (policyRows || []).filter((row) => normalizeUpper(row.tipo) === 'RECEITA');
+    const linkedPolicies = policiesReceita.filter((row) => normalizeUpper(row.tarefas) === oldKey);
+    const colisaoPolitica = policiesReceita.some((row) => normalizeUpper(row.tarefas) === newKey && normalizeUpper(row.tarefas) !== oldKey);
+    if (colisaoPolitica) {
+      return res.status(409).json({ status: 'error', message: 'Já existe uma Política de Estoque do tipo Receita com esse novo nome. Renomeação cancelada para evitar vínculo ambíguo.' });
+    }
+    policyIds = linkedPolicies.map((row) => row.id).filter(Boolean);
+
+    const { error: receitaError } = await supabase
+      .from('receita_itens')
+      .update({ inspecao: nomeNovo, updated_at: new Date().toISOString() })
+      .in('id', recipeIds);
+    if (receitaError) throw receitaError;
+    receitaAtualizada = true;
+
+    if (policyIds.length) {
+      const { error: politicaError } = await supabase
+        .from('politica_estoque_tarefas')
+        .update({ tarefas: nomeNovo, updated_at: new Date().toISOString() })
+        .in('id', policyIds);
+      if (politicaError) throw politicaError;
+      politicasAtualizadas = true;
+    }
+
+    await registrarAuditoria({
+      req,
+      action: 'RECEITA_RENOMEADA_ADMIN',
+      entity: 'RECEITA',
+      entityId: nomeAnterior,
+      summary: `Receita “${nomeAnterior}” renomeada para “${nomeNovo}”.`,
+      details: { nome_anterior: nomeAnterior, nome_novo: nomeNovo, itens_atualizados: itensOrigem.length, politicas_atualizadas: policyIds.length },
+      level: 'INFO',
+      visibility: 'GOD',
+    });
+
+    invalidateNeedsCache();
+    return res.status(200).json({
+      status: 'success',
+      message: policyIds.length
+        ? `Receita renomeada em ${itensOrigem.length} item(ns) e na Política de Estoque vinculada.`
+        : `Receita renomeada em ${itensOrigem.length} item(ns). Nenhuma Política de Estoque vinculada precisava ser atualizada.`,
+      data: { inspecao: nomeNovo, itens_atualizados: itensOrigem.length, politicas_atualizadas: policyIds.length },
+    });
+  } catch (error) {
+    if (politicasAtualizadas && policyIds.length) {
+      try {
+        await supabase.from('politica_estoque_tarefas').update({ tarefas: nomeAnterior, updated_at: new Date().toISOString() }).in('id', policyIds);
+      } catch (rollbackError) {
+        console.error('[SISHA][Receitas] Falha ao reverter Política após erro de renomeação:', rollbackError);
+      }
+    }
+    if (receitaAtualizada) {
+      try {
+        await supabase.from('receita_itens').update({ inspecao: nomeAnterior, updated_at: new Date().toISOString() }).in('id', recipeIds);
+      } catch (rollbackError) {
+        console.error('[SISHA][Receitas] Falha ao reverter receita após erro de renomeação:', rollbackError);
+      }
+    }
+    console.error('[SISHA][Receitas] Falha ao renomear receita:', error);
+    return res.status(500).json({ status: 'error', message: 'Falha ao renomear a receita. Nenhuma alteração parcial deve ser mantida.' });
   }
 };
 
@@ -2495,7 +2374,6 @@ function buildBatchQueryPreview(parsedFile, context) {
     const meta = context.pnMetaMap.get(row.pn) || {};
     const base = {
       pn: row.pn,
-      pi: Array.from(context.pnPiMap.get(row.pn) || []).map(normalizePiKey).filter(Boolean).join(' | '),
       nsn: row.nsn || meta.nsn || null,
       nomenclatura: row.nomenclatura || meta.nomenclatura || 'N/A',
       necessidade_total: Number(toNumber(row.quantidade_total).toFixed(2)),
@@ -2560,7 +2438,6 @@ function buildBatchQueryPreview(parsedFile, context) {
 function formatBatchInputRows(rows = []) {
   return rows.map((row) => ({
     PN: row.pn,
-    PI: row.pi || '',
     NSN: row.nsn || '',
     Nomenclatura: row.nomenclatura || '',
     Quantidade_Solicitada: row.quantidade_total,

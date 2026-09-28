@@ -43,6 +43,7 @@ export default function NeedsFoundationPanel({ token }) {
   const [receitas, setReceitas] = useState([]);
   const [receitaSearch, setReceitaSearch] = useState('');
   const [selectedInspecao, setSelectedInspecao] = useState('');
+  const [receitaNomeDraft, setReceitaNomeDraft] = useState('');
   const [receitaItens, setReceitaItens] = useState([]);
   const [receitaForm, setReceitaForm] = useState(emptyReceitaForm);
   const [receitaLoading, setReceitaLoading] = useState(false);
@@ -124,6 +125,40 @@ export default function NeedsFoundationPanel({ token }) {
   useEffect(() => { loadPims(pimSearch); }, [pimSearch]);
   useEffect(() => { loadPoliticas(politicaSearch); }, [politicaSearch]);
   useEffect(() => { loadReceitaItens(selectedInspecao); }, [selectedInspecao]);
+
+  const renomearReceita = async () => {
+    const nomeAtual = selectedInspecao.trim();
+    const nomeNovo = receitaNomeDraft.trim();
+    if (!nomeAtual || !nomeNovo || nomeAtual === nomeNovo) return;
+    if (!window.confirm(`Renomear a receita “${nomeAtual}” para “${nomeNovo}”? Todos os itens e a Política de Estoque do tipo Receita vinculada serão atualizados juntos.`)) return;
+    setReceitaLoading(true);
+    setReceitaMsg(null);
+    try {
+      const response = await apiFetch(`/needs/receitas/${encodeURIComponent(nomeAtual)}`, {
+        method: 'PUT',
+        headers: buildAuthHeaders(token, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ inspecao: nomeNovo }),
+      }, token);
+      const json = await response.json();
+      if (json.status === 'success') {
+        setReceitaMsg({ tipo: 'success', texto: json.message });
+        setSelectedInspecao(nomeNovo);
+        setReceitaNomeDraft(nomeNovo);
+        setReceitaSearch('');
+        setReceitaForm((current) => ({ ...current, inspecao: current.inspecao === nomeAtual ? nomeNovo : current.inspecao }));
+        await loadReceitas('');
+        await loadReceitaItens(nomeNovo);
+        await loadPoliticas(politicaSearch);
+        await fetchSnapshot();
+      } else {
+        setReceitaMsg({ tipo: 'error', texto: json.message || 'Falha ao renomear a receita.' });
+      }
+    } catch {
+      setReceitaMsg({ tipo: 'error', texto: 'Falha ao renomear a receita.' });
+    } finally {
+      setReceitaLoading(false);
+    }
+  };
 
   const salvarReceita = async (e) => {
     e.preventDefault();
@@ -322,7 +357,7 @@ export default function NeedsFoundationPanel({ token }) {
             <input value={receitaSearch} onChange={(e) => setReceitaSearch(e.target.value)} placeholder="Buscar inspeção/receita" className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100 placeholder:text-slate-500" />
             <div className="border border-slate-200 dark:border-slate-700 rounded-2xl overflow-auto max-h-[420px]">
               {receitas.map((item) => (
-                <button key={item.inspecao} onClick={() => { setSelectedInspecao(item.inspecao); setReceitaForm({ ...emptyReceitaForm, inspecao: item.inspecao }); }} className={`w-full text-left p-4 border-b border-slate-200 dark:border-slate-700 last:border-b-0 ${selectedInspecao === item.inspecao ? 'bg-slate-900 text-white' : 'bg-white text-slate-900 dark:text-slate-100 hover:bg-slate-50 dark:bg-slate-950/60'}`}>
+                <button key={item.inspecao} onClick={() => { setSelectedInspecao(item.inspecao); setReceitaNomeDraft(item.inspecao); setReceitaForm({ ...emptyReceitaForm, inspecao: item.inspecao }); }} className={`w-full text-left p-4 border-b border-slate-200 dark:border-slate-700 last:border-b-0 ${selectedInspecao === item.inspecao ? 'bg-slate-900 text-white' : 'bg-white text-slate-900 dark:text-slate-100 hover:bg-slate-50 dark:bg-slate-950/60'}`}>
                   <p className="font-black">{item.inspecao}</p>
                   <p className={`text-xs font-bold ${selectedInspecao === item.inspecao ? 'text-slate-200' : 'text-slate-500'}`}>{item.total_itens} itens</p>
                 </button>
@@ -337,6 +372,16 @@ export default function NeedsFoundationPanel({ token }) {
                 <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 uppercase">Itens da Receita</h3>
                 <button onClick={() => setReceitaForm({ ...emptyReceitaForm, inspecao: selectedInspecao })} className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100 font-black hover:bg-slate-200">NOVO ITEM</button>
               </div>
+              {selectedInspecao && (
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/50 p-4">
+                  <p className="text-[11px] uppercase font-black text-slate-500 mb-2">Nome da Receita / Inspeção</p>
+                  <div className="flex flex-col md:flex-row gap-3">
+                    <input value={receitaNomeDraft} onChange={(e) => setReceitaNomeDraft(e.target.value)} className="flex-1 p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100" />
+                    <button type="button" onClick={renomearReceita} disabled={receitaLoading || !receitaNomeDraft.trim() || receitaNomeDraft.trim() === selectedInspecao.trim()} className="px-5 py-3 rounded-xl bg-blue-600 text-white font-black hover:bg-blue-700 disabled:opacity-40">RENOMEAR RECEITA</button>
+                  </div>
+                  <p className="mt-2 text-xs font-bold text-slate-500 dark:text-slate-400">A alteração vale para todos os itens desta receita e mantém sincronizada a Política de Estoque do tipo Receita vinculada pelo mesmo nome.</p>
+                </div>
+              )}
               {selectedInspecao ? (
                 <div className="overflow-auto border border-slate-200 dark:border-slate-700 rounded-2xl max-h-[320px]">
                   <table className="min-w-full text-sm">

@@ -1,10 +1,10 @@
 // src/controllers/searchController.js
 const supabase = require('../config/supabaseClient');
 const { parseRfqValidityEnd, resolveRfqValidityEnd, loadReferencePriceRows } = require('../services/pricingService');
-const { getSubItemPriority } = require('../services/pnRelationsService');
+const { getSubItemPriority, buildManualFamilyKey, isSameManualAlternativeFamily } = require('../services/pnRelationsService');
 const { buildWtpReferences, buildWtpTextReferences } = require('../services/wtpReferenceService');
 const { loadTrackingRowsByPns } = require('../services/ppuLocationPolicyService');
-const { loadEffectivePpuRowsByPns, operationalQuantity } = require('../services/ppuEffectiveAvailabilityService');
+const { loadEffectivePpuRowsByPns } = require('../services/ppuEffectiveAvailabilityService');
 const { buildRadarOrFilter, normalizeRadarSearchTerm } = require('../services/radarSearchPolicyService');
 
 function addUndirectedEdge(graph, a, b) {
@@ -15,24 +15,9 @@ function addUndirectedEdge(graph, a, b) {
     graph.get(b).add(a);
 }
 
-function collectConnectedAlternatives(graph, start) {
+function collectDirectAlternatives(graph, start) {
     if (!start || !graph.has(start)) return [];
-    const visited = new Set([start]);
-    const queue = [start];
-
-    while (queue.length > 0) {
-        const current = queue.shift();
-        const neighbours = graph.get(current) || new Set();
-        neighbours.forEach((next) => {
-            if (!visited.has(next)) {
-                visited.add(next);
-                queue.push(next);
-            }
-        });
-    }
-
-    visited.delete(start);
-    return Array.from(visited);
+    return Array.from(graph.get(start) || new Set()).filter((pn) => pn && pn !== start);
 }
 
 function mergeSourceLabels(...parts) {
@@ -54,20 +39,6 @@ function mergeSourceLabels(...parts) {
 
 function normalizeUpper(value) {
     return String(value || '').trim().toUpperCase();
-}
-
-function normalizePiKey(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    const digits = raw.replace(/\D/g, '');
-    if (!digits) return normalizeUpper(raw);
-    if (digits.length >= 13) return digits.slice(-9);
-    return digits.padStart(9, '0');
-}
-
-function referencePnsFromSemDemandRow(row = {}) {
-    const refs = Array.isArray(row.referencias) ? row.referencias : [];
-    return Array.from(new Set(refs.map((entry) => normalizeUpper(entry?.ref || entry?.pn)).filter(Boolean)));
 }
 
 function isRfqPriceCurrent(validade, row = {}) {
@@ -242,22 +213,12 @@ function aggregatePpuDetails(rows = []) {
                 recebimento_item_id: row.recebimento_item_id || null,
                 sn,
                 tipo_item: row.tipo_item || null,
-                locrec_consultivo: Boolean(row.locrec_consultivo),
-                locrec_status: row.locrec_status || null,
-                locrec_destino_indicado: row.locrec_destino_indicado || null,
-                quantidade_controlada: 0,
-                quantidade_disponivel: 0,
             });
         }
 
         const current = grouped.get(key);
         current.quantidade += Number(row.quantidade || 0);
-        current.quantidade_controlada += Number(row.quantidade_controlada ?? row.quantidade) || 0;
-        current.quantidade_disponivel += operationalQuantity(row);
         if (!current.numero_recibo && row.numero_recibo) current.numero_recibo = row.numero_recibo;
-        if (row.locrec_consultivo) current.locrec_consultivo = true;
-        if (row.locrec_status) current.locrec_status = row.locrec_status;
-        if (row.locrec_destino_indicado) current.locrec_destino_indicado = row.locrec_destino_indicado;
     });
 
     return Array.from(grouped.values()).sort((a, b) => {
@@ -404,14 +365,8 @@ exports.searchItems = async (req, res) => {
         // em uma LOC excluída da disponibilidade. A quantidade NÃO entra no card PPU por esta consulta.
         const p18 = supabase.from('estoque_ppu').select('id,pn,nomenclatura,nsn_pi,sn,quantidade,localizacao').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_pi', 'sn'], textFields: ['nomenclatura'] })).limit(120);
         const p19 = supabase.from('v_sisha_ppu_custodia_externa_atual').select('pn,nomenclature,nsn_normalized,nsn_original,sn,quantity,box_code,original_location').or(buildRadarOrFilter(query, { prefixFields: ['pn', 'nsn_normalized', 'nsn_original', 'sn'], textFields: ['nomenclature'] })).limit(120);
-        const semDemandTerm = query.replace(/[(),%]/g, ' ').replace(/\s+/g, ' ').trim();
-        const p20 = supabase.from('estoque_ceimspa')
-            .select('id,pi,pn,nomenclatura,quantidade,quantidade_existente,sj,uf,fonte_identificacao,referencias,referencias_text,arquivo_fonte')
-            .eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA')
-            .or(`pi.ilike.${semDemandTerm}%,referencias_text.ilike.%${semDemandTerm}%`)
-            .limit(120);
 
-        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20]);
+        const results = await Promise.allSettled([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19]);
         const getRes = (index) => results[index].status === 'fulfilled' ? results[index].value.data : null;
 
         const itemsMatch = getRes(0) || [];
@@ -433,19 +388,6 @@ exports.searchItems = async (req, res) => {
         const technicalManualMatch = getRes(16) || [];
         const rawPpuMatch = getRes(17) || [];
         const externalCustodyMatch = getRes(18) || [];
-        const semDemandaMatch = getRes(19) || [];
-        const semDemandaPiByPn = new Map();
-
-        semDemandaMatch.forEach((row) => {
-            const pi = normalizePiKey(row.pi);
-            referencePnsFromSemDemandRow(row).forEach((pn) => {
-                pnsEncontrados.add(pn);
-                semDemandaPiByPn.set(pn, pi);
-                registerSource(fontesEncontradas, pn, 'CEIMSPA_SEM_DEMANDA');
-                setBestName(baseNomes, origemNomenclaturaBase, pn, row.nomenclatura, 'ESTOQUE_CEIMSPA');
-                setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, pi, 'ESTOQUE_CEIMSPA');
-            });
-        });
 
         externalCustodyMatch.forEach((i) => {
             const pn = normalizeUpper(i.pn);
@@ -659,50 +601,6 @@ exports.searchItems = async (req, res) => {
             }
         }
 
-        // Identidade PI compartilhada: se o PN exato possui PI/NSN conhecido,
-        // preserve também os PNs da mesma família de PI. Isso evita que o guard
-        // de PN exato elimine referências válidas de Manual/CeIMSPA.
-        const identityPis = new Set();
-        const addIdentityPi = (value) => { const pi = normalizePiKey(value); if (pi) identityPis.add(pi); };
-        dicMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => { addIdentityPi(row.pi); addIdentityPi(row.nsn); });
-        ppuMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.nsn_pi));
-        itemsMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.nsn));
-        plMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.nsn));
-        ceimspaMatch.filter((row) => normalizeUpper(row.pn) === query).forEach((row) => addIdentityPi(row.pi));
-        altDocMatch.filter((row) => normalizeUpper(row.pn) === query || normalizeUpper(row.pn_alt) === query).forEach((row) => addIdentityPi(row.pi));
-        if (semDemandaPiByPn.has(query)) addIdentityPi(semDemandaPiByPn.get(query));
-
-        const samePiPns = new Set();
-        if (identityPis.size > 0) {
-            const safeIdentityPis = Array.from(identityPis).slice(0, 50);
-            const [dicFamilyResult, semDemandFamilyResult] = await Promise.allSettled([
-                supabase.from('dicionario_mestre').select('pn,pi,nomenclatura,nsn').in('pi', safeIdentityPis),
-                supabase.from('estoque_ceimspa').select('pi,nomenclatura,referencias').eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA').in('pi', safeIdentityPis),
-            ]);
-            const dicFamily = dicFamilyResult.status === 'fulfilled' ? (dicFamilyResult.value.data || []) : [];
-            const semFamily = semDemandFamilyResult.status === 'fulfilled' ? (semDemandFamilyResult.value.data || []) : [];
-            dicFamily.forEach((row) => {
-                const pn = normalizeUpper(row.pn);
-                if (!pn) return;
-                samePiPns.add(pn);
-                pnsEncontrados.add(pn);
-                registerSource(fontesEncontradas, pn, 'IDENTIDADE_PI_COMPARTILHADA');
-                setBestName(baseNomes, origemNomenclaturaBase, pn, row.nomenclatura, 'DICIONARIO_MESTRE');
-                setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, row.pi || row.nsn, 'DICIONARIO_MESTRE');
-            });
-            semFamily.forEach((row) => {
-                const pi = normalizePiKey(row.pi);
-                referencePnsFromSemDemandRow(row).forEach((pn) => {
-                    samePiPns.add(pn);
-                    pnsEncontrados.add(pn);
-                    semDemandaPiByPn.set(pn, pi);
-                    registerSource(fontesEncontradas, pn, 'CEIMSPA_SEM_DEMANDA');
-                    setBestName(baseNomes, origemNomenclaturaBase, pn, row.nomenclatura, 'ESTOQUE_CEIMSPA');
-                    setNsnIfHigherPriority(baseNsns, origemNsnBase, pn, pi, 'ESTOQUE_CEIMSPA');
-                });
-            });
-        }
-
         // Se a consulta é exatamente um PN conhecido, esse PN define a identidade
         // do cartão. Ocorrências do mesmo texto em nomenclaturas/manuais continuam
         // como referências técnicas e não podem criar cartões concorrentes.
@@ -716,7 +614,7 @@ exports.searchItems = async (req, res) => {
             || adminDocMatch.some((row) => normalizeUpper(row.assunto_pn) === query);
 
         if (exactPnIdentity && pnsEncontrados.has(query)) {
-            pnsEncontrados = new Set([query, ...samePiPns]);
+            pnsEncontrados = new Set([query]);
 
             const hasWtpTextReference = technicalManualMatch.some((row) => {
                 const manualCode = normalizeUpper(row.manual_codigo);
@@ -910,9 +808,8 @@ exports.searchItems = async (req, res) => {
         }
 
         const pisToSearch = new Set();
-        dicData.forEach((d) => { if (d.pi) pisToSearch.add(normalizePiKey(d.pi)); });
-        allAlternativosRaw.forEach((a) => { if (a.pi) pisToSearch.add(normalizePiKey(a.pi)); });
-        semDemandaPiByPn.forEach((pi) => { if (pi) pisToSearch.add(normalizePiKey(pi)); });
+        dicData.forEach((d) => { if (d.pi) pisToSearch.add(d.pi); });
+        allAlternativosRaw.forEach((a) => { if (a.pi) pisToSearch.add(a.pi); });
 
         let allCeimspa = [];
         const safePis = Array.from(pisToSearch).slice(0, 100);
@@ -923,15 +820,12 @@ exports.searchItems = async (req, res) => {
         if (arrayPns.length > 0) {
             ceimspaQueries.push(supabase.from('v_sisha_ceimspa_disponibilidade').select('*').in('pn', arrayPns));
         }
-        if (safePis.length > 0) {
-            ceimspaQueries.push(supabase.from('estoque_ceimspa').select('*').eq('fonte_identificacao', 'CEIMSPA_SEM_DEMANDA').in('pi', safePis));
-        }
         if (ceimspaQueries.length > 0) {
             const ceimspaResults = await Promise.allSettled(ceimspaQueries);
             const ceimspaMap = new Map();
             ceimspaResults.forEach((result) => {
                 if (result.status !== 'fulfilled') return;
-                (result.value.data || []).forEach((row, index) => ceimspaMap.set(row.id || `${row.fonte_identificacao || row.origem_saldo || 'CEIMSPA'}|${row.pi || ''}|${row.pn || ''}|${index}`, row));
+                (result.value.data || []).forEach((row) => ceimspaMap.set(row.id, row));
             });
             allCeimspa = Array.from(ceimspaMap.values());
         }
@@ -949,6 +843,7 @@ exports.searchItems = async (req, res) => {
             const myPpu = ppuData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const myPpuTracking = ppuTrackingData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const myPpuExcluded = myPpuTracking.filter((p) => p.contabiliza_ppu === false);
+            const myPpuRedirectedCeimspa = myPpuExcluded.filter((p) => normalizeUpper(p.destino_contabilizacao) === 'CEIMSPA');
             const myPl = plData.filter((p) => normalizeUpper(p.pn) === pnUpper);
             const myRfqDirect = rfqDataFull.filter((r) => normalizeUpper(r.pn) === pnUpper);
             const myRfqRelated = rfqDataFull.filter((r) => normalizeUpper(r.pn_relacionado) === pnUpper);
@@ -1211,19 +1106,13 @@ exports.searchItems = async (req, res) => {
                 status_preco: resolvedPrice.status_preco || null,
             } : null;
 
-            // PPU disponível = saldo operacional. Material já deslocado pelo Backend para
-            // caixa continua sob custódia/contabilidade PPU, mas não fica disponível na LOC.
-            item.ppu_qtd = myPpu.reduce((acc, p) => acc + operationalQuantity(p), 0);
-            item.ppu_total_controlado_qtd = myPpu.reduce((acc, p) => acc + (Number(p.quantidade_controlada ?? p.quantidade) || 0), 0);
-            item.ppu_custodia_qtd = myPpu
-                .filter((p) => p.origem_saldo === 'PPU_CUSTODIA_EXTERNA')
-                .reduce((acc, p) => acc + (Number(p.quantidade_controlada ?? p.quantidade) || 0), 0);
+            item.ppu_qtd = myPpu.reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
             item.ppu_oficial_qtd = myPpu
-                .filter((p) => p.origem_saldo !== 'RECIBO_PENDENTE' && p.origem_saldo !== 'PPU_CUSTODIA_EXTERNA')
-                .reduce((acc, p) => acc + operationalQuantity(p), 0);
+                .filter((p) => p.origem_saldo !== 'RECIBO_PENDENTE')
+                .reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
             item.recibos_pendentes_qtd = myPpu
                 .filter((p) => p.origem_saldo === 'RECIBO_PENDENTE')
-                .reduce((acc, p) => acc + operationalQuantity(p), 0);
+                .reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
             item.ppu_detalhes = aggregatePpuDetails(myPpu);
             item.ppu_locais = item.ppu_detalhes.length > 0
                 ? item.ppu_detalhes.map((p) => `${p.localizacao} (${p.quantidade})`).join(' | ')
@@ -1296,15 +1185,21 @@ exports.searchItems = async (req, res) => {
 
             let altsUnicosMap = new Map();
             item.dicionario.forEach((entry) => {
-                // DMC + Item identificam a família técnica.
-                // Subitem não bloqueia equivalência; ele ordena preferência de uso (00A original, 00B primeira alternativa...).
+                // Regra canônica CIETP: só existe família automática quando DMC E ITEM
+                // estão preenchidos e são exatamente a mesma família técnica. Linhas sem
+                // ITEM nunca podem transformar todos os PN do mesmo DMC em alternativos.
+                const familyKey = buildManualFamilyKey(entry);
+                if (!familyKey) return;
+
+                // Subitem não bloqueia equivalência; ele ordena preferência de uso
+                // (00A original, 00B primeira alternativa, 00C segunda...).
                 const irmaos = allAlternativosRaw
-                    .filter((a) => a.dmc === entry.dmc && a.item_num === entry.item_num && normalizeUpper(a.pn) !== pnUpper)
+                    .filter((a) => isSameManualAlternativeFamily(a, entry) && normalizeUpper(a.pn) !== pnUpper)
                     .sort(compareManualAlternativeRows);
 
                 irmaos.forEach((irmao) => {
                     const altPn = normalizeUpper(irmao.pn);
-                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + operationalQuantity(p), 0);
+                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
                     const prioridadeManual = getSubItemPriority(irmao.sub_item);
                     const existente = altsUnicosMap.get(altPn) || {};
                     altsUnicosMap.set(altPn, {
@@ -1319,7 +1214,9 @@ exports.searchItems = async (req, res) => {
                 });
             });
 
-            const alternativosDocumento = collectConnectedAlternatives(altGraph, pnUpper);
+            // Relação documental é par-a-par e bidirecional, mas NÃO é transitiva:
+            // A↔B e B↔C não autorizam concluir A↔C sem evidência própria.
+            const alternativosDocumento = collectDirectAlternatives(altGraph, pnUpper);
             alternativosDocumento.forEach((pnAlt) => {
                 const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === pnAlt).reduce((acc, p) => acc + (Number(p.quantidade) || 0), 0);
                 const nsnAlternativo = isNsnReal(baseNsns[pnAlt])
@@ -1330,7 +1227,7 @@ exports.searchItems = async (req, res) => {
                     .filter((row) => {
                         const a = normalizeUpper(row.pn);
                         const b = normalizeUpper(row.pn_alt);
-                        return a === pnAlt || b === pnAlt || a === pnUpper || b === pnUpper;
+                        return (a === pnUpper && b === pnAlt) || (a === pnAlt && b === pnUpper);
                     })
                     .map((row) => row.fonte)
                     .filter(Boolean);
@@ -1344,50 +1241,6 @@ exports.searchItems = async (req, res) => {
                     origem: existente.origem === 'manual' ? 'manual_documento' : 'documento',
                     sub_item: existente.sub_item || null,
                     prioridade_manual: existente.prioridade_manual ?? 999,
-                });
-            });
-
-            const meusPisParaAlternativos = new Set(item.dicionario.map((d) => normalizePiKey(d.pi || d.nsn)).filter(Boolean));
-            const piSemDemandaAtual = semDemandaPiByPn.get(pnUpper);
-            if (piSemDemandaAtual) meusPisParaAlternativos.add(piSemDemandaAtual);
-            meusPisParaAlternativos.forEach((pi) => {
-                arrayPns.forEach((candidatePn) => {
-                    const altPn = normalizeUpper(candidatePn);
-                    if (!altPn || altPn === pnUpper) return;
-                    const candidatePis = new Set(
-                        dicData.filter((d) => normalizeUpper(d.pn) === altPn).map((d) => normalizePiKey(d.pi || d.nsn)).filter(Boolean)
-                    );
-                    const semPi = semDemandaPiByPn.get(altPn);
-                    if (semPi) candidatePis.add(semPi);
-                    if (!candidatePis.has(pi)) return;
-                    const existente = altsUnicosMap.get(altPn) || {};
-                    const altQty = ppuAltData.filter((p) => normalizeUpper(p.pn) === altPn).reduce((acc, p) => acc + operationalQuantity(p), 0);
-                    const ceimspaAltRows = allCeimspa.filter((row) => {
-                        const rowPn = normalizeUpper(row.pn);
-                        const rowPi = normalizePiKey(row.pi);
-                        if (rowPn === altPn) return true;
-                        return !rowPn && row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA' && rowPi === pi;
-                    });
-                    const sharedSemDemandSeen = new Set();
-                    const ceimspaAltQty = ceimspaAltRows.reduce((acc, row) => {
-                        if (row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA') {
-                            const key = normalizePiKey(row.pi);
-                            if (sharedSemDemandSeen.has(key)) return acc;
-                            sharedSemDemandSeen.add(key);
-                        }
-                        return acc + (Number(row.quantidade) || 0);
-                    }, 0);
-                    altsUnicosMap.set(altPn, {
-                        pn: altPn,
-                        nsn: existente.nsn || baseNsns[altPn] || pi,
-                        ppu_qtd: Math.max(Number(existente.ppu_qtd || 0), altQty),
-                        ceimspa_qtd: Math.max(Number(existente.ceimspa_qtd || 0), ceimspaAltQty),
-                        fonte: mergeSourceLabels(existente.fonte, ['Alternativo pelo critério de mesmo PI']),
-                        origem: existente.origem || 'mesmo_pi',
-                        sub_item: existente.sub_item || null,
-                        prioridade_manual: existente.prioridade_manual ?? 999,
-                        pi_compartilhado: pi,
-                    });
                 });
             });
 
@@ -1429,25 +1282,23 @@ exports.searchItems = async (req, res) => {
                 || item.wtp_referencias.length > 0;
             item.fontes_alternativos = mergeSourceLabels(item.alternativos.map((alt) => alt.fonte));
 
-            const meusPisSet = new Set(item.dicionario.map((d) => normalizePiKey(d.pi || d.nsn)).filter(Boolean));
-            if (semDemandaPiByPn.get(pnUpper)) meusPisSet.add(semDemandaPiByPn.get(pnUpper));
-            const meusPis = Array.from(meusPisSet);
-            const ceimspaOficial = allCeimspa.filter((c) => normalizeUpper(c.pn) === pnUpper || meusPis.includes(normalizePiKey(c.pi)));
-            // Backend_Auditoria_Paiol é uma redistribuição física do próprio PPU.
-            // Nunca aparece como saldo CEIMSPA: a caixa permanece rastreada em ppu_detalhes.
-            item.ceimspa_detalhes = ceimspaOficial.map((row) => ({
-                ...row,
-                saldo_compartilhado_pi: row.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA',
+            const meusPis = [...new Set(item.dicionario.map((d) => d.pi).filter(Boolean))];
+            const ceimspaOficial = allCeimspa.filter((c) => normalizeUpper(c.pn) === pnUpper || meusPis.includes(c.pi));
+            const ceimspaPorClassificacaoPpu = myPpuRedirectedCeimspa.map((row) => ({
+                id: `PPU-LOC-CEIMSPA-${row.id}`,
+                pn: row.pn,
+                pi: row.nsn_pi || null,
+                nomenclatura: row.nomenclatura || null,
+                quantidade: Number(row.quantidade || 0),
+                sj: 'LOC PPU',
+                uf: row.localizacao || null,
+                sn: row.sn || null,
+                origem_saldo: 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA',
+                localizacao_fisica: row.localizacao || null,
+                situacao_operacional: row.situacao_operacional || 'A_CONFIRMAR',
             }));
-            const saldosCeimspaContados = new Set();
-            item.ceimspa_qtd = item.ceimspa_detalhes.reduce((acc, c) => {
-                if (c.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA') {
-                    const key = `SEM_DEMANDA|${normalizePiKey(c.pi)}`;
-                    if (saldosCeimspaContados.has(key)) return acc;
-                    saldosCeimspaContados.add(key);
-                }
-                return acc + (Number(c.quantidade) || 0);
-            }, 0);
+            item.ceimspa_detalhes = [...ceimspaOficial, ...ceimspaPorClassificacaoPpu];
+            item.ceimspa_qtd = item.ceimspa_detalhes.reduce((acc, c) => acc + (Number(c.quantidade) || 0), 0);
 
             item.itens_fora_linha = myPpuExcluded.map((row) => {
                 const sn = isRealStockSerial(row.sn) ? normalizeUpper(row.sn) : null;
