@@ -112,12 +112,14 @@ test('PPU bruto Marinha: PN+SN em duas LOCs não duplica unidade e vira conflito
   assert.equal(result.issues.some((issue) => String(issue.reason).includes('localizações conflitantes')), true);
 });
 
-test('Radar: rastreio excluído é separado do PPU e pode ser redirecionado ao card CEIMSPA', () => {
+test('Radar: rastreio excluído permanece trilha PPU/Backend e nunca vira saldo CEIMSPA', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const source = fs.readFileSync(path.resolve(__dirname, '../../src/controllers/searchController.js'), 'utf8');
   assert.equal(source.includes('loadTrackingRowsByPns'), true);
-  assert.equal(source.includes("origem_saldo: 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'"), true);
+  assert.equal(source.includes("origem_saldo: 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'"), false);
+  assert.equal(source.includes('item.ppu_custodia_qtd'), true);
+  assert.equal(source.includes('item.ppu_total_controlado_qtd'), true);
   assert.equal(source.includes('item.itens_fora_linha = myPpuExcluded.map'), true);
   assert.equal(source.includes('item.itens_fora_linha_qtd'), true);
 });
@@ -146,7 +148,7 @@ test('Frontend: Radar mantém cards e adiciona somente botão/modal de itens for
   const source = fs.readFileSync(path.resolve(__dirname, '../../../sisha-frontend/src/pages/ConsultaItens.jsx'), 'utf8');
   assert.equal(source.includes('ITENS FORA DA LINHA DE VOO'), true);
   assert.equal(source.includes('Itens fora da linha de voo'), true);
-  assert.equal(source.includes("c.origem_saldo === 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'"), true);
+  assert.equal(source.includes("c.origem_saldo === 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'"), false);
   // O Radar exibe localização/origem documental; reconciliação PN+SN não é uma localização.
   assert.equal(source.includes('un com SN identificado'), false);
   assert.equal(source.includes('aguardando incorporação ao inventário oficial'), true);

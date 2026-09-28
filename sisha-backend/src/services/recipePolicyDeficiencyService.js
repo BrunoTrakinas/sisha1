@@ -318,8 +318,7 @@ function buildRecipePolicyDeficiency({
       const applied = round(altPpu.applied + altCeimspa.applied);
       alternativeAvailable += available;
       alternativeApplied += applied;
-      const sharedPi = Array.from(directPis).map(normalizePi).filter(Boolean).find((pi) => Array.from(setEntry(pnPiMap, altPn)).map(normalizePi).includes(pi));
-      alternativeDetails.push({ pn: altPn, disponivel: available, aplicado: applied, fonte: sharedPi ? 'Alternativo pelo critério de mesmo PI' : 'Alternativo técnico/documental' });
+      alternativeDetails.push({ pn: altPn, disponivel: available, aplicado: applied, fonte: 'Alternativo técnico/documental' });
     });
     alternativeAvailable = round(alternativeAvailable);
     alternativeApplied = round(alternativeApplied);

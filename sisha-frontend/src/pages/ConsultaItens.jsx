@@ -356,11 +356,9 @@ export default function ConsultaItens() {
                                                 <p key={c.id || i} className="text-sm font-bold text-purple-800 bg-purple-100/50 px-2 py-1 rounded-lg border border-purple-200/50">
                                                     {c.origem_saldo === 'RECIBO_PENDENTE_CEIMSPA'
                                                         ? <>Recibo {c.numero_recibo || 'sem número'} • {c.uf || 'local não informado'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
-                                                        : c.origem_saldo === 'PPU_LOCAL_RECLASSIFICADO_CEIMSPA'
-                                                            ? <>LOC {c.localizacao_fisica || c.uf || 'não informada'}{c.sn ? <> • SN {c.sn}</> : null}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
-                                                            : c.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA'
-                                                                ? <>SEM DEMANDA • PI: {c.pi || 'N/I'} • saldo compartilhado: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
-                                                                : <>PI: {c.pi || 'N/I'} | {c.sj || 'N/I'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>}
+                                                        : c.fonte_identificacao === 'CEIMSPA_SEM_DEMANDA'
+                                                            ? <>SEM DEMANDA • PI: {c.pi || 'N/I'} • saldo compartilhado: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>
+                                                            : <>PI: {c.pi || 'N/I'} | {c.sj || 'N/I'}: <span className="font-black text-purple-900">{formatQuantity(c.quantidade)}</span></>}
                                                 </p>
                                             ))}
                                             {(item.recibos_incorporados || []).filter((row) => row.destino_estoque === 'CEIMSPA').map((row) => (

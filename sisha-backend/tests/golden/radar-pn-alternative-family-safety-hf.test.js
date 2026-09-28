@@ -80,3 +80,28 @@ test('HF Radar alternativos: Gerador de Necessidades usa a mesma chave de famíl
   assert.match(needsController, /const familyKey = buildManualFamilyKey\(row\);/);
   assert.match(needsController, /if \(!familyKey \|\| !pn\) return;/);
 });
+
+test('HF Radar alternativos: correção preserva disponibilidade operacional PPU/LOCREC', () => {
+  assert.match(searchController, /loadEffectivePpuRowsByPns, operationalQuantity/);
+  assert.match(searchController, /item\.ppu_total_controlado_qtd/);
+  assert.match(searchController, /item\.ppu_custodia_qtd/);
+  assert.match(searchController, /locrec_consultivo/);
+  assert.match(searchController, /CEIMSPA_SEM_DEMANDA/);
+  assert.doesNotMatch(searchController, /PPU_LOCAL_RECLASSIFICADO_CEIMSPA/);
+});
+
+test('HF Radar alternativos: mesmo PI sozinho não cria equivalência', () => {
+  assert.doesNotMatch(searchController, /Alternativo pelo critério de mesmo PI/);
+  assert.doesNotMatch(needsController, /const piFamilies = new Map\(\)/);
+  assert.match(needsController, /Mesmo PI\/NSN não é prova de equivalência/);
+});
+
+test('HF Radar alternativos: Gerador preserva estoque alternativo válido, Sem Demanda e ledger sem dupla contagem', () => {
+  assert.match(needsController, /loadAllEffectivePpuRows, operationalQuantity/);
+  assert.match(needsController, /buildCeimspaAvailabilityLedger/);
+  assert.match(needsController, /consumeCeimspaAvailability/);
+  assert.match(needsController, /alternativos:\s*\[\]/);
+  assert.match(needsController, /semDemandRows/);
+  assert.match(needsController, /manualDicRows/);
+  assert.match(needsController, /Alternativos_Aplicado/);
+});
