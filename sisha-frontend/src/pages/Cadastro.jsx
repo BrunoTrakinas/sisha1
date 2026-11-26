@@ -1188,6 +1188,11 @@ export default function Cadastro() {
                                     <div className="max-h-64 overflow-auto"><table className="w-full text-xs"><thead><tr><th className="text-left p-1">Recibo</th><th className="text-left p-1">PN</th><th>Incorporar</th><th>Restante</th><th className="text-left">Evidência</th></tr></thead><tbody>
                                         {(ppuReview.plans||[]).map((p,i)=><tr key={i} className="border-t border-slate-200 dark:border-slate-700"><td className="p-1">{p.receiptNo}</td><td className="p-1">{p.pn}</td><td className="text-center">{p.quantity}</td><td className="text-center">{p.pending}</td><td>{p.method==='LOCREC'?'LOCREC':p.method==='QTD_EXATA'?'Quantidade exata (inferência)':'Recibo mais antigo (inferência)'}</td></tr>)}
                                     </tbody></table></div>
+                                    {!!ppuReview.unclassifiedLocations?.length && <details open className="rounded-lg border border-amber-300 p-3">
+                                        <summary className="cursor-pointer font-bold text-sm">{ppuReview.unclassifiedLocations.length} localizações novas — disponibilidade a confirmar</summary>
+                                        <p className="text-xs mt-2">As linhas abaixo serão preservadas no inventário, mas não serão consideradas disponíveis no Radar nem gerarão baixa automática de Recibos até a classificação no painel Localizações do PPU.</p>
+                                        <ul className="max-h-36 overflow-auto mt-2 text-xs space-y-1">{ppuReview.unclassifiedLocations.map(l=><li key={l.location}>{l.location} — {l.rows} linha(s)</li>)}</ul>
+                                    </details>}
                                     {ppuReview.serialEvidenceRows>0&&<p className="text-sm font-bold">Após a atualização, {ppuReview.serialEvidenceRows} evidências PN + SN serão processadas no Livro. Não haverá baixa automática de Recibos serializados.</p>}
                                     <details><summary className="font-bold cursor-pointer text-sm">Pendências históricas — somente conferência ({ppuReview.retroactive?.candidates?.length||0})</summary>
                                         <p className="text-xs mt-2">Não serão baixadas nesta importação. Quantidade candidata não comprova entrada física; equipamentos exigem identidade PN + SN.</p>

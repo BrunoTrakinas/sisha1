@@ -167,3 +167,10 @@ test('R7B2 Livro sync uses existing source identity and acknowledges only a comp
  const missing=await continueBookSync(db,'fixture@example.invalid','snapshot',async()=>({source_sha256:sourceHash,events:0}));
  assert.equal(missing.retryRequired,true);assert.equal(calls[5].args.p_ok,false);
 });
+
+test('R8 preview groups unknown locations without making them eligible for a receipt debit',()=>{
+ const {reviewUnclassifiedLocations}=require('../../src/services/ppuReceiptReconciliationService');
+ const rows=[row(1),row(2,' new-r8 '),row(3,'NEW-R8'),row(1,'Z')];
+ assert.deepEqual(reviewUnclassifiedLocations(context(),rows),[{location:'NEW-R8',rows:2}]);
+ assert.deepEqual(run(context(),[row(1),row(2,'NEW-R8')]),[]);
+});

@@ -7,7 +7,7 @@ create role anon nologin;
 create role authenticated nologin;
 create role service_role nologin bypassrls;
 create table public.estoque_ppu(id serial primary key,pn text not null,nsn_pi text,nomenclatura text,quantidade numeric default 0,localizacao text,data_atualizacao timestamptz default now(),sn text,data_chegada date,data_garantia date,check(pn <> 'FIXTURE-FAIL-LATE'));
-create table public.ppu_localizacoes_config(id bigserial primary key,localizacao_normalizada text unique not null,ativo boolean not null default true,contabiliza_ppu boolean not null default true,destino_contabilizacao text not null default 'PPU',situacao_operacional text not null default 'DISPONIVEL');
+create table public.ppu_localizacoes_config(id bigserial primary key,localizacao_normalizada text unique not null,localizacao_exibicao text not null,observacao text,updated_by_email text,created_at timestamptz not null default now(),updated_at timestamptz not null default now(),ativo boolean not null default true,contabiliza_ppu boolean not null default true,destino_contabilizacao text not null default 'PPU',situacao_operacional text not null default 'DISPONIVEL',check ((contabiliza_ppu and destino_contabilizacao='PPU' and situacao_operacional='DISPONIVEL') or (not contabiliza_ppu and destino_contabilizacao in ('CEIMSPA','FORA_LINHA') and situacao_operacional<>'DISPONIVEL')));
 create table public.import_logs(id uuid primary key default gen_random_uuid(),tipo_arquivo text not null,nome_arquivo text,status text default 'PROCESSANDO',detalhes jsonb default '{}',uploaded_by_email text,tabela_alvo text,linhas_importadas integer default 0,mensagem text,finished_at timestamptz);
 create table public.recebimentos(id bigint primary key,numero_recibo text not null,ativo boolean default true,data_recebimento date);
 create table public.equipamentos_serializados(id bigint primary key,pn text not null,sn text not null,ativo boolean default true);
@@ -37,7 +37,7 @@ grant select,insert,update,delete on all tables in schema public to service_role
 grant usage,select on all sequences in schema public to service_role;
 
 insert into public.estoque_ppu(pn,quantidade,localizacao) values ('FIXTURE-PN',1,'A-1');
-insert into public.ppu_localizacoes_config(localizacao_normalizada) values ('A-1'),('Z');
+insert into public.ppu_localizacoes_config(localizacao_normalizada,localizacao_exibicao) values ('A-1','A-1'),('Z','Z');
 insert into public.recebimentos values(1,'FIXTURE-1',true,'2025-01-01');
 insert into public.recebimento_itens(id,recebimento_id,pn,quantidade,localizacao_ppu) values(1,1,'FIXTURE-PN',4,'HANGAR');
 insert into public.import_logs(id,tipo_arquivo,nome_arquivo,detalhes,uploaded_by_email)

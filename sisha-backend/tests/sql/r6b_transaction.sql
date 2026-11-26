@@ -177,3 +177,32 @@ do $r7acl$ begin
  or has_function_privilege('authenticated','public.sisha_ppu_r7_book_finish(uuid,uuid,boolean,jsonb,text)','EXECUTE')
  then raise exception 'R7B2 ACL failure'; end if;
 end $r7acl$;
+
+-- R8: classify unknown locations as excluded, atomically and without overriding policies.
+begin;
+set local role service_role;
+do $r8unknown$
+declare
+ token text:=public.sisha_ppu_r6_context()->>'token';
+ result jsonb;
+ before_policies jsonb:=(select jsonb_agg(to_jsonb(x) order by id) from public.ppu_localizacoes_config x);
+ before_stock jsonb:=(select jsonb_agg(to_jsonb(x) order by id) from public.estoque_ppu x);
+begin
+ begin
+  perform public.sisha_ppu_r6_apply(token,repeat('e',64),'fixture-6.ods','00000000-0000-4000-8000-000000000006','2025-03-01',null,null,true,'[{"pn":"FIXTURE-PN","localizacao":"A-1","quantidade":2},{"pn":"FIXTURE-FAIL-LATE","localizacao":"NEW-R8","quantidade":3}]','[]','fixture@example.invalid');
+  raise exception 'expected late check violation';
+ exception when check_violation then null; end;
+ if (select jsonb_agg(to_jsonb(x) order by id) from public.ppu_localizacoes_config x) is distinct from before_policies
+ or (select jsonb_agg(to_jsonb(x) order by id) from public.estoque_ppu x) is distinct from before_stock then raise exception 'R8 policy rollback failed'; end if;
+ result:=public.sisha_ppu_r6_apply(token,repeat('e',64),'fixture-6.ods','00000000-0000-4000-8000-000000000006','2025-03-01',null,null,true,'[{"pn":"FIXTURE-PN","localizacao":"A-1","quantidade":2},{"pn":"FIXTURE-PN","localizacao":"NEW-R8","quantidade":3},{"pn":"FIXTURE-OTHER","localizacao":" new-r8 ","quantidade":1}]','[]','fixture@example.invalid');
+ if result->>'status' is distinct from 'APPLIED' or not exists(select 1 from public.ppu_localizacoes_config where localizacao_normalizada='NEW-R8' and ativo and not contabiliza_ppu and destino_contabilizacao='FORA_LINHA' and situacao_operacional='A_CONFIRMAR')
+ or (select count(*) from public.ppu_localizacoes_config where localizacao_normalizada='NEW-R8')<>1
+ or (select jsonb_agg(to_jsonb(x) order by id) from public.ppu_localizacoes_config x where localizacao_normalizada<>'NEW-R8') is distinct from before_policies
+ or (select sum(p.quantidade) from public.estoque_ppu p left join public.ppu_localizacoes_config k on k.localizacao_normalizada=public.sisha_normalize_location(p.localizacao) where coalesce(k.ativo,true) and coalesce(k.contabiliza_ppu,true))<>2
+ or not exists(select 1 from public.ppu_inventario_snapshots h cross join lateral jsonb_to_recordset(h.policies_payload) k(localizacao_normalizada text,contabiliza_ppu boolean,situacao_operacional text) where h.id=(result->>'snapshot_id')::uuid and k.localizacao_normalizada='NEW-R8' and not k.contabiliza_ppu and k.situacao_operacional='A_CONFIRMAR')
+ or (select quantidade_inventariada from public.recebimento_itens where id=1)<>1
+ then raise exception 'R8 unknown location policy or snapshot inconsistent'; end if;
+ raise notice 'R8 PASS unknown location excluded, policy preserved, snapshot consistent, rollback and no receipt debit';
+end
+$r8unknown$;
+rollback;
