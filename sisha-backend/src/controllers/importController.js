@@ -412,40 +412,19 @@ exports.importData = async (req, res) => {
             const sheetName = workbook.SheetNames[0];
             const sheet = workbook.Sheets[sheetName];
             const rawRows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-            const parsed = parsePpuInventoryRows(rawRows);
-            const estoqueAtualizado = (parsed.items || []).map((item) => ({
-                pn: item.pn,
-                nsn_pi: item.nsn_pi || 'N/A',
-                nomenclatura: item.nomenclatura || 'N/A',
-                quantidade: Number(item.quantidade || 0),
-                localizacao: item.localizacao || 'NÃO DEFINIDO',
-                sn: item.sn || null,
-            }));
-
-            (parsed.issues || []).slice(0, 500).forEach((issue) => {
-                recordAuditIssue(req, {
-                    linha_numero: issue.row,
-                    campo: issue.field || 'linha',
-                    valor_original: issue.value,
-                    motivo: issue.reason || 'Linha não importada no inventário PPU.',
-                });
-            });
-
             if (req.ppuReconciliationRequest && process.env.PPU_RECEIPT_RECONCILIATION_ENABLED !== 'true') {
                 return respondError(503, 'Reconciliação ainda não habilitada. Nenhum inventário foi alterado.', { tabelaAlvo: 'estoque_ppu' });
             }
             if (process.env.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true') {
-                if (!req.ppuReconciliationRequest) return respondError(409, 'Use a conferência de reconciliação do inventário PPU.', { tabelaAlvo: 'estoque_ppu' });
-                // No fallback to the legacy non-atomic replacement after activation.
-                // R7 will supply explicit operational dates and completeness via the existing upload form.
-                if (req.body?.inventarioCompleto !== 'true' || !req.body?.dataInventario) {
-                    return respondError(400, 'Confirme o inventário completo e informe a data operacional.', { tabelaAlvo: 'estoque_ppu' });
+                if (!req.ppuReconciliationRequest) return respondError(409, 'Use a conferência de reconciliação do Inventário Geral do PPU.', { tabelaAlvo: 'estoque_ppu' });
+                if (req.body?.inventarioCompleto !== 'true') {
+                    return respondError(400, 'Confirme que o Inventário Geral está completo.', { tabelaAlvo: 'estoque_ppu' });
                 }
                 const result = await importPpuR6({
-                    supabase, parsed, rows: estoqueAtualizado, rawRows, sheetCount: workbook.SheetNames.length, buffer: req.file.buffer,
+                    supabase, rawRows, sheetCount: workbook.SheetNames.length, buffer: req.file.buffer,
                     fileName: req.file.originalname, logId: req.importAudit?.logId, user: req.user,
                     options: {
-                        complete: true, observedOn: req.body.dataInventario,
+                        complete: true, observedOn: req.body.dataInventario || undefined,
                         previousObservedOn: req.body.dataInventarioAnterior,
                         previousDateEvidence: req.body.referenciaDataAnterior,
                         preview: req.body.simularReconciliacao === 'true',
@@ -455,119 +434,15 @@ exports.importData = async (req, res) => {
                 const preview = result.status.startsWith('PREVIEW');
                 const reused = result.status === 'REUSED';
                 return respondSuccess(preview
-                    ? 'Simulação de reconciliação concluída, sem alteração do estoque ou Recibos.'
+                    ? 'Conferência concluída, sem alteração do estoque ou Recibos.'
                     : reused ? 'Inventário já aplicado; nenhuma incorporação repetida.'
-                    : 'Inventário PPU atualizado com reconciliação automática.', {
-                        reconciliacao: result,
-                    }, {
+                    : 'Inventário PPU atualizado com reconciliação automática.', { reconciliacao: result }, {
                         tabelaAlvo: 'estoque_ppu', linhasLidas: rawRows.length,
                         linhasImportadas: preview || reused ? 0 : result.rows,
-                        detalhes: { formato_detectado: parsed.format, reconciliacao: result },
+                        detalhes: { formato_detectado: 'MARINHA_PPU_GERAL_POR_LOCALIZACAO', reconciliacao: result },
                     });
             }
-
-            if (estoqueAtualizado.length > 0) {
-                // Sentinelas geradas pelo parser representam ambiguidade documental, não uma LOC
-                // operacional disponível. São excluídas do PPU sem inferir reparo/lixo/CEIMSPA.
-                const technicalReviewLocations = ['NÃO DEFINIDO', 'CONFLITO DE LOCALIZAÇÃO']
-                    .filter((location) => estoqueAtualizado.some((item) => item.localizacao === location));
-
-                if (technicalReviewLocations.length > 0) {
-                    const { data: existingPolicies, error: existingPolicyError } = await supabase
-                        .from('ppu_localizacoes_config')
-                        .select('localizacao_normalizada')
-                        .in('localizacao_normalizada', technicalReviewLocations);
-                    if (existingPolicyError) throw existingPolicyError;
-
-                    const existing = new Set((existingPolicies || []).map((row) => String(row.localizacao_normalizada || '').trim().toUpperCase()));
-                    const missingTechnicalPolicies = technicalReviewLocations.filter((location) => !existing.has(location));
-                    if (missingTechnicalPolicies.length > 0) {
-                        const now = new Date().toISOString();
-                        const { error: policyError } = await supabase
-                            .from('ppu_localizacoes_config')
-                            .insert(missingTechnicalPolicies.map((location) => ({
-                                localizacao_normalizada: location,
-                                localizacao_exibicao: location,
-                                contabiliza_ppu: false,
-                                ativo: true,
-                                destino_contabilizacao: 'FORA_LINHA',
-                                situacao_operacional: 'A_CONFIRMAR',
-                                observacao: location === 'CONFLITO DE LOCALIZAÇÃO'
-                                    ? 'PN+SN aparece em mais de uma localização no relatório oficial. Revisão Admin/Dono obrigatória.'
-                                    : 'Relatório oficial não informou localização física. Revisão Admin/Dono obrigatória.',
-                                updated_by_email: req.user?.email || null,
-                                updated_at: now,
-                            })));
-                        if (policyError) throw policyError;
-                    }
-                }
-
-                const { error: deleteError } = await supabase
-                    .from('estoque_ppu')
-                    .delete()
-                    .neq('pn', 'LIMPEZA');
-
-                if (deleteError) throw deleteError;
-
-                const chunkSize = 1000;
-                for (let i = 0; i < estoqueAtualizado.length; i += chunkSize) {
-                    const lote = estoqueAtualizado.slice(i, i + chunkSize);
-                    const { error: insertError } = await supabase.from('estoque_ppu').insert(lote);
-                    if (insertError) throw insertError;
-                }
-
-                const equipamentos = (parsed.items || []).filter((item) => item.source_section === 'EQUIPAMENTOS');
-                const sobressalentes = (parsed.items || []).filter((item) => item.source_section === 'SOBRESSALENTES');
-                const equipamentosSerializados = equipamentos.filter((item) => item.sn);
-                const equipamentosComSn = equipamentosSerializados.length;
-                const qtdTotal = estoqueAtualizado.reduce((acc, item) => acc + Number(item.quantidade || 0), 0);
-
-                let ledgerSync = null;
-                if (equipamentosSerializados.length > 0) {
-                    ledgerSync = await importPpuInventoryEquipmentSnapshot({ items: equipamentosSerializados }, {
-                        buffer: req.file.buffer,
-                        fileName: req.file.originalname || 'InventarioPPUGeralLoc.xls',
-                        user: req.user || {},
-                    });
-                }
-
-                return respondSuccess(`Inventário PPU atualizado com ${estoqueAtualizado.length} linha(s)!`, {}, {
-                    tabelaAlvo: 'estoque_ppu',
-                    linhasLidas: rawRows.length,
-                    linhasImportadas: estoqueAtualizado.length,
-                    linhasIgnoradas: (parsed.issues || []).filter((issue) => issue.field === 'pn').length,
-                    detalhes: {
-                        formato_detectado: parsed.format,
-                        equipamentos: equipamentos.length,
-                        equipamentos_com_sn: equipamentosComSn,
-                        sobressalentes: sobressalentes.length,
-                        quantidade_total: Number(qtdTotal.toFixed(6)),
-                        localizacoes_detectadas: (parsed.locations || []).length,
-                        aviso_localizacao: 'Novas localizações entram no painel de Localizações do PPU. Classificação operacional permanece decisão Admin/Dono.',
-                        livro_equipamentos: ledgerSync ? {
-                            inseridos: ledgerSync.created_identities || 0,
-                            existentes: ledgerSync.existing_identities || 0,
-                            conflitos_localizacao: ledgerSync.conflicts || 0,
-                            eventos_localizacao: ledgerSync.events || 0,
-                            localizacao_igual: ledgerSync.same || 0,
-                            ignorados_sem_localizacao_segura: ledgerSync.ignored || 0,
-                        } : null,
-                        completude: {
-                            linhas_fisicas_primeira_aba: rawRows.length,
-                            linhas_operacionais_reconhecidas: estoqueAtualizado.length,
-                            pendencias_parser: (parsed.issues || []).length,
-                            parser_concluido: true,
-                        },
-                    },
-                });
-            }
-
-            return respondError(400, 'Falha ao ler o inventário PPU. O SISHA aceita o relatório bruto “Inventário Geral do PPU por Localização” ou o formato tabular legado com PN e QTD.', {
-                tabelaAlvo: 'estoque_ppu',
-                linhasLidas: rawRows.length,
-                linhasIgnoradas: (parsed.issues || []).length,
-                detalhes: { formato_detectado: parsed.format },
-            });
+            return respondError(503, 'Atualização do Inventário Geral temporariamente bloqueada até a habilitação da reconciliação.', { tabelaAlvo: 'estoque_ppu' });
         }
 
         // ---------------------------------------------------

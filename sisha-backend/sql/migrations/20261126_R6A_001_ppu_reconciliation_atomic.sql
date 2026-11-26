@@ -1,6 +1,16 @@
 -- R6A: transactional reconciliation of non-serialized PPU inventory.
 -- Draft only. Do not install until R6B SQL integration and R7 UI gates are approved.
 begin;
+alter table public.ppu_inventario_snapshots
+  add column document_payload jsonb,
+  add column document_sha256 text,
+  add constraint ppu_snapshot_document_integrity_chk check (
+    (document_payload is null and document_sha256 is null) or
+    (jsonb_typeof(document_payload)='array' and document_sha256 is not null and
+    document_sha256=encode(sha256(convert_to(document_payload::text,'UTF8')),'hex'))
+  );
+alter table public.ppu_localizacoes_config add constraint ppu_serial_review_never_available_chk
+  check (localizacao_normalizada<>'IDENTIDADE SERIAL A CONFIRMAR' or (ativo and not contabiliza_ppu and destino_contabilizacao='FORA_LINHA' and situacao_operacional='A_CONFIRMAR'));
 
 create function public.sisha_ppu_r6_context() returns jsonb
 language plpgsql stable security invoker set search_path=pg_catalog set timezone='UTC'
@@ -238,6 +248,12 @@ begin
     v_sum:=v_sum+(v_entry.payload->>'quantity')::numeric;
   end loop;
 
+  if exists(select 1 from jsonb_to_recordset(p_rows) x(localizacao text,sn text,source_section text,source_extra jsonb)
+    where public.sisha_normalize_location(x.localizacao)='IDENTIDADE SERIAL A CONFIRMAR'
+      and (x.sn is not null or x.source_section is distinct from 'EQUIPAMENTOS' or
+        jsonb_typeof(x.source_extra->'serial_review') is distinct from 'array' or
+        coalesce(jsonb_array_length(x.source_extra->'serial_review'),0)=0))
+  then raise exception 'R8HF: identidade serial em revisao inconsistente'; end if;
   -- R8: new locations must not be treated as available by the existing view's
   -- COALESCE defaults. Register them in the existing location policy table as
   -- unclassified/excluded, atomically with the imported inventory.
@@ -266,10 +282,10 @@ begin
     'situacao_operacional',p.situacao_operacional) order by p.id),'[]'::jsonb)
     into v_policies from public.ppu_localizacoes_config p;
   insert into public.ppu_inventario_snapshots(id,snapshot_type,previous_snapshot_id,import_log_id,
-    source_file_name,source_file_sha256,observed_on,row_count,policy_count,rows_payload,policies_payload,rows_sha256,policies_sha256)
+    source_file_name,source_file_sha256,observed_on,row_count,policy_count,rows_payload,policies_payload,rows_sha256,policies_sha256,document_payload,document_sha256)
   values(v_new_id,'IMPORTACAO',s.id,p_import_log_id,p_file_name,p_source_sha256,p_observed_on,
     v_count,jsonb_array_length(v_policies),v_rows,v_policies,
-    encode(sha256(convert_to(v_rows::text,'UTF8')),'hex'),encode(sha256(convert_to(v_policies::text,'UTF8')),'hex'));
+    encode(sha256(convert_to(v_rows::text,'UTF8')),'hex'),encode(sha256(convert_to(v_policies::text,'UTF8')),'hex'),p_rows,encode(sha256(convert_to(p_rows::text,'UTF8')),'hex'));
   select coalesce(jsonb_agg(to_jsonb(x) order by x.source_row),'[]'::jsonb) into v_book_items
     from jsonb_to_recordset(p_rows) x(pn text,sn text,nomenclatura text,localizacao text,source_section text,source_row integer)
     where x.source_section='EQUIPAMENTOS' and nullif(btrim(x.sn),'') is not null;

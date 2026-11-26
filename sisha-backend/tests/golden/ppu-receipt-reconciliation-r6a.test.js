@@ -6,6 +6,14 @@ const row=(q,localizacao='A-1',sn=null)=>({pn:'P1',quantidade:q,localizacao,sn})
 const p=(localizacao_normalizada,contabiliza_ppu=true)=>({localizacao_normalizada,ativo:true,contabiliza_ppu});
 const rec=(id,q,extra={})=>({id,numero_recibo:String(id),ativo:true,data_recebimento:'2026-10-01',recebimento_itens:[{id:id*10,pn:'P1',ativo:true,quantidade:q,quantidade_inventariada:0,contabiliza_pelo_recibo:true,condicao_item:'RECEBIDO_DISPONIVEL',tipo_item:'SOBRESSALENTE',...extra}]});
 const context=(extra={})=>({token:'x',previous_observed_on:'2026-10-02',previous_rows:[row(1)],previous_policies:[p('A-1'),p('Z')],policies:[p('A-1'),p('Z')],receipts:[rec(1,2)],serial_pns:[],locrec:[],...extra});
+const nativeFixture=(q=2)=>[
+ ['','DATA'],['Inventário Geral do PPU por Localização','2026-11-26T00:00:00'],
+ ['EQUIPAMENTOS'],['NOMENCLATURA','PN','SN','PI','QNTD','LOTE','PREÇO US$','SJB','VALIDADE'],
+ ['LOCALIZAÇÃO : Z'],['Equipment','P-SERIAL','S1','PI-S',1,'',0,'',''],
+ ['SOBRESSALENTES'],['NOMENCLATURA','PN','PI','DOTAÇÃO','QNTD','LOTE','PREÇO US$','SJB','VALIDADE'],
+ ['LOCALIZAÇÃO : A-1'],['Spare','P1','PI-P',99,q,'L1',0,'',''],
+ ['Inventariante','Supervisor']
+];
 const opts={complete:true,observedOn:'2026-11-26'};
 const run=(c,r,o=opts)=>buildR6Plan(c,r,o).plans;
 test('R6 partial and exact allocation with same and new location',()=>{
@@ -34,7 +42,7 @@ test('R6 documentary evidence precedes quantity exact',()=>{
 });
 test('R6 preview is read only and apply uses only transactional RPC',async()=>{
   const calls=[];const db={rpc:async(n,args)=>{calls.push(n);return {data:n==='sisha_ppu_r6_context'?context():{status:'APPLIED',rows:1}};}};
-  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:[['PN','QTD','LOCALIZACAO'],['P1',2,'A-1']],sheetCount:1,buffer:Buffer.from('fixture'),fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:{...opts,preview:true}};
+  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:nativeFixture(),sheetCount:1,buffer:Buffer.from('fixture'),fileName:'fixture.xls',logId:'fixture',user:{email:'test@example.invalid'},options:{...opts,preview:true}};
   const preview=await importPpuR6(args);
   assert.equal(preview.status,'PREVIEW');
   assert.deepEqual(calls,['sisha_ppu_r6_context']);
@@ -58,7 +66,7 @@ test('R6 replay of the same current source hash submits no plan and cannot debit
   const hash=require('node:crypto').createHash('sha256').update(buffer).digest('hex');
   const calls=[];
   const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r6_context'?context({source_file_sha256:hash,previous_observed_on:opts.observedOn}):{status:'REUSED'}};}};
-  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:[['PN','QTD','LOCALIZACAO'],['P1',2,'A-1']],sheetCount:1,buffer,fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:opts};
+  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:nativeFixture(),sheetCount:1,buffer,fileName:'fixture.xls',logId:'fixture',user:{email:'test@example.invalid'},options:opts};
   const preview=await importPpuR6({...args,options:{...opts,preview:true}});
   assert.equal(preview.status,'PREVIEW_REUSED');
   calls.length=0;
@@ -69,7 +77,7 @@ test('R6 activation is gated and never falls back on failed transactional RPC',(
   const s=require('node:fs').readFileSync(require('node:path').resolve(__dirname,'../../src/controllers/importController.js'),'utf8');
   assert.match(s,/process\.env\.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true'/);
   const start=s.indexOf("if (process.env.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true')");
-  const end=s.indexOf('if (estoqueAtualizado.length > 0)',start);
+  const end=s.indexOf("return respondError(503, 'Atualização do Inventário Geral",start);
   const block=s.slice(start,end);
   assert.match(block,/await importPpuR6/);assert.match(block,/return respondSuccess/);
   assert.doesNotMatch(block,/\.delete\(|\.insert\(|catch\s*\(/);
@@ -132,13 +140,14 @@ test('R7B1 historical review requires dated inventory, individual evidence and a
 
 test('R7B2 native report preserves SN and source row without using quantity to debit its PN',async()=>{
  const {parsePpuInventoryRows,validateNativeCoverage}=require('../../src/services/ppuInventoryParserService');
- const raw=[['EQUIPAMENTOS'],['LOCALIZAÇÃO : Z'],['PN','SN','QNTD'],['P-SERIAL','S1',1],['SOBRESSALENTES'],['LOCALIZAÇÃO : A-1'],['PN','QNTD'],['P1',2]];
+ const raw=nativeFixture();
  const parsed=parsePpuInventoryRows(raw);
  assert.deepEqual(validateNativeCoverage(parsed,raw,1),{recognized:2,serials:1});
- const bad=[...raw.slice(0,3),['P-SERIAL','S1',2],...raw.slice(4)];
- assert.throws(()=>validateNativeCoverage(parsePpuInventoryRows(bad),bad,1));
- const duplicate=[...raw.slice(0,4),['P-SERIAL','S1',1],...raw.slice(4)];
- assert.throws(()=>validateNativeCoverage(parsePpuInventoryRows(duplicate),duplicate,1));
+ const {readCanonicalInventory}=require('../../src/services/ppuCanonicalInventoryService');
+ const bad=raw.map(r=>[...r]);bad[5][4]=2;
+ assert.equal(readCanonicalInventory(bad,1).issues.length,1);
+ const duplicate=[...raw.slice(0,6),raw[5],...raw.slice(6)];
+ assert.equal(readCanonicalInventory(duplicate,1).issues.length,1);
  const serialReceipt={...rec(2,1,{sn:'S1',tipo_item:'EQUIPAMENTO'}),recebimento_itens:[{...rec(2,1,{sn:'S1',tipo_item:'EQUIPAMENTO'}).recebimento_itens[0],pn:'P-SERIAL'}]};
  const c=context({receipts:[rec(1,2),serialReceipt]});
  const rows=parsed.items.map(({pn,localizacao,quantidade,sn,nsn_pi,nomenclatura})=>({pn,localizacao,quantidade,sn,nsn_pi,nomenclatura}));
@@ -150,7 +159,7 @@ test('R7B2 native report preserves SN and source row without using quantity to d
  assert.ok(preview.plans.every(p=>p.pn==='P1'));
  await importPpuR6({...args,options:{...opts,previewToken:preview.previewToken}});
  const write=calls.find(c=>c.n==='sisha_ppu_r6_apply');
- assert.equal(write.args.p_rows[0].sn,'S1');assert.equal(write.args.p_rows[0].source_row,4);
+ assert.equal(write.args.p_rows[0].sn,'S1');assert.equal(write.args.p_rows[0].source_row,6);
 });
 test('R7B2 Livro sync uses existing source identity and acknowledges only a complete batch',async()=>{
  const sourceHash='a'.repeat(64),items=[{pn:'P-SERIAL',sn:'S1',source_row:4}];

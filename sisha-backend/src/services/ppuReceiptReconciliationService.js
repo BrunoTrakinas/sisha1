@@ -1,7 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const { planReceiptInventoryReconciliation } = require('./receiptInventoryReconciliationPlanner');
-const { validateNativeCoverage } = require('./ppuInventoryParserService');
+const { readCanonicalInventory, REVIEW } = require('./ppuCanonicalInventoryService');
 const pn = v => String(v ?? '').trim().toUpperCase().replace(/\s+/g,'');
 const loc = v => String(v ?? '').trim().toUpperCase().replace(/\s+/g,' ');
 const receiptNo = v => pn(v).replace(/\\/g,'/');
@@ -20,7 +20,7 @@ function buildR6Plan(context, rows, options) {
     throw new Error('Confirme inventário completo e datas operacionais anterior e atual, com referência documental.');
   }
   if (!Array.isArray(rows)||!rows.length || rows.some(r=>!pn(r.pn)||!loc(r.localizacao)||!Number.isFinite(Number(r.quantidade))||Number(r.quantidade)<0||(!options.native&&String(r.sn||'').trim()))) {
-    throw new Error('R6A aceita somente inventário resumido válido sem SN; formatos serializados exigem homologação.');
+    throw new Error('Inventário contém linhas quantitativas inválidas.');
   }
   const old=context.previous_rows || [];
   const serial=new Set((context.serial_pns||[]).map(pn));
@@ -187,7 +187,7 @@ function reviewUnclassifiedLocations(context, rows) {
 }
 function previewFingerprint({context,hash,options,plan,user}) {
   return crypto.createHash('sha256').update(JSON.stringify({
-    version:'R7A',context:context.token,hash,actor:user.email,
+    version:'R8HF_NATIVE',context:context.token,hash,actor:user.email,
     observedOn:options.observedOn,previousObservedOn:options.previousObservedOn||null,
     previousDateEvidence:options.previousDateEvidence||null,complete:options.complete===true,
     plan
@@ -197,22 +197,18 @@ function requirePreview(options,token){
   if(options.preview!==true && options.previewToken!==token)throw new Error('Simulação ausente ou desatualizada. Confira novamente antes de confirmar.');
 }
 async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileName,logId,user,options}) {
-  const native=parsed?.format==='MARINHA_PPU_GERAL_POR_LOCALIZACAO';
-  if(!native&&(parsed?.format!=='PPU_LEGADO_TABULAR'||(parsed.items||[]).some(r=>r.source_section!=='LEGADO_AGREGADO')))
-    throw new Error('Formato não homologado para substituição do estoque PPU.');
   if(!Buffer.isBuffer(buffer)||!buffer.length||!logId||!user?.email)throw new Error('R6: trilha de importação obrigatória.');
-  if(native){
-    validateNativeCoverage(parsed,rawRows,sheetCount);
-    if(rows.length!==parsed.items.length)throw new Error('Cobertura de linhas nativas divergente.');
-    rows=rows.map((r,i)=>({...r,source_section:parsed.items[i].source_section,source_row:parsed.items[i].source_row}));
-  }else validateAggregateCoverage(parsed,rawRows,sheetCount);
-  options={...options,native};
+  const canonical=readCanonicalInventory(rawRows,sheetCount);
+  if(options.observedOn&&options.observedOn!==canonical.observedOn)throw Error('Data informada diverge da data do relatório.');
+  rows=canonical.items;
+  options={...options,native:true,observedOn:canonical.observedOn};
+  const native=true;
   const {data:context,error:readError}=await supabase.rpc('sisha_ppu_r6_context');
   if(readError)throw readError;
   const hash=crypto.createHash('sha256').update(buffer).digest('hex');
   if(context.source_file_sha256===hash && context.previous_observed_on===date(options.observedOn) && options.complete===true){
     const previewToken=previewFingerprint({context,hash,options,plan:[],user});
-    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0,previewToken,plans:[],book_sync:context.book_sync,retroactive:{counts:{review:0,conflict:0,serial:0},candidates:[],automatic:false}};
+    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0,previewToken,document:canonical.summary,observedOn:canonical.observedOn,serialIssues:canonical.issues,plans:[],book_sync:context.book_sync,retroactive:{counts:{review:0,conflict:0,serial:0},candidates:[],automatic:false}};
     requirePreview(options,previewToken);
     const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
       p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
@@ -226,7 +222,7 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
   if(context.book_sync?.state&&context.book_sync.state!=='COMPLETE')throw new Error('Conclua a sincronização do Livro de Equipamentos antes de outro inventário.');
   const plan=buildR6Plan(context,rows,options);
   const previewToken=previewFingerprint({context,hash,options,plan:plan.plans,user});
-  if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings,plans:plan.plans,previewToken,
+  if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings,plans:plan.plans,previewToken,document:canonical.summary,observedOn:canonical.observedOn,serialIssues:canonical.issues,
     retroactive:buildRetroactiveReview(context,rows,options,plan.plans),unclassifiedLocations:reviewUnclassifiedLocations(context,rows),blockedSerialPns:plan.blockedSerialPns,serialEvidenceRows:native?rows.filter(r=>r.source_section==='EQUIPAMENTOS'&&r.sn).length:0};
   requirePreview(options,previewToken);
   const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{

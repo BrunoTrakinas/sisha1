@@ -14,9 +14,13 @@ test('Central: InventarioPPUGeralLoc é a única entrada oficial do inventário 
 });
 
 test('InventarioPPUGeralLoc alimenta PPU e sincroniza PN+SN no Livro de Equipamentos', () => {
-  assert.match(importController, /from\('estoque_ppu'\)/);
-  assert.match(importController, /importPpuInventoryEquipmentSnapshot/);
-  assert.match(importController, /equipamentosSerializados/);
+  const service=fs.readFileSync(path.join(backendRoot,'src/services/ppuReceiptReconciliationService.js'),'utf8');
+  const routes=fs.readFileSync(path.join(backendRoot,'src/routes/importRoutes.js'),'utf8');
+  assert.match(importController,/await importPpuR6/);
+  assert.match(service,/readCanonicalInventory/);
+  assert.match(service,/sisha_ppu_r6_apply/);
+  assert.match(routes,/importPpuInventoryEquipmentSnapshot/);
+  assert.doesNotMatch(cadastro,/<option value="resumido">/);
 });
 
 test('Importador genérico PN+SN permanece disponível na página Equipamentos', () => {
