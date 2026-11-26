@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildR6Plan,importPpuR6}=require('../../src/services/ppuReceiptReconciliationService');
+const {buildR6Plan,importPpuR6,validateAggregateCoverage}=require('../../src/services/ppuReceiptReconciliationService');
 const row=(q,localizacao='A-1',sn=null)=>({pn:'P1',quantidade:q,localizacao,sn});
 const p=(localizacao_normalizada,contabiliza_ppu=true)=>({localizacao_normalizada,ativo:true,contabiliza_ppu});
 const rec=(id,q,extra={})=>({id,numero_recibo:String(id),ativo:true,data_recebimento:'2026-10-01',recebimento_itens:[{id:id*10,pn:'P1',ativo:true,quantidade:q,quantidade_inventariada:0,contabiliza_pelo_recibo:true,condicao_item:'RECEBIDO_DISPONIVEL',tipo_item:'SOBRESSALENTE',...extra}]});
@@ -34,7 +34,7 @@ test('R6 documentary evidence precedes quantity exact',()=>{
 });
 test('R6 preview is read only and apply uses only transactional RPC',async()=>{
   const calls=[];const db={rpc:async(n,args)=>{calls.push(n);return {data:n==='sisha_ppu_r6_context'?context():{status:'APPLIED',rows:1}};}};
-  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{source_section:'LEGADO_AGREGADO'}]},rows:[row(2)],buffer:Buffer.from('fixture'),fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:{...opts,preview:true}};
+  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:[['PN','QTD','LOCALIZACAO'],['P1',2,'A-1']],sheetCount:1,buffer:Buffer.from('fixture'),fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:{...opts,preview:true}};
   assert.equal((await importPpuR6(args)).status,'PREVIEW');
   assert.deepEqual(calls,['sisha_ppu_r6_context']);
   calls.length=0;await importPpuR6({...args,options:opts});
@@ -53,7 +53,7 @@ test('R6 replay of the same current source hash submits no plan and cannot debit
   const hash=require('node:crypto').createHash('sha256').update(buffer).digest('hex');
   const calls=[];
   const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r6_context'?context({source_file_sha256:hash,previous_observed_on:opts.observedOn}):{status:'REUSED'}};}};
-  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{source_section:'LEGADO_AGREGADO'}]},rows:[row(2)],buffer,fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:opts};
+  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:[['PN','QTD','LOCALIZACAO'],['P1',2,'A-1']],sheetCount:1,buffer,fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:opts};
   assert.equal((await importPpuR6(args)).status,'REUSED');
   assert.deepEqual(calls[1].args.p_plan,[]);
 });
@@ -65,4 +65,18 @@ test('R6 activation is gated and never falls back on failed transactional RPC',(
   const block=s.slice(start,end);
   assert.match(block,/await importPpuR6/);assert.match(block,/return respondSuccess/);
   assert.doesNotMatch(block,/\.delete\(|\.insert\(|catch\s*\(/);
+});
+
+test('R6B aggregate coverage rejects omitted PN or invalid quantity and permits only explicit markers/footer',()=>{
+ const raw=[['Localizacao','PI','PN','Nomenclatura','Lote','Preço','QTD'],['A-1','PI','P1','PART','',0,2],['A-1','','DUPLICADO','','',0,1],['A-1','','EXCLUIR-PN','','',0,1],[],['Assinatura']];
+ const parsed={items:[{...row(2),source_row:2}],issues:[]};
+ assert.deepEqual(validateAggregateCoverage(parsed,raw,1),{recognized:1,markers:2,footers:1});
+ assert.throws(()=>validateAggregateCoverage(parsed,[...raw,['A-1','','','ITEM','','',0,2]],1));
+ assert.throws(()=>validateAggregateCoverage(parsed,[raw[0],['A-1','PI','P1','PART','',0,'abc']],1));
+ assert.throws(()=>validateAggregateCoverage(parsed,raw,2));
+});
+test('R6B historical LOCREC does not take priority over the current inventory window',()=>{
+ const c=context({receipts:[rec(1,1),rec(2,2)],locrec:[{numero_recibo:'2',pn:'P1',qtd_documental:2,qtd_auditada_aplicada:1,loc_escolhida:'A-1',destino_indicado:'PPU',data_auditoria:'2026-10-02'}]});
+ const plan=run(c,[row(2)]);
+ assert.equal(plan[0].receiptId,1);assert.equal(plan[0].method,'QTD_EXATA');
 });
