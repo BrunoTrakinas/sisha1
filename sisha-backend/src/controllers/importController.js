@@ -15,6 +15,7 @@ const { createRfqImportJob, getRfqImportJob, listRfqImportJobs, reprocessRfqImpo
 const { markRequestsAnswered } = require('../services/quoteRequestService');
 const { parseAvailabilityWorkbookBuffer, importAvailabilityAtomic } = require('../services/aircraftAvailabilityService');
 const { parsePpuInventoryRows } = require('../services/ppuInventoryParserService');
+const { importPpuR6 } = require('../services/ppuReceiptReconciliationService');
 const { parseRunningLogWorkbook, importRunningLogAtomic } = require('../services/aircraftRunningLogService');
 const { parseCriticalEquipmentWorkbook, parsePpuOutputMovementWorkbook, parseMasterOsWorkbook } = require('../services/rawOperationalDocumentParserService');
 const { importPpuInventoryEquipmentSnapshot, importCriticalEquipmentControl, importPpuOutputHistory } = require('../services/rawOperationalDocumentImportService');
@@ -429,6 +430,36 @@ exports.importData = async (req, res) => {
                     motivo: issue.reason || 'Linha não importada no inventário PPU.',
                 });
             });
+
+            if (process.env.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true') {
+                // No fallback to the legacy non-atomic replacement after activation.
+                // R7 will supply explicit operational dates and completeness via the existing upload form.
+                if (req.body?.inventarioCompleto !== 'true' || !req.body?.dataInventario) {
+                    return respondError(400, 'Confirme o inventário completo e informe a data operacional.', { tabelaAlvo: 'estoque_ppu' });
+                }
+                const result = await importPpuR6({
+                    supabase, parsed, rows: estoqueAtualizado, buffer: req.file.buffer,
+                    fileName: req.file.originalname, logId: req.importAudit?.logId, user: req.user,
+                    options: {
+                        complete: true, observedOn: req.body.dataInventario,
+                        previousObservedOn: req.body.dataInventarioAnterior,
+                        previousDateEvidence: req.body.referenciaDataAnterior,
+                        preview: req.body.simularReconciliacao === 'true',
+                    },
+                });
+                const preview = result.status.startsWith('PREVIEW');
+                const reused = result.status === 'REUSED';
+                return respondSuccess(preview
+                    ? 'Simulação de reconciliação concluída, sem alteração do estoque ou Recibos.'
+                    : reused ? 'Inventário já aplicado; nenhuma incorporação repetida.'
+                    : 'Inventário PPU atualizado com reconciliação automática.', {
+                        reconciliacao: result,
+                    }, {
+                        tabelaAlvo: 'estoque_ppu', linhasLidas: rawRows.length,
+                        linhasImportadas: preview || reused ? 0 : result.rows,
+                        detalhes: { formato_detectado: parsed.format, reconciliacao: result },
+                    });
+            }
 
             if (estoqueAtualizado.length > 0) {
                 // Sentinelas geradas pelo parser representam ambiguidade documental, não uma LOC
