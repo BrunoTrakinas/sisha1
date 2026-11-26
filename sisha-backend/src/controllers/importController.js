@@ -438,7 +438,7 @@ exports.importData = async (req, res) => {
                     return respondError(400, 'Confirme o inventário completo e informe a data operacional.', { tabelaAlvo: 'estoque_ppu' });
                 }
                 const result = await importPpuR6({
-                    supabase, parsed, rows: estoqueAtualizado, buffer: req.file.buffer,
+                    supabase, parsed, rows: estoqueAtualizado, rawRows, sheetCount: workbook.SheetNames.length, buffer: req.file.buffer,
                     fileName: req.file.originalname, logId: req.importAudit?.logId, user: req.user,
                     options: {
                         complete: true, observedOn: req.body.dataInventario,
