@@ -42,7 +42,7 @@ begin
     'qtd_auditada_aplicada',l.qtd_auditada_aplicada,'loc_escolhida',l.loc_escolhida,
     'destino_indicado',l.destino_indicado,'data_auditoria',l.data_auditoria) order by l.id),'[]'::jsonb)
     into v_locrec from public.v_sisha_locrec_atual l;
-  v_context:=jsonb_build_object('snapshot_id',s.id,'previous_observed_on',s.observed_on,
+  v_context:=jsonb_build_object('snapshot_id',s.id,'previous_observed_on',s.observed_on,'source_file_sha256',s.source_file_sha256,
     'previous_rows',v_rows,'previous_policies',s.policies_payload,'policies',v_policies,
     'receipts',v_receipts,'serial_pns',v_serial,'locrec',v_locrec);
   return v_context||jsonb_build_object('token',encode(sha256(convert_to(v_context::text,'UTF8')),'hex'));
