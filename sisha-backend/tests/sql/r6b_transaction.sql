@@ -206,3 +206,30 @@ begin
 end
 $r8unknown$;
 rollback;
+
+-- R8HF: serial discrepancies never become available or generate Livro evidence.
+begin;
+set local role service_role;
+do $r8hf$
+declare
+ token text:=public.sisha_ppu_r6_context()->>'token';
+ result jsonb;
+ snapshot uuid;
+ doc jsonb:='[{"pn":"FIXTURE-PN","localizacao":"A-1","quantidade":2,"source_section":"SOBRESSALENTES","source_row":10,"source_extra":{"serial_review":[],"document_rows":[{"source_row":10,"dotacao":"99","lotes":["L-A","L-B"]}],"document_meta":{"observedOn":"2025-03-01","summary":{"documentRows":3}}}},{"pn":"FIXTURE-SERIAL","localizacao":"IDENTIDADE SERIAL A CONFIRMAR","quantidade":2,"sn":null,"source_section":"EQUIPAMENTOS","source_row":5,"source_extra":{"serial_review":["QUANTIDADE_SERIAL_DIVERGENTE"],"document_rows":[{"source_row":5,"sn_original":"0007","localizacao":"Z","quantidade":2}]}},{"pn":"FIXTURE-VALID","localizacao":"Z","quantidade":1,"sn":"0008","source_section":"EQUIPAMENTOS","source_row":6,"source_extra":{"serial_review":[],"document_rows":[{"source_row":6,"sn_original":"0008","localizacao":"Z","quantidade":1}]}}]';
+begin
+ result:=public.sisha_ppu_r6_apply(token,repeat('e',64),'fixture-6.ods','00000000-0000-4000-8000-000000000006','2025-03-01',null,null,true,doc,'[]','fixture@example.invalid');
+ snapshot:=(result->>'snapshot_id')::uuid;
+ if result->'book_sync'->>'state'<>'PENDING' or (result->'book_sync'->>'total')::integer<>1
+ or not exists(select 1 from public.estoque_ppu where pn='FIXTURE-SERIAL' and quantidade=2 and sn is null and localizacao='IDENTIDADE SERIAL A CONFIRMAR')
+ or not exists(select 1 from public.ppu_localizacoes_config where localizacao_normalizada='IDENTIDADE SERIAL A CONFIRMAR' and not contabiliza_ppu and ativo)
+ or not exists(select 1 from public.ppu_inventario_snapshots where id=snapshot and document_payload=doc and document_sha256=encode(sha256(convert_to(doc::text,'UTF8')),'hex'))
+ or jsonb_array_length(public.sisha_ppu_r6_context()->'document_review'->'issues')<>1
+ then raise exception 'R8HF documentary isolation or immutable evidence failed'; end if;
+ begin
+  update public.ppu_localizacoes_config set contabiliza_ppu=true,destino_contabilizacao='PPU',situacao_operacional='DISPONIVEL' where localizacao_normalizada='IDENTIDADE SERIAL A CONFIRMAR';
+  raise exception 'expected review reclassification rejection';
+ exception when check_violation then null; end;
+ raise notice 'R8HF PASS native document integrity, quarantined serial and policy lock';
+end
+$r8hf$;
+rollback;

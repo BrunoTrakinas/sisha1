@@ -1149,6 +1149,11 @@ export default function Cadastro() {
                         <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
                             <p className="text-sm font-bold">InventarioPPUGeralLoc — envie o relatório original, sem edição.</p>
                             {ppuStatusMsg&&<p className="text-sm font-bold">{ppuStatusMsg}</p>}
+                            {!!ppuStatus?.documentReview?.issues?.length&&<details className="rounded-lg border border-amber-300 p-3">
+                                <summary className="cursor-pointer text-sm font-bold">{ppuStatus.documentReview.issues.length} grupos seriais em revisão no inventário vigente</summary>
+                                <p className="text-xs">Evidências preservadas na versão histórica; não classifique a localização técnica como disponível. Corrija a origem documental e envie um novo relatório completo.</p>
+                                <div className="max-h-44 overflow-auto text-xs space-y-1">{ppuStatus.documentReview.issues.map((x,i)=><div key={i}>{x.pn} — {x.rows.map(r=>`SN ${r.sn_original||'não informado'} • ${r.localizacao} • linha ${r.source_row} • QNTD ${r.quantidade}`).join(' / ')}</div>)}</div>
+                            </details>}
                             <button type="button" disabled={ppuSyncBusy||uploadCarregando} onClick={carregarStatusPpu} className="text-xs underline">Consultar situação da reconciliação</button>
                             {ppuStatus?.enabled&&ppuStatus.bookSync?.state!=='COMPLETE'&&<div className="rounded-xl border border-amber-300 p-3 space-y-2">
                                 <p className="font-black text-sm">Estoque atualizado; Livro de Equipamentos com sincronização pendente.</p>
@@ -1669,11 +1674,11 @@ export default function Cadastro() {
                                     <tbody>
                                         {localizacoesFiltradas.map((row) => (
                                             <tr key={row.localizacao_normalizada} className="border-t border-slate-200 dark:border-slate-800 align-top">
-                                                <td className="p-3"><input type="checkbox" checked={row.contabiliza_ppu !== false} onChange={(event) => alternarLocalizacaoPpu(row.localizacao_normalizada, event.target.checked)} className="h-5 w-5 accent-blue-600" /></td>
+                                                <td className="p-3"><input type="checkbox" checked={row.contabiliza_ppu !== false} disabled={row.localizacao_normalizada==='IDENTIDADE SERIAL A CONFIRMAR'} onChange={(event) => alternarLocalizacaoPpu(row.localizacao_normalizada, event.target.checked)} className="h-5 w-5 accent-blue-600" /></td>
                                                 <td className="p-3 font-black text-slate-900 dark:text-slate-100 min-w-44">{row.localizacao_exibicao}</td>
                                                 <td className="p-3 min-w-44">
                                                     {row.contabiliza_ppu !== false ? <span className="font-black text-blue-700">PPU</span> : (
-                                                        <select value={row.destino_contabilizacao || 'FORA_LINHA'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'destino_contabilizacao', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
+                                                        <select value={row.destino_contabilizacao || 'FORA_LINHA'} disabled={row.localizacao_normalizada==='IDENTIDADE SERIAL A CONFIRMAR'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'destino_contabilizacao', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
                                                             <option value="FORA_LINHA">Fora da linha de voo</option>
                                                             <option value="CEIMSPA">CEIMSPA</option>
                                                         </select>
@@ -1681,7 +1686,7 @@ export default function Cadastro() {
                                                 </td>
                                                 <td className="p-3 min-w-52">
                                                     {row.contabiliza_ppu !== false ? <span className="font-bold text-emerald-700">Disponível</span> : (
-                                                        <select value={row.situacao_operacional || 'A_CONFIRMAR'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'situacao_operacional', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
+                                                        <select value={row.situacao_operacional || 'A_CONFIRMAR'} disabled={row.localizacao_normalizada==='IDENTIDADE SERIAL A CONFIRMAR'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'situacao_operacional', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
                                                             <option value="A_CONFIRMAR">A confirmar</option>
                                                             <option value="AGUARDANDO_REPARO">Aguardando reparo</option>
                                                             <option value="EM_REPARO">Em reparo</option>

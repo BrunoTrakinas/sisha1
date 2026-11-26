@@ -178,7 +178,7 @@ function reviewUnclassifiedLocations(context, rows) {
   const groups=new Map();
   for(const r of rows){
     const l=loc(r.localizacao);
-    if(!l||existing.has(l))continue;
+    if(!l||l===REVIEW||existing.has(l))continue;
     const group=groups.get(l)||{location:l,rows:0};
     group.rows++;
     groups.set(l,group);
@@ -263,7 +263,7 @@ async function applyRetroactiveReview(db, actor, body={}) {
 async function getBookSyncStatus(db) {
   const {data,error}=await db.rpc('sisha_ppu_r6_context');
   if(error)throw error;
-  return {snapshotId:data.snapshot_id,bookSync:data.book_sync||{state:'COMPLETE',total:0,cursor:0}};
+  return {snapshotId:data.snapshot_id,bookSync:data.book_sync||{state:'COMPLETE',total:0,cursor:0},documentReview:data.document_review||null};
 }
 async function continueBookSync(db, actor, snapshotId, syncFn) {
   if(!actor||!snapshotId)throw new Error('Identificação da sincronização obrigatória.');

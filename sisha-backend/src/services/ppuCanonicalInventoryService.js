@@ -13,6 +13,10 @@ function reportDate(v){
  if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||!Number.isFinite(Date.parse(d))||new Date(d+'T00:00:00Z').toISOString().slice(0,10)!==d)throw Error('Data do cabeçalho inválida.');
  return d;
 }
+function documentValidity(v){
+ if(v===null||v===undefined||txt(v)==='')return null;
+ try{return reportDate(v);}catch{return txt(v);}
+}
 function quantity(v,line){
  const q=typeof v==='number'?v:/^\d+(?:[.,]\d+)?$/.test(txt(v))?Number(txt(v).replace(',','.')):NaN;
  if(!Number.isFinite(q)||q<0||Math.abs(q*1e6-Math.round(q*1e6))>1e-5)throw Error('Quantidade inválida na linha '+line);
@@ -49,7 +53,7 @@ function readCanonicalInventory(rows,sheetCount){
   const part=pn(r[header.pn]),name=txt(r[header.name]);
   if(!part)throw Error('PN ausente, linha '+line);
   const rawSn=header.sn>=0?txt(r[header.sn]):null;
-  const doc={source_row:line,source_section:section,pn:part,nomenclatura:name,nsn_pi:txt(r[header.pi]),sn_original:rawSn,quantidade:quantity(r[header.q],line),localizacao:location,lotes:header.lots.map(j=>txt(r[j])||null),dotacao:header.dot>=0?txt(r[header.dot])||null:null,preco_usd:txt(r[header.price])||null,sjb:txt(r[header.sjb])||null,validade:txt(r[header.valid])||null};
+  const doc={source_row:line,source_section:section,pn:part,nomenclatura:name,nsn_pi:txt(r[header.pi]),sn_original:rawSn,quantidade:quantity(r[header.q],line),localizacao:location,lotes:header.lots.map(j=>txt(r[j])||null),dotacao:header.dot>=0?txt(r[header.dot])||null:null,preco_usd:txt(r[header.price])||null,sjb:txt(r[header.sjb])||null,validade:documentValidity(r[header.valid]),validade_original:txt(r[header.valid])||null};
   if(part==='DUPLICADO'||part.startsWith('EXCLUIR')||(norm(name).includes('DUPLICADO')&&/NAO APLICAVEL|NAO UTILIZAR/.test(norm(name)))){markers.push(doc);continue;}
   if(['PN','NULL','LIMPEZA'].includes(part))throw Error('PN inválido, linha '+line);
   source.push(doc);

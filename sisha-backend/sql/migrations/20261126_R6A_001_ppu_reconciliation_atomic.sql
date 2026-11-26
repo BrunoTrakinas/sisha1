@@ -61,6 +61,12 @@ begin
     into v_locrec from public.v_sisha_locrec_atual l;
   select (l.detalhes->'r7_book_sync') - 'items' - 'equipment_pns' into v_book from public.import_logs l where l.id=s.import_log_id;
   v_context:=jsonb_build_object('book_sync',v_book,'snapshot_id',s.id,'previous_observed_on',s.observed_on,'source_file_sha256',s.source_file_sha256,
+    'document_review',case when s.document_payload->0->'source_extra'->'document_meta' is not null then
+      jsonb_build_object('summary',s.document_payload->0->'source_extra'->'document_meta'->'summary',
+        'observedOn',s.observed_on,
+        'issues',(select coalesce(jsonb_agg(jsonb_build_object('pn',x.pn,'reasons',x.source_extra->'serial_review','rows',x.source_extra->'document_rows') order by x.source_row),'[]'::jsonb)
+        from jsonb_to_recordset(s.document_payload) x(pn text,source_row integer,source_extra jsonb)
+        where jsonb_typeof(x.source_extra->'serial_review')='array' and jsonb_array_length(x.source_extra->'serial_review')>0)) end,
     'previous_rows',v_rows,'previous_policies',s.policies_payload,'policies',v_policies,
     'receipts',v_receipts,'serial_pns',v_serial,'locrec',v_locrec);
   return v_context||jsonb_build_object('token',encode(sha256(convert_to(v_context::text,'UTF8')),'hex'));

@@ -142,8 +142,9 @@ test('R7B2 native report preserves SN and source row without using quantity to d
  const {parsePpuInventoryRows,validateNativeCoverage}=require('../../src/services/ppuInventoryParserService');
  const raw=nativeFixture();
  const parsed=parsePpuInventoryRows(raw);
- assert.deepEqual(validateNativeCoverage(parsed,raw,1),{recognized:2,serials:1});
  const {readCanonicalInventory}=require('../../src/services/ppuCanonicalInventoryService');
+ const canonical=readCanonicalInventory(raw,1);
+ assert.equal(canonical.summary.documentRows,2);assert.equal(canonical.summary.serialEvidenceRows,1);
  const bad=raw.map(r=>[...r]);bad[5][4]=2;
  assert.equal(readCanonicalInventory(bad,1).issues.length,1);
  const duplicate=[...raw.slice(0,6),raw[5],...raw.slice(6)];
