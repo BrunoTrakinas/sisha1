@@ -50,7 +50,7 @@ function isOperationalPpuRow(row = {}) {
   return operationalQuantity(row) > 0;
 }
 
-function applyLocrecReceiptLocations(baseRows = [], locrecRows = []) {
+function applyLocrecReceiptLocations(baseRows = [], locrecRows = [], incorporatedGroups = new Set()) {
   const locrecMap = groupLocrecRowsForAvailability(locrecRows);
   const passthrough = [];
   const receiptGroups = new Map();
@@ -74,6 +74,17 @@ function applyLocrecReceiptLocations(baseRows = [], locrecRows = []) {
   receiptGroups.forEach((group) => {
     const template = group.rows[0] || {};
     const locrec = group.receiptNo && group.pn ? locrecMap.get(`${group.receiptNo}|${group.pn}`) : null;
+    // The view already reduced the temporary balance. LOCREC describes the full
+    // receipt, not the subset still pending. Once any item in the receipt/PN
+    // was incorporated, do not reuse the original allocations for the remainder.
+    const uncertain = group.rows.some(row=>incorporatedGroups.has(JSON.stringify([String(row.recebimento_id),group.pn])))
+      || new Set(group.rows.map(row=>String(row.recebimento_id))).size>1;
+    if (locrec && uncertain) {
+      for (const row of group.rows) projected.push({...row,
+        localizacao:'Localização a confirmar',locrec_consultivo:true,
+        locrec_status:'SALDO_REMANESCENTE_LOCAL_A_CONFIRMAR',locrec_destino_indicado:null});
+      return;
+    }
     let remaining = round(group.quantity);
     const allocations = locrec
       ? Array.from(locrec.allocations.entries()).map(([location, data]) => ({ location, ...data }))
@@ -415,6 +426,26 @@ async function loadActiveLocrecRowsByPns(pns = []) {
   return { available: true, active, rows };
 }
 
+async function loadIncorporatedReceiptGroups(baseRows = []) {
+  const db=getDb();
+  const ids=[...new Set(baseRows.filter(row=>clean(row.origem_saldo).toUpperCase().startsWith('RECIBO_PENDENTE'))
+    .map(row=>row.recebimento_id).filter(id=>id!=null))];
+  const groups=new Set();
+  const pageSize=500;
+  for(let i=0;i<ids.length;i+=80) {
+    const chunk=ids.slice(i,i+80);
+    for(let from=0;;from+=pageSize){
+      const {data,error}=await db.from('recebimento_itens')
+        .select('id,recebimento_id,pn').in('recebimento_id',chunk).eq('ativo',true)
+        .gt('quantidade_inventariada',0).order('id',{ascending:true}).range(from,from+pageSize-1);
+      if(error)throw error;
+      for(const row of data||[])groups.add(JSON.stringify([String(row.recebimento_id),normalizePn(row.pn)]));
+      if((data||[]).length<pageSize)break;
+    }
+  }
+  return groups;
+}
+
 async function loadEffectivePpuRowsByPns(pns = []) {
   const safe = [...new Set((pns || []).map(normalizePn).filter(Boolean))];
   if (!safe.length) return [];
@@ -423,7 +454,9 @@ async function loadEffectivePpuRowsByPns(pns = []) {
     loadCustodyState({ pns: safe }),
     loadActiveLocrecRowsByPns(safe),
   ]);
-  const receiptAwareRows = locrecState.available ? applyLocrecReceiptLocations(baseRows, locrecState.rows) : baseRows;
+  const incorporatedGroups = locrecState.available && locrecState.rows.length
+    ? await loadIncorporatedReceiptGroups(baseRows) : new Set();
+  const receiptAwareRows = locrecState.available ? applyLocrecReceiptLocations(baseRows, locrecState.rows, incorporatedGroups) : baseRows;
   return buildEffectivePpuAvailability(receiptAwareRows, state.items, state.decisions).rows;
 }
 
@@ -431,7 +464,9 @@ async function loadAllEffectivePpuRows() {
   const [baseRows, state] = await Promise.all([loadAllBaseRows(), loadCustodyState()]);
   const safePns = [...new Set(baseRows.map((row) => normalizePn(row.pn)).filter(Boolean))];
   const locrecState = await loadActiveLocrecRowsByPns(safePns);
-  const receiptAwareRows = locrecState.available ? applyLocrecReceiptLocations(baseRows, locrecState.rows) : baseRows;
+  const incorporatedGroups = locrecState.available && locrecState.rows.length
+    ? await loadIncorporatedReceiptGroups(baseRows) : new Set();
+  const receiptAwareRows = locrecState.available ? applyLocrecReceiptLocations(baseRows, locrecState.rows, incorporatedGroups) : baseRows;
   return buildEffectivePpuAvailability(receiptAwareRows, state.items, state.decisions).rows;
 }
 
