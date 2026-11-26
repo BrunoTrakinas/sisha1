@@ -80,12 +80,13 @@ async function ensureIdentities(rows, {fileName, user, origin='FONTE_OPERACIONAL
   return {byKey, created, existing:Math.max(0, unique.size-created)};
 }
 
-async function importPpuInventoryEquipmentSnapshot(parsed,{buffer,fileName,user}={}){
-  const fileHash=hashBuffer(buffer);
+async function importPpuInventoryEquipmentSnapshot(parsed,{buffer,fileName,user,sourceHash,capturedAt,observedOn}={}){
+  const fileHash=sourceHash||hashBuffer(buffer);
+  if(sourceHash&&(!/^[a-f0-9]{64}$/.test(sourceHash)||!Number.isFinite(Date.parse(capturedAt))))throw new Error('Fonte persistida do Livro inválida.');
   const rows=(parsed.items||[]).filter((row)=>row?.pn&&row?.sn);
   const ensured=await ensureIdentities(rows,{fileName,user,origin:'INVENTARIO_PPU'});
   let events=0,conflicts=0,same=0,historical=0,ignored=0;
-  const snapshotTime=new Date().toISOString();
+  const snapshotTime=sourceHash?new Date(capturedAt).toISOString():new Date().toISOString();
   for(const row of rows){
     const equipment=ensured.byKey.get(key(row.pn,row.sn));
     if(!equipment){ignored++;continue;}
@@ -97,7 +98,7 @@ async function importPpuInventoryEquipmentSnapshot(parsed,{buffer,fileName,user}
       status_resultante:equipment.status_atual||'DESCONHECIDO',
       condicao_resultante:equipment.condicao_atual||'DESCONHECIDA', confianca:'ALTA',
       motivo:'Inventário Geral do PPU por Localização registra a posição física observada do PN+SN. Divergência com estado vigente exige reconciliação.',
-      payload:{source_section:row.source_section||'EQUIPAMENTOS',source_row:row.source_row||null,temporal_precision:'IMPORT_TIME_ONLY'},
+      payload:{source_section:row.source_section||'EQUIPAMENTOS',source_row:row.source_row||null,source_observed_on:observedOn||null,temporal_precision:'IMPORT_TIME_ONLY'},
     },{
       source_type:'INVENTARIO_PPU', origin_event:'INVENTARIO_PPU',
       source_key:`PPU:${fileHash}:${row.source_row||''}:${row.pn}:${row.sn}`,

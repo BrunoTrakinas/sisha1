@@ -53,6 +53,13 @@ router.post('/upload', requireRole(['admin']), upload.single('file'), createImpo
   }
   return importController.importData(req, res, next);
 });
+// A distinct endpoint ensures older deployed backends fail with 404 rather than
+// accidentally treating a simulation as a destructive legacy upload.
+router.post('/ppu/reconciliacao', requireRole(['admin']), upload.single('file'), (req, res, next) => {
+  req.ppuReconciliationRequest = true;
+  req.body.tipoArquivo = req.body.simularReconciliacao === 'true' ? 'inventario_ppu_simulacao' : 'inventario_ppu';
+  next();
+}, createImportAudit('ppu_reconciliacao'), importController.importData);
 router.post('/upload/ceimspa-sem-demanda', requireRole(['admin']), semDemandUpload.single('file'), createImportAudit('ceimspa_sem_demanda_low_memory'), importCeimspaSemDemandaLowMemory);
 router.post('/confirmar_triagem', requireRole(['admin']), createImportAudit('confirmar_triagem'), importController.confirmarTriagemRecibo);
 router.post('/leonardo', requireRole(['admin']), upload.single('file'), createImportAudit('leonardo_legacy'), importController.importData);
@@ -68,6 +75,38 @@ router.put('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rfq_m
 router.delete('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rfq_manual_desativar'), importController.deactivateRfqCotacao);
 router.get('/logs', requireRole(['admin']), importController.listImportLogs);
 router.get('/locrec/reconciliacao', requireRole(['admin']), importController.getLocrecReconciliation);
+// Historical correction uses the existing LOCREC screen; it never changes official stock.
+const {getRetroactiveReview,applyRetroactiveReview,getBookSyncStatus,continueBookSync}=require('../services/ppuReceiptReconciliationService');
+const {importPpuInventoryEquipmentSnapshot}=require('../services/rawOperationalDocumentImportService');
+const ppuDb=require('../config/supabaseClient');
+router.get('/ppu/reconciliacao/status',requireRole(['admin']),async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.json({status:'success',data:{enabled:false}});
+  try {
+    const result=await getBookSyncStatus(ppuDb);
+    return res.json({status:'success',data:{enabled:true,...result}});
+  }catch(e){return res.status(503).json({status:'error',message:'Conferência de inventário indisponível; não utilize o fluxo antigo.'});}
+});
+router.post('/ppu/reconciliacao/livro',requireRole(['admin']),async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
+  try{
+    const result=await continueBookSync(ppuDb,req.user.email,req.body?.snapshotId,importPpuInventoryEquipmentSnapshot);
+    return res.json({status:'success',data:result});
+  }catch(e){return res.status(409).json({status:'error',message:e.message||'Sincronização não confirmada.'});}
+});
+router.get('/locrec/reconciliacao/historico', requireRole(['admin']), async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
+  try {
+    const {contextToken,...review}=await getRetroactiveReview(ppuDb,req.user.email);
+    return res.json({status:'success',data:review});
+  }catch(e){return res.status(409).json({status:'error',message:e.message||'Conferência indisponível.'});}
+});
+router.post('/locrec/reconciliacao/historico', requireRole(['admin']), async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
+  try {
+    const result=await applyRetroactiveReview(ppuDb,req.user.email,req.body);
+    return res.json({status:'success',data:result});
+  }catch(e){return res.status(409).json({status:'error',message:e.message||'Incorporação não confirmada.'});}
+});
 router.get('/custodia-externa-ppu/reconciliacao', requireRole(['admin']), importController.getPpuExternalCustodyReconciliation);
 router.post('/custodia-externa-ppu/reconciliacao', requireRole(['admin']), createImportAudit('ppu_custodia_externa_decisao'), importController.decidePpuExternalCustodyReconciliation);
 

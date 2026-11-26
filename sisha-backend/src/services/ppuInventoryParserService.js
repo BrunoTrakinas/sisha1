@@ -331,7 +331,60 @@ function parsePpuInventoryRows(rows = []) {
   return native ? parseNative(rows) : parseLegacy(rows);
 }
 
+
+// Strict coverage gate for the native full report; reuses the existing parsing
+// primitives without changing legacy parser behavior. Unsupported report layouts
+// or ambiguous serial identities require review before any replacement.
+function validateNativeCoverage(parsed,rows,sheetCount) {
+  if(parsed?.format!=='MARINHA_PPU_GERAL_POR_LOCALIZACAO'||!Array.isArray(rows)||sheetCount!==1)
+    throw new Error('Relatório geral não reconhecido integralmente.');
+  const byRow=new Map((parsed.items||[]).map(x=>[x.source_row,x]));
+  if(byRow.size!==(parsed.items||[]).length||!byRow.size)throw new Error('Cobertura do inventário geral inconsistente.');
+  let section=null,header=null,location=null,recognized=0;
+  const serials=new Set(),sections=new Set();
+  for(let index=0;index<rows.length;index++){
+    const row=rows[index]||[],first=firstNonEmpty(row);
+    if(!text(first))continue;
+    const label=normalized(first);
+    if(['EQUIPAMENTOS','SOBRESSALENTES'].includes(label)){
+      section=label;sections.add(label);header=null;location=null;continue;
+    }
+    const marker=extractLocation(row);
+    if(marker!==null){location=marker;continue;}
+    if(!section)continue; // title/preamble before first section
+    const h=nativeHeader(section,row);
+    if(h){header=h;continue;}
+    const nonempty=row.filter(v=>text(v));
+    if(nonempty.length===1&&normalized(nonempty[0])==='ASSINATURA')continue;
+    if(!header)throw new Error('Linha sem cabeçalho reconhecido no relatório geral: '+(index+1));
+    const part=normalizePn(row[header.pn]);
+    if(part==='DUPLICADO'||part.startsWith('EXCLUIR')){
+      if(byRow.has(index+1))throw new Error('Marcador inválido interpretado como material.');
+      continue;
+    }
+    const value=row[header.qtd];
+    const raw=text(value);
+    let quantity=typeof value==='number'?value:NaN;
+    if(typeof value!=='number'&&/^\d+(?:[.,]\d+)?$/.test(raw))quantity=Number(raw.replace(',','.'));
+    const item=byRow.get(index+1);
+    if(!item||!part||!location||location==='NÃO DEFINIDO'||!Number.isFinite(quantity)||quantity<0
+       ||Math.abs(quantity*1e6-Math.round(quantity*1e6))>1e-5
+       ||item.pn!==part||item.source_section!==section||item.localizacao!==location||Number(item.quantidade)!==quantity)
+       throw new Error('Linha do relatório geral requer revisão: '+(index+1));
+    if(section==='EQUIPAMENTOS'&&item.sn){
+      const k=JSON.stringify([part,String(item.sn).replace(/\s+/g,'')]);
+      if(quantity!==1||serials.has(k)||item.source_extra?.duplicate_serial_source_rows)
+        throw new Error('Identidade PN + SN ambígua ou quantidade diferente de um: '+(index+1));
+      serials.add(k);
+    }
+    recognized++;
+  }
+  if(sections.size!==2||recognized!==byRow.size)throw new Error('Relatório geral incompleto ou com linhas não reconhecidas.');
+  return {recognized,serials:serials.size};
+}
+
 module.exports = {
+  validateNativeCoverage,
   parsePpuInventoryRows,
   parseQuantity,
   normalizeLocation,

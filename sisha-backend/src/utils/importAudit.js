@@ -43,7 +43,11 @@ async function finalizeImportLog(logId, summary = {}) {
     finished_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from('import_logs').update(updatePayload).eq('id', logId);
+  // A completed R6 transaction owns its durable audit certificate. An interrupted
+  // HTTP response must not overwrite that success. PostgreSQL rechecks this
+  // predicate after waiting on the transaction's row lock.
+  const { error } = await supabase.from('import_logs').update(updatePayload).eq('id', logId)
+    .is('detalhes->r6_transaction', null);
   if (error) throw error;
 }
 

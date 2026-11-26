@@ -315,7 +315,7 @@ export default function ConsultaItens() {
                                                 <span>{formatQuantity(saldo.quantidade)} un • {saldo.origem_saldo === 'RECIBO_PENDENTE' ? simplifyReceiptLocation(saldo.localizacao, saldo.numero_recibo) : saldo.localizacao}</span>
                                                 {saldo.origem_saldo === 'RECIBO_PENDENTE'
                                                     ? saldo.locrec_consultivo
-                                                        ? <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} • {saldo.locrec_status === 'AGUARDANDO_PROCESSAMENTO' ? 'LOCREC sem direcionamento — HANGAR' : saldo.locrec_status === 'PROCESSAMENTO_PARCIAL' ? 'LOCREC parcialmente processado' : 'localização informada pelo LOCREC'}</span>
+                                                        ? <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} • {saldo.locrec_status === 'SALDO_REMANESCENTE_LOCAL_A_CONFIRMAR' ? 'Saldo restante do Recibo — localização a confirmar após incorporação' : saldo.locrec_status === 'AGUARDANDO_PROCESSAMENTO' ? 'LOCREC sem direcionamento — HANGAR' : saldo.locrec_status === 'PROCESSAMENTO_PARCIAL' ? 'LOCREC parcialmente processado' : 'localização informada pelo LOCREC'}</span>
                                                         : <span className="block mt-0.5">Recibo {saldo.numero_recibo || 'sem número'} — aguardando incorporação ao inventário oficial</span>
                                                     : saldo.origem_saldo === 'PPU_CUSTODIA_EXTERNA'
                                                         ? <span className="block mt-0.5">Custódia PPU • localização física em caixa no CEIMSPA • não disponível operacionalmente</span>

@@ -66,9 +66,14 @@ test('Importador: Saída PPU é histórica e não define local_destino',()=>{
 
 test('Inventário Geral PPU também alimenta identidade PN+SN do Livro sem inventar serial',()=>{
   const src=fs.readFileSync(path.join(__dirname,'../../src/controllers/importController.js'),'utf8');
-  assert.match(src,/equipamentosSerializados/);
-  assert.match(src,/importPpuInventoryEquipmentSnapshot/);
-  assert.match(src,/conflitos_localizacao/);
+  const service=fs.readFileSync(path.join(__dirname,'../../src/services/ppuReceiptReconciliationService.js'),'utf8');
+  const reader=fs.readFileSync(path.join(__dirname,'../../src/services/ppuCanonicalInventoryService.js'),'utf8');
+  const routes=fs.readFileSync(path.join(__dirname,'../../src/routes/importRoutes.js'),'utf8');
+  assert.match(src,/await importPpuR6/);
+  assert.match(service,/readCanonicalInventory/);
+  assert.match(routes,/importPpuInventoryEquipmentSnapshot/);
+  assert.match(reader,/pending\?null:identity/);
+  assert.match(reader,/document_rows:group/);
   const importer=fs.readFileSync(path.join(__dirname,'../../src/services/rawOperationalDocumentImportService.js'),'utf8');
   assert.match(importer,/source_type:'INVENTARIO_PPU'/);
   assert.match(importer,/confirmedTransition:false/);

@@ -1,0 +1,48 @@
+name: SISHA R6 isolated PostgreSQL
+on:
+  pull_request:
+    paths:
+      - 'sisha-backend/sql/migrations/**'
+      - 'sisha-backend/tests/sql/**'
+      - '.github/workflows/r6-postgres.yml'
+      - 'sisha-backend/src/services/ppuReceiptReconciliationService.js'
+permissions:
+  contents: read
+jobs:
+  r6-synthetic-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: fixture-only
+          POSTGRES_DB: sisha_r6_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sisha_r6_fixture"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: fixture-only
+      PGDATABASE: sisha_r6_fixture
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm isolated synthetic database
+        run: test "$PGDATABASE" = sisha_r6_fixture && psql -X -v ON_ERROR_STOP=1 -c 'select current_database()'
+      - name: Load synthetic schema and actual R5/R6 migrations
+        working-directory: sisha-backend
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -f tests/sql/r6b_fixture.sql
+          psql -X -v ON_ERROR_STOP=1 -f sql/migrations/20261126_R5_001_ppu_inventory_history.sql
+          psql -X -v ON_ERROR_STOP=1 -f sql/migrations/20261126_R6A_001_ppu_reconciliation_atomic.sql
+      - name: Run atomic rollback, replay and access checks
+        working-directory: sisha-backend
+        run: psql -X -v ON_ERROR_STOP=1 -f tests/sql/r6b_transaction.sql
+      - name: Run concurrent transactions
+        working-directory: sisha-backend
+        run: bash tests/sql/r6b_concurrency.sh

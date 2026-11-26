@@ -219,6 +219,17 @@ export default function Cadastro() {
         { key: 'atualizacoes', label: 'Atualizações', descricao: 'Veja quais documentos foram enviados ao SISHA e quando ocorreu a última atualização registrada.' },
     ];
     const [file, setFile] = useState(null);
+    const [ppuReviewFields, setPpuReviewFields] = useState({observedOn:'',previousOn:'',evidence:'',complete:false});
+    const [ppuReview, setPpuReview] = useState(null);
+    const [ppuApplied, setPpuApplied] = useState(null);
+    const [ppuStatus, setPpuStatus] = useState(null);
+    const [ppuStatusMsg, setPpuStatusMsg] = useState('');
+    const [ppuSyncBusy, setPpuSyncBusy] = useState(false);
+    const changePpuField = (key, value) => {
+        setPpuReviewFields(prev => ({...prev, [key]:value}));
+        setPpuReview(null);
+        setPpuApplied(null);
+    };
     const [tipoArquivo, setTipoArquivo] = useState('order_book');
     const [uploadCarregando, setUploadCarregando] = useState(false);
     const [uploadMsg, setUploadMsg] = useState(null);
@@ -241,6 +252,40 @@ export default function Cadastro() {
     const [locrec, setLocrec] = useState({ active: null, rows: [], summary: {} });
     const [locrecCarregando, setLocrecCarregando] = useState(false);
     const [locrecMsg, setLocrecMsg] = useState(null);
+    const [retroReview, setRetroReview] = useState(null);
+    const [retroSelection, setRetroSelection] = useState(null);
+    const [retroEvidence, setRetroEvidence] = useState('');
+    const [retroQuantity, setRetroQuantity] = useState('');
+    const [retroConfirmed, setRetroConfirmed] = useState(false);
+    const [retroBusy, setRetroBusy] = useState(false);
+    const [retroMsg, setRetroMsg] = useState(null);
+    const carregarHistoricoRecibos = async () => {
+        setRetroBusy(true); setRetroMsg(null); setRetroSelection(null); setRetroReview(null);
+        setRetroEvidence(''); setRetroQuantity(''); setRetroConfirmed(false);
+        try {
+            const response=await apiFetch('/import/locrec/reconciliacao/historico',{},token);
+            const result=await response.json();
+            if(!response.ok||result.status!=='success')throw new Error(result.message||'Conferência indisponível.');
+            setRetroReview(result.data);
+        } catch(e){setRetroMsg({error:true,text:e.message});}
+        finally {setRetroBusy(false);}
+    };
+    const confirmarHistoricoRecibo = async () => {
+        const quantity=Number(retroQuantity);
+        if(!retroSelection||!retroReview?.token||!retroConfirmed||!Number.isFinite(quantity)||quantity<=0||quantity>retroSelection.candidateQuantity||retroEvidence.trim().length<15||retroBusy)return;
+        setRetroBusy(true);setRetroMsg(null);
+        try{
+            const response=await apiFetch('/import/locrec/reconciliacao/historico',{
+                method:'POST',headers:{...buildAuthHeaders(token),'Content-Type':'application/json'},
+                body:JSON.stringify({token:retroReview.token,itemId:retroSelection.itemId,locrecId:retroSelection.locrecId,quantity,evidence:retroEvidence,confirmed:true})
+            },token);
+            const result=await response.json();
+            if(!response.ok||result.status!=='success'||result.data?.status!=='APPLIED')throw new Error(result.message||'Incorporação não confirmada.');
+            setRetroMsg({error:false,text:'Incorporação histórica registrada. Recarregue a conferência para revisar outro item.'});
+            carregarLocrec(false);
+        }catch(e){setRetroMsg({error:true,text:e.message+' Recarregue a conferência antes de repetir.'});}
+        finally{setRetroBusy(false);setRetroReview(null);setRetroSelection(null);setRetroConfirmed(false);setRetroEvidence('');setRetroQuantity('');}
+    };
 
     const [email, setEmail] = useState('');
     const [roleCadastro, setRoleCadastro] = useState('operador');
@@ -264,12 +309,53 @@ export default function Cadastro() {
     const [manualPreviewFile, setManualPreviewFile] = useState(null);
 
     const orientacaoUpload = orientacoesUploadPorTipo[tipoArquivo];
+    const carregarStatusPpu = async () => {
+        setPpuStatus(null); setPpuStatusMsg('');
+        try{
+            const response=await apiFetch('/import/ppu/reconciliacao/status',{},token);
+            const result=await response.json();
+            if(!response.ok||result.status!=='success')throw new Error(result.message||'Estado da reconciliação indisponível.');
+            setPpuStatus(result.data);
+        }catch(e){setPpuStatusMsg(e.message);}
+    };
+    useEffect(()=>{
+        if(tipoArquivo==='inventario_ppu'&&token)carregarStatusPpu();
+    },[tipoArquivo,token]);
+    const sincronizarLivroPpu = async () => {
+        if(!ppuStatus?.snapshotId||ppuSyncBusy||ppuStatus.bookSync?.state!=='PENDING')return;
+        const snapshotId=ppuStatus.snapshotId;
+        setPpuSyncBusy(true);setPpuStatusMsg('');
+        try{
+            // Each batch has a durable cursor and exclusive claim in the database.
+            // Closing this screen does not erase the remaining work.
+            for(;;){
+                const response=await apiFetch('/import/ppu/reconciliacao/livro',{
+                    method:'POST',headers:{...buildAuthHeaders(token),'Content-Type':'application/json'},
+                    body:JSON.stringify({snapshotId})
+                },token);
+                const result=await response.json();
+                if(!response.ok||result.status!=='success')throw new Error(result.message||'Lote do Livro não confirmado.');
+                setPpuStatus(prev=>({...prev,bookSync:result.data}));
+                if(result.data.retryRequired)throw new Error('Lote interrompido. Confira o estado e retome a sincronização.');
+                if(result.data.state==='COMPLETE')break;
+                if(result.data.state!=='PENDING')throw new Error('Estado do Livro requer conferência.');
+            }
+            setPpuStatusMsg('Sincronização do Livro concluída. Conflitos de localização permanecem para revisão.');
+        }catch(e){setPpuStatusMsg(e.message);}
+        finally{setPpuSyncBusy(false);}
+    };
 
     const handleFileChange = (e) => {
+        setPpuReview(null);
+        setPpuApplied(null);
+        setPpuReviewFields(prev=>({...prev,complete:false}));
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
             const nomeArquivo = e.target.files[0].name.toLowerCase();
-            if (/(?:^|[ _-])pan(?:[ _-]|\d)|service[ _-]*bulletin|lx[ _-]*pan/.test(nomeArquivo)) {
+            if (nomeArquivo.includes('inventarioppugeralloc') || nomeArquivo.includes('inventarioppuresumido')) {
+                setTipoArquivo('inventario_ppu');
+                setModalCeimspaConfirm(false);
+            } else if (/(?:^|[ _-])pan(?:[ _-]|\d)|service[ _-]*bulletin|lx[ _-]*pan/.test(nomeArquivo)) {
                 setTipoArquivo('sb');
                 setModalCeimspaConfirm(false);
             } else if (nomeArquivo.includes('locrec')) {
@@ -309,9 +395,47 @@ export default function Cadastro() {
         return map;
     }, new Map()).values());
 
+    const handlePpuReconciliation = async (preview) => {
+        if (!file || uploadCarregando || !ppuReviewFields.complete ) return;
+        if (!preview && (!ppuReview?.previewToken || ppuReview.status !== 'PREVIEW' && ppuReview.status !== 'PREVIEW_REUSED')) return;
+        setUploadCarregando(true);
+        setUploadMsg(null);
+        if (preview) { setPpuReview(null); setPpuApplied(null); }
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('tipoArquivo', 'inventario_ppu');
+        if (!preview && ppuReview?.observedOn) formData.append('dataInventario', ppuReview.observedOn);
+        formData.append('dataInventarioAnterior', ppuReviewFields.previousOn);
+        formData.append('referenciaDataAnterior', ppuReviewFields.evidence);
+        formData.append('inventarioCompleto', 'true');
+        formData.append('simularReconciliacao', preview ? 'true' : 'false');
+        if (!preview) formData.append('previewToken', ppuReview.previewToken);
+        try {
+            const response = await apiFetch('/import/ppu/reconciliacao', {
+                method:'POST', headers:buildAuthHeaders(token), body:formData
+            }, token);
+            const data = await response.json();
+            const result = data.reconciliacao;
+            if (!response.ok || data.status !== 'success' || !result ||
+                (preview ? !['PREVIEW','PREVIEW_REUSED'].includes(result.status) : !['APPLIED','REUSED'].includes(result.status))) {
+                throw new Error(data.message || 'Não foi possível confirmar o resultado da reconciliação.');
+            }
+            if (preview) setPpuReview(result);
+            else { setPpuReview(null); setPpuApplied(result); setFile(null); carregarAtualizacoes(true); carregarStatusPpu(); }
+            setUploadMsg({tipo:'success',texto:data.message});
+        } catch (error) {
+            setPpuReview(null);
+            setUploadMsg({tipo:'error',texto:error.message || 'Falha na reconciliação. Consulte a trilha antes de repetir.'});
+        } finally { setUploadCarregando(false); }
+    };
+
     const handleUpload = async (e) => {
         e.preventDefault();
         if (!file) return;
+        if (tipoArquivo === 'inventario_ppu') {
+            if(ppuStatus?.enabled===true)return handlePpuReconciliation(true);
+            setUploadMsg({tipo:'error',texto:'Reconciliação indisponível. Não envie o relatório pelo fluxo antigo.'});return;
+        }
         setUploadCarregando(true);
         setUploadMsg(null);
 
@@ -971,7 +1095,8 @@ export default function Cadastro() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <select
                             value={tipoArquivo}
-                            onChange={(e) => setTipoArquivo(e.target.value)}
+                            disabled={uploadCarregando}
+                            onChange={(e) => {setTipoArquivo(e.target.value); setPpuReview(null); setPpuApplied(null);}}
                             className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100"
                         >
                             <option value="order_book">Order Book</option>
@@ -1002,6 +1127,7 @@ export default function Cadastro() {
                         <input
                             type="file"
                             onChange={handleFileChange}
+                            disabled={uploadCarregando}
                             className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100 file:text-slate-900"
                         />
                     </div>
@@ -1019,13 +1145,72 @@ export default function Cadastro() {
                         )}
                     </div>
 
+                    {tipoArquivo === 'inventario_ppu' && (
+                        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
+                            <p className="text-sm font-bold">InventarioPPUGeralLoc — envie o relatório original, sem edição.</p>
+                            {ppuStatusMsg&&<p className="text-sm font-bold">{ppuStatusMsg}</p>}
+                            {!!ppuStatus?.documentReview?.issues?.length&&<details className="rounded-lg border border-amber-300 p-3">
+                                <summary className="cursor-pointer text-sm font-bold">{ppuStatus.documentReview.issues.length} grupos seriais em revisão no inventário vigente</summary>
+                                <p className="text-xs">Evidências preservadas na versão histórica; não classifique a localização técnica como disponível. Corrija a origem documental e envie um novo relatório completo.</p>
+                                <div className="max-h-44 overflow-auto text-xs space-y-1">{ppuStatus.documentReview.issues.map((x,i)=><div key={i}>{x.pn} — {x.rows.map(r=>`SN ${r.sn_original||'não informado'} • ${r.localizacao} • linha ${r.source_row} • QNTD ${r.quantidade}`).join(' / ')}</div>)}</div>
+                            </details>}
+                            <button type="button" disabled={ppuSyncBusy||uploadCarregando} onClick={carregarStatusPpu} className="text-xs underline">Consultar situação da reconciliação</button>
+                            {ppuStatus?.enabled&&ppuStatus.bookSync?.state!=='COMPLETE'&&<div className="rounded-xl border border-amber-300 p-3 space-y-2">
+                                <p className="font-black text-sm">Estoque atualizado; Livro de Equipamentos com sincronização pendente.</p>
+                                <p className="text-xs">{ppuStatus.bookSync?.cursor||0} de {ppuStatus.bookSync?.total||0} evidências processadas.</p>
+                                {ppuStatus.bookSync?.state==='PENDING'?<button type="button" disabled={ppuSyncBusy||uploadCarregando} onClick={sincronizarLivroPpu} className="rounded-lg bg-blue-700 text-white px-3 py-2 text-xs font-bold disabled:opacity-50">{ppuSyncBusy?'SINCRONIZANDO...':'SINCRONIZAR / RETOMAR LIVRO'}</button>:<p className="text-xs">Lote em andamento. Se persistir após uma interrupção, solicite conferência técnica; não há retomada concorrente automática.</p>}
+                            </div>}
+                            {ppuStatus?.enabled ? <>
+                                <p className="text-xs text-slate-600 dark:text-slate-300">Primeiro simule, depois confira as quantidades. A data operacional deve vir do levantamento, não da data de criação do arquivo.</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <p className="text-xs">A data do inventário novo será lida automaticamente do cabeçalho.</p>
+                                    <label className="text-xs font-bold">Data operacional anterior (necessária na primeira reconciliação)
+                                        <input type="date" value={ppuReviewFields.previousOn} disabled={uploadCarregando} onChange={e=>changePpuField('previousOn',e.target.value)} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                </div>
+                                <label className="text-xs font-bold block">Referência documental da data anterior (na primeira reconciliação)
+                                    <input value={ppuReviewFields.evidence} disabled={uploadCarregando} onChange={e=>changePpuField('evidence',e.target.value)} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900" placeholder="Documento ou registro que confirma a data"/>
+                                </label>
+                                <label className="flex items-start gap-2 text-sm font-bold"><input type="checkbox" checked={ppuReviewFields.complete} disabled={uploadCarregando} onChange={e=>changePpuField('complete',e.target.checked)}/>Confirmo que o relatório corresponde ao inventário completo, sem filtros ou exclusões manuais.</label>
+                                {ppuReview && <div className="rounded-xl border border-blue-200 dark:border-blue-800 p-3 space-y-3">
+                                    <p className="font-black">Prévia — nenhuma baixa realizada</p>
+                                    {ppuReview.document&&<p className="text-sm">Data do relatório: {ppuReview.observedOn} • {ppuReview.document.equipmentRows} equipamentos (linhas documentais) • {ppuReview.document.spareRows} sobressalentes • {ppuReview.document.excludedMarkers} marcadores excluídos.</p>}
+                                    {!!ppuReview.serialIssues?.length&&<details open className="rounded-lg border border-amber-300 p-3">
+                                        <summary className="cursor-pointer font-bold">{ppuReview.serialIssues.length} grupos de identidade serial a confirmar</summary>
+                                        <p className="text-xs">Registros e quantidades documentais preservados no histórico. Não entram na disponibilidade nem geram movimentação automática do Livro até conferência.</p>
+                                        <ul className="max-h-44 overflow-auto text-xs">{ppuReview.serialIssues.map((x,i)=><li key={i}>{x.pn} • SN {x.sn||'não informado'} • linhas {x.rows.join(', ')} • {x.locations.join(' / ')} • {x.reasons.join(', ')}</li>)}</ul>
+                                    </details>}
+                                    <p className="text-sm">{ppuReview.rows} linhas do inventário • {ppuReview.allocations} alocações propostas. Quantidades de materiais com unidades diferentes não são somadas para conferência física.</p>
+                                    <div className="max-h-64 overflow-auto"><table className="w-full text-xs"><thead><tr><th className="text-left p-1">Recibo</th><th className="text-left p-1">PN</th><th>Incorporar</th><th>Restante</th><th className="text-left">Evidência</th></tr></thead><tbody>
+                                        {(ppuReview.plans||[]).map((p,i)=><tr key={i} className="border-t border-slate-200 dark:border-slate-700"><td className="p-1">{p.receiptNo}</td><td className="p-1">{p.pn}</td><td className="text-center">{p.quantity}</td><td className="text-center">{p.pending}</td><td>{p.method==='LOCREC'?'LOCREC':p.method==='QTD_EXATA'?'Quantidade exata (inferência)':'Recibo mais antigo (inferência)'}</td></tr>)}
+                                    </tbody></table></div>
+                                    {!!ppuReview.unclassifiedLocations?.length && <details open className="rounded-lg border border-amber-300 p-3">
+                                        <summary className="cursor-pointer font-bold text-sm">{ppuReview.unclassifiedLocations.length} localizações novas — disponibilidade a confirmar</summary>
+                                        <p className="text-xs mt-2">As linhas abaixo serão preservadas no inventário, mas não serão consideradas disponíveis no Radar nem gerarão baixa automática de Recibos até a classificação no painel Localizações do PPU.</p>
+                                        <ul className="max-h-36 overflow-auto mt-2 text-xs space-y-1">{ppuReview.unclassifiedLocations.map(l=><li key={l.location}>{l.location} — {l.rows} linha(s)</li>)}</ul>
+                                    </details>}
+                                    {ppuReview.serialEvidenceRows>0&&<p className="text-sm font-bold">Após a atualização, {ppuReview.serialEvidenceRows} evidências PN + SN serão processadas no Livro. Não haverá baixa automática de Recibos serializados.</p>}
+                                    <details><summary className="font-bold cursor-pointer text-sm">Pendências históricas — somente conferência ({ppuReview.retroactive?.candidates?.length||0})</summary>
+                                        <p className="text-xs mt-2">Não serão baixadas nesta importação. Quantidade candidata não comprova entrada física; equipamentos exigem identidade PN + SN.</p>
+                                        <div className="max-h-48 overflow-auto"><table className="w-full text-xs"><thead><tr><th>Recibo</th><th>PN</th><th>Saldo após prévia</th><th>Candidato</th><th>Motivo</th></tr></thead><tbody>
+                                            {(ppuReview.retroactive?.candidates||[]).map((p,i)=><tr key={i} className="border-t"><td>{p.receiptNo}</td><td>{p.pn}</td><td>{p.remaining}</td><td>{p.candidateQuantity||'—'}</td><td>{({SERIAL_EXIGE_IDENTIDADE:'Identidade serial a conferir',DOCUMENTO_OU_GRUPO_AMBIGUO:'Documento/grupo ambíguo',DATA_LOCAL_OU_QUANTIDADE_DIVERGENTE:'Data, local ou quantidade divergente',EVIDENCIA_ANTERIOR_AO_INVENTARIO:'Evidência anterior',EVIDENCIA_NAO_CONSUMIDA:'Evidência não consumida'})[p.reason]||'Revisão necessária'}</td></tr>)}
+                                        </tbody></table></div>
+                                    </details>
+                                    <button type="button" disabled={uploadCarregando} onClick={()=>handlePpuReconciliation(false)} className="rounded-xl bg-emerald-700 text-white px-4 py-2 font-black disabled:opacity-50">CONFIRMAR IMPORTAÇÃO E INCORPORAÇÕES</button>
+                                    <button type="button" disabled={uploadCarregando} onClick={()=>setPpuReview(null)} className="ml-2 text-sm underline">Cancelar conferência</button>
+                                </div>}
+                                {ppuApplied && <div className="rounded-xl border border-emerald-300 p-3 text-sm font-bold">{ppuApplied.status==='REUSED'?'Arquivo já aplicado, sem repetição de baixas.':`Inventário atualizado: ${ppuApplied.rows} linhas, ${ppuApplied.allocations||0} alocações registradas.`}</div>}
+                            </> : <p className="text-sm">A atualização do inventário está bloqueada enquanto a reconciliação não estiver habilitada.</p>}
+                        </div>
+                    )}
+
                     <div className="flex justify-end">
                             <button
                                 type="submit"
-                                disabled={!file || uploadCarregando}
+                                disabled={!file || uploadCarregando || ppuSyncBusy || (tipoArquivo==='inventario_ppu' && (!ppuStatus?.enabled || !ppuReviewFields.complete || ppuStatus.bookSync?.state!=='COMPLETE'))}
                                 className="bg-blue-600 text-white px-8 py-3 rounded-xl font-black hover:bg-blue-700 disabled:opacity-50"
                             >
-                                {uploadCarregando ? 'ENVIANDO...' : 'ENVIAR ARQUIVO'}
+                                {uploadCarregando ? 'ENVIANDO...' : tipoArquivo==='inventario_ppu' && ppuStatus?.enabled ? 'SIMULAR RECONCILIAÇÃO' : 'ENVIAR ARQUIVO'}
                             </button>
                         </div>
 
@@ -1489,11 +1674,11 @@ export default function Cadastro() {
                                     <tbody>
                                         {localizacoesFiltradas.map((row) => (
                                             <tr key={row.localizacao_normalizada} className="border-t border-slate-200 dark:border-slate-800 align-top">
-                                                <td className="p-3"><input type="checkbox" checked={row.contabiliza_ppu !== false} onChange={(event) => alternarLocalizacaoPpu(row.localizacao_normalizada, event.target.checked)} className="h-5 w-5 accent-blue-600" /></td>
+                                                <td className="p-3"><input type="checkbox" checked={row.contabiliza_ppu !== false} disabled={row.localizacao_normalizada==='IDENTIDADE SERIAL A CONFIRMAR'} onChange={(event) => alternarLocalizacaoPpu(row.localizacao_normalizada, event.target.checked)} className="h-5 w-5 accent-blue-600" /></td>
                                                 <td className="p-3 font-black text-slate-900 dark:text-slate-100 min-w-44">{row.localizacao_exibicao}</td>
                                                 <td className="p-3 min-w-44">
                                                     {row.contabiliza_ppu !== false ? <span className="font-black text-blue-700">PPU</span> : (
-                                                        <select value={row.destino_contabilizacao || 'FORA_LINHA'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'destino_contabilizacao', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
+                                                        <select value={row.destino_contabilizacao || 'FORA_LINHA'} disabled={row.localizacao_normalizada==='IDENTIDADE SERIAL A CONFIRMAR'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'destino_contabilizacao', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
                                                             <option value="FORA_LINHA">Fora da linha de voo</option>
                                                             <option value="CEIMSPA">CEIMSPA</option>
                                                         </select>
@@ -1501,7 +1686,7 @@ export default function Cadastro() {
                                                 </td>
                                                 <td className="p-3 min-w-52">
                                                     {row.contabiliza_ppu !== false ? <span className="font-bold text-emerald-700">Disponível</span> : (
-                                                        <select value={row.situacao_operacional || 'A_CONFIRMAR'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'situacao_operacional', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
+                                                        <select value={row.situacao_operacional || 'A_CONFIRMAR'} disabled={row.localizacao_normalizada==='IDENTIDADE SERIAL A CONFIRMAR'} onChange={(event) => atualizarClassificacaoLocalizacao(row.localizacao_normalizada, 'situacao_operacional', event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white p-2 font-bold text-slate-900">
                                                             <option value="A_CONFIRMAR">A confirmar</option>
                                                             <option value="AGUARDANDO_REPARO">Aguardando reparo</option>
                                                             <option value="EM_REPARO">Em reparo</option>
@@ -1858,6 +2043,32 @@ export default function Cadastro() {
                                 <div className="rounded-xl bg-orange-50 dark:bg-orange-950/30 p-3 text-orange-800 dark:text-orange-200">Hangar / aguardando: {locrec.summary?.hangar_groups ?? locrec.summary?.pending_groups ?? 0}</div>
                                 <div className="rounded-xl bg-red-50 dark:bg-red-950/30 p-3 text-red-800 dark:text-red-200">Divergências: {(locrec.summary?.divergence_groups || 0) + (locrec.summary?.missing_receipt_groups || 0)}</div>
                             </div>
+                            <details className="rounded-xl border border-slate-200 dark:border-slate-700 p-3 space-y-3">
+                                <summary className="font-black cursor-pointer text-sm">Recibos antigos — conferência de incorporações</summary>
+                                <p className="text-xs">O LOCREC indica processamento, mas não prova sozinho que o item entrou no estoque. Confirme individualmente a entrada documental. O estoque oficial não será alterado.</p>
+                                <button type="button" disabled={retroBusy} onClick={carregarHistoricoRecibos} className="rounded-lg bg-blue-700 text-white px-3 py-2 text-xs font-bold disabled:opacity-50">CONFERIR SALDOS HISTÓRICOS</button>
+                                {retroMsg && <p className={retroMsg.error?'text-red-600 text-sm':'text-emerald-700 text-sm'}>{retroMsg.text}</p>}
+                                {retroReview?.status==='WAITING_BOOK_SYNC'&&<p className="text-sm font-bold">Conclua primeiro a sincronização do Livro de Equipamentos.</p>}
+                                {retroReview?.status==='WAITING_NEW_INVENTORY'&&<p className="text-sm font-bold">Conclua primeiro a importação de um inventário com data operacional confirmada.</p>}
+                                {retroReview?.status==='REVIEW_READY'&&<>
+                                    <p className="text-xs">{retroReview.candidates.length} grupos para revisão. Apenas candidatos com quantidade validável permitem selecionar uma incorporação.</p>
+                                    <div className="max-h-56 overflow-auto"><table className="w-full text-xs"><thead><tr><th>Recibo</th><th>PN</th><th>Saldo</th><th>Qtd candidata</th><th>Revisão</th></tr></thead><tbody>
+                                        {retroReview.candidates.map((c,i)=><tr key={i} className="border-t border-slate-200 dark:border-slate-700"><td>{c.receiptNo}</td><td>{c.pn}</td><td>{c.remaining}</td><td>{c.candidateQuantity||'—'}</td><td>{c.itemId&&c.locrecId&&c.candidateQuantity>0?<button type="button" disabled={retroBusy} onClick={()=>{setRetroSelection(c);setRetroQuantity(String(c.candidateQuantity));setRetroEvidence('');setRetroConfirmed(false);}} className="text-blue-600 underline font-bold">Conferir</button>:'Pendente de evidência'}</td></tr>)}
+                                    </tbody></table></div>
+                                </>}
+                                {retroSelection&&<div className="border rounded-xl p-3 space-y-2">
+                                    <p className="font-bold text-sm">Recibo {retroSelection.receiptNo} • PN {retroSelection.pn}</p>
+                                    <label className="block text-xs">Quantidade comprovada (máximo {retroSelection.candidateQuantity})
+                                        <input type="number" min="0" max={retroSelection.candidateQuantity} step="0.000001" value={retroQuantity} disabled={retroBusy} onChange={e=>{setRetroQuantity(e.target.value);setRetroConfirmed(false);}} className="block rounded border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                    <label className="block text-xs">Referência documental da entrada efetiva no estoque (não apenas a coincidência do PN)
+                                        <textarea maxLength={2000} value={retroEvidence} disabled={retroBusy} onChange={e=>{setRetroEvidence(e.target.value);setRetroConfirmed(false);}} className="block w-full rounded border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                    <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retroConfirmed} disabled={retroBusy} onChange={e=>setRetroConfirmed(e.target.checked)}/>Conferi a entrada efetiva desta quantidade e autorizo reduzir somente o saldo temporário deste Recibo.</label>
+                                    <button type="button" disabled={retroBusy||!retroConfirmed||retroEvidence.trim().length<15||!(Number(retroQuantity)>0&&Number(retroQuantity)<=retroSelection.candidateQuantity)} onClick={confirmarHistoricoRecibo} className="rounded-lg bg-emerald-700 px-3 py-2 text-white text-xs font-black disabled:opacity-50">REGISTRAR INCORPORAÇÃO</button>
+                                    <button type="button" disabled={retroBusy} onClick={()=>setRetroSelection(null)} className="ml-2 text-xs underline">Cancelar</button>
+                                </div>}
+                            </details>
                             {locrecMsg && <p className={`font-bold ${locrecMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>{locrecMsg.texto}</p>}
                             {locrecCarregando ? <p className="font-bold text-slate-500">CARREGANDO...</p> : null}
                             {!locrecCarregando && !(locrec.rows || []).length ? (
