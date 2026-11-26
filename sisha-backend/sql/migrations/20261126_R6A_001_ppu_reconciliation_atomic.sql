@@ -232,4 +232,109 @@ end;
 $$;
 revoke all on function public.sisha_ppu_r6_apply(text,text,text,uuid,date,date,text,boolean,jsonb,jsonb,text) from public,anon,authenticated,service_role;
 grant execute on function public.sisha_ppu_r6_apply(text,text,text,uuid,date,date,text,boolean,jsonb,jsonb,text) to service_role;
+
+-- R7B1: individually confirmed historical incorporation. No inventory or Livro write.
+create function public.sisha_ppu_r7_retro_apply(
+ p_context_token text,p_item_id bigint,p_locrec_id bigint,p_quantity numeric,
+ p_evidence text,p_actor text
+) returns jsonb
+language plpgsql security invoker set search_path=pg_catalog set timezone='UTC'
+as $
+declare
+ c jsonb;
+ s public.ppu_inventario_snapshots%rowtype;
+ i public.recebimento_itens%rowtype;
+ r public.recebimentos%rowtype;
+ d record;
+ v_pn text;
+ v_rec text;
+ v_loc text;
+ v_day date;
+ v_claim numeric;
+ v_stock numeric;
+ v_before numeric;
+ v_after numeric;
+begin
+ if p_context_token is null or p_context_token !~ '^[0-9a-f]{64}
+   or p_item_id is null or p_locrec_id is null or p_quantity is null
+   or p_quantity::text in ('NaN','Infinity','-Infinity') or p_quantity<=0
+   or p_quantity<>round(p_quantity,6)
+   or length(btrim(coalesce(p_evidence,'')))<15
+   or length(p_evidence)>2000 or nullif(btrim(p_actor),'') is null
+ then raise exception 'R7B: quantidade e evidencia de entrada efetiva obrigatorias'; end if;
+ perform pg_advisory_xact_lock(hashtext('sisha_ppu_inventory_reconciliation')::bigint);
+ lock table public.estoque_ppu,public.ppu_localizacoes_config in share row exclusive mode;
+ lock table public.recebimentos,public.recebimento_itens,public.equipamentos_serializados,
+   public.locrec_importacoes,public.locrec_itens in share row exclusive mode;
+ c:=public.sisha_ppu_r6_context();
+ if c->>'token' is distinct from p_context_token then raise exception 'R7B: contexto mudou; revisar novamente'; end if;
+ select h.* into strict s from public.ppu_inventario_snapshots h where h.id=(c->>'snapshot_id')::uuid;
+ if s.snapshot_type<>'IMPORTACAO' or s.observed_on is null then
+   raise exception 'R7B: primeiro concluir inventario datado'; end if;
+ select x.* into strict i from public.recebimento_itens x where x.id=p_item_id;
+ select x.* into strict r from public.recebimentos x where x.id=i.recebimento_id;
+ if not i.ativo or not r.ativo or not i.contabiliza_pelo_recibo
+   or i.condicao_item<>'RECEBIDO_DISPONIVEL' or i.tipo_item<>'SOBRESSALENTE'
+   or i.equipamento_id is not null or nullif(btrim(i.sn),'') is not null
+   or coalesce(i.destino_previsto,'PPU')<>'PPU' or coalesce(i.destino_estoque,'PPU')<>'PPU'
+   or coalesce(i.validade_status,'NAO_INFORMADA') in ('VENCIDO','REVISAR','SEM_ESTOQUE')
+   or r.data_recebimento is null or r.data_recebimento>=s.observed_on
+ then raise exception 'R7B: item nao elegivel'; end if;
+ v_pn:=upper(regexp_replace(btrim(i.pn),'[[:space:]]+','','g'));
+ v_rec:=replace(upper(regexp_replace(btrim(r.numero_recibo),'[[:space:]]+','','g')),chr(92),'/');
+ if v_pn in ('LIMPEZA','DUPLICADO','NULL','PN') or v_pn like 'EXCLUIR%' or v_pn='' then raise exception 'R7B: PN invalido'; end if;
+ if exists(select 1 from public.equipamentos_serializados e where e.ativo
+    and upper(regexp_replace(btrim(e.pn),'[[:space:]]+','','g'))=v_pn)
+ or exists(select 1 from public.recebimento_itens j where j.ativo
+    and upper(regexp_replace(btrim(j.pn),'[[:space:]]+','','g'))=v_pn
+    and (j.tipo_item='EQUIPAMENTO' or j.equipamento_id is not null or nullif(btrim(j.sn),'') is not null))
+ or exists(select 1 from public.ppu_inventario_snapshots h cross join lateral jsonb_to_recordset(h.rows_payload) x(pn text,sn text)
+    where nullif(btrim(x.sn),'') is not null and upper(regexp_replace(btrim(x.pn),'[[:space:]]+','','g'))=v_pn)
+ then raise exception 'R7B: PN serializado exige identidade individual'; end if;
+ if (select count(*) from public.recebimento_itens j join public.recebimentos r2 on r2.id=j.recebimento_id
+   where j.ativo and r2.ativo and upper(regexp_replace(btrim(j.pn),'[[:space:]]+','','g'))=v_pn
+   and replace(upper(regexp_replace(btrim(r2.numero_recibo),'[[:space:]]+','','g')),chr(92),'/')=v_rec)<>1
+ then raise exception 'R7B: grupo Recibo PN ambiguo'; end if;
+ select l.* into strict d from public.v_sisha_locrec_atual l where l.id=p_locrec_id;
+ if replace(upper(regexp_replace(btrim(d.numero_recibo),'[[:space:]]+','','g')),chr(92),'/') is distinct from v_rec
+   or upper(regexp_replace(btrim(d.pn),'[[:space:]]+','','g')) is distinct from v_pn
+   or (select count(*) from public.v_sisha_locrec_atual l
+      where replace(upper(regexp_replace(btrim(l.numero_recibo),'[[:space:]]+','','g')),chr(92),'/')=v_rec
+      and upper(regexp_replace(btrim(l.pn),'[[:space:]]+','','g'))=v_pn)<>1
+   or d.destino_indicado is distinct from 'PPU'
+   or d.qtd_documental is distinct from i.quantidade
+   or d.qtd_auditada_aplicada is null or d.qtd_auditada_aplicada<=0 or d.qtd_auditada_aplicada>i.quantidade
+   or d.data_auditoria is null or d.data_auditoria !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}($|T)'
+ then raise exception 'R7B: evidencia LOCREC invalida ou ambigua'; end if;
+ v_day:=left(d.data_auditoria,10)::date;
+ if v_day<r.data_recebimento or v_day>s.observed_on then raise exception 'R7B: cronologia divergente'; end if;
+ v_loc:=public.sisha_normalize_location(d.loc_escolhida);
+ if v_loc is null or v_loc in ('','NÃO DEFINIDO','NAO DEFINIDO','CONFLITO DE LOCALIZAÇÃO','CONFLITO DE LOCALIZACAO')
+   or not exists(select 1 from public.ppu_localizacoes_config k where k.localizacao_normalizada=v_loc and k.ativo and k.contabiliza_ppu and k.destino_contabilizacao='PPU')
+ then raise exception 'R7B: local nao elegivel'; end if;
+ select coalesce(sum(l.qtd_auditada_aplicada),0) into v_claim from public.v_sisha_locrec_atual l
+ where l.destino_indicado='PPU' and l.qtd_auditada_aplicada>0
+ and upper(regexp_replace(btrim(l.pn),'[[:space:]]+','','g'))=v_pn and public.sisha_normalize_location(l.loc_escolhida)=v_loc;
+ select coalesce(sum(x.quantidade),0) into v_stock from public.estoque_ppu x
+ where x.quantidade>0 and upper(regexp_replace(btrim(x.pn),'[[:space:]]+','','g'))=v_pn and public.sisha_normalize_location(x.localizacao)=v_loc;
+ v_before:=coalesce(i.quantidade_inventariada,0);
+ v_after:=v_before+p_quantity;
+ if v_stock<v_claim or v_after>i.quantidade or v_after>d.qtd_auditada_aplicada then
+   raise exception 'R7B: quantidade insuficiente, disputada ou ja incorporada'; end if;
+ update public.recebimento_itens set quantidade_inventariada=v_after,contabiliza_pelo_recibo=(v_after<quantidade),
+    destino_estoque='PPU',inventariado_em=now(),inventariado_por_email=p_actor where id=i.id;
+ insert into public.recebimento_eventos(recebimento_id,recebimento_item_id,tipo_evento,detalhe,created_by_email)
+ values(r.id,i.id,'ITEM_INCORPORACAO_ESTOQUE_AJUSTADA',
+ jsonb_build_object('origem','R7_RETRO_PPU','snapshot_id',s.id,'observed_on',s.observed_on,
+   'locrec_id',p_locrec_id,'pn',i.pn,'quantidade_anterior',v_before,'quantidade_nova',v_after,
+   'quantidade_incorporada',p_quantity,'saldo_temporario_anterior',i.quantidade-v_before,
+   'saldo_temporario_novo',i.quantidade-v_after,'destino_estoque','PPU','metodo','REVISAO_DOCUMENTAL',
+   'localizacao_candidata',v_loc,'referencia_entrada_confirmada',btrim(p_evidence),
+   'origem_fisica_comprovada',false,'natureza','REVISAO_HUMANA_DOCUMENTAL'),p_actor);
+ return jsonb_build_object('status','APPLIED','itemId',i.id,'quantity',p_quantity,'pending',i.quantidade-v_after);
+end;
+$;
+revoke all on function public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text) from public,anon,authenticated,service_role;
+grant execute on function public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text) to service_role;
+
 commit;
