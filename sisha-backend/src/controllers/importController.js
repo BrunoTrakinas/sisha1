@@ -380,7 +380,7 @@ exports.importData = async (req, res) => {
 
         if (!req.file) return respondError(400, 'Nenhum arquivo enviado.');
 
-        const tipoArquivo = req.body.tipoArquivo || 'order_book'; 
+        const tipoArquivo = req.ppuReconciliationRequest ? 'inventario_ppu' : (req.body.tipoArquivo || 'order_book'); 
         const originalNameLower = String(req.file?.originalname || '').toLowerCase();
         const isPdfFile = originalNameLower.endsWith('.pdf') || req.file?.mimetype === 'application/pdf';
         const isLegacyDocFile = originalNameLower.endsWith('.doc');
@@ -431,7 +431,11 @@ exports.importData = async (req, res) => {
                 });
             });
 
+            if (req.ppuReconciliationRequest && process.env.PPU_RECEIPT_RECONCILIATION_ENABLED !== 'true') {
+                return respondError(503, 'Reconciliação ainda não habilitada. Nenhum inventário foi alterado.', { tabelaAlvo: 'estoque_ppu' });
+            }
             if (process.env.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true') {
+                if (!req.ppuReconciliationRequest) return respondError(409, 'Use a conferência de reconciliação do inventário PPU.', { tabelaAlvo: 'estoque_ppu' });
                 // No fallback to the legacy non-atomic replacement after activation.
                 // R7 will supply explicit operational dates and completeness via the existing upload form.
                 if (req.body?.inventarioCompleto !== 'true' || !req.body?.dataInventario) {
@@ -445,6 +449,7 @@ exports.importData = async (req, res) => {
                         previousObservedOn: req.body.dataInventarioAnterior,
                         previousDateEvidence: req.body.referenciaDataAnterior,
                         preview: req.body.simularReconciliacao === 'true',
+                        previewToken: req.body.previewToken,
                     },
                 });
                 const preview = result.status.startsWith('PREVIEW');
