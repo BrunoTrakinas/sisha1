@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview}=require('../../src/services/ppuReceiptReconciliationService');
+const {buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview,getBookSyncStatus,continueBookSync}=require('../../src/services/ppuReceiptReconciliationService');
 const row=(q,localizacao='A-1',sn=null)=>({pn:'P1',quantidade:q,localizacao,sn});
 const p=(localizacao_normalizada,contabiliza_ppu=true)=>({localizacao_normalizada,ativo:true,contabiliza_ppu});
 const rec=(id,q,extra={})=>({id,numero_recibo:String(id),ativo:true,data_recebimento:'2026-10-01',recebimento_itens:[{id:id*10,pn:'P1',ativo:true,quantidade:q,quantidade_inventariada:0,contabiliza_pelo_recibo:true,condicao_item:'RECEBIDO_DISPONIVEL',tipo_item:'SOBRESSALENTE',...extra}]});
@@ -128,4 +128,42 @@ test('R7B1 historical review requires dated inventory, individual evidence and a
  assert.equal(calls.filter(c=>c.n==='sisha_ppu_r7_retro_apply').length,1);
  current={...c,source_file_sha256:null,previous_observed_on:null};
  assert.equal((await getRetroactiveReview(db,actor)).status,'WAITING_NEW_INVENTORY');
+});
+
+test('R7B2 native report preserves SN and source row without using quantity to debit its PN',async()=>{
+ const {parsePpuInventoryRows,validateNativeCoverage}=require('../../src/services/ppuInventoryParserService');
+ const raw=[['EQUIPAMENTOS'],['LOCALIZAÇÃO : Z'],['PN','SN','QNTD'],['P-SERIAL','S1',1],['SOBRESSALENTES'],['LOCALIZAÇÃO : A-1'],['PN','QNTD'],['P1',2]];
+ const parsed=parsePpuInventoryRows(raw);
+ assert.deepEqual(validateNativeCoverage(parsed,raw,1),{recognized:2,serials:1});
+ const bad=[...raw.slice(0,3),['P-SERIAL','S1',2],...raw.slice(4)];
+ assert.throws(()=>validateNativeCoverage(parsePpuInventoryRows(bad),bad,1));
+ const duplicate=[...raw.slice(0,4),['P-SERIAL','S1',1],...raw.slice(4)];
+ assert.throws(()=>validateNativeCoverage(parsePpuInventoryRows(duplicate),duplicate,1));
+ const serialReceipt={...rec(2,1,{sn:'S1',tipo_item:'EQUIPAMENTO'}),recebimento_itens:[{...rec(2,1,{sn:'S1',tipo_item:'EQUIPAMENTO'}).recebimento_itens[0],pn:'P-SERIAL'}]};
+ const c=context({receipts:[rec(1,2),serialReceipt]});
+ const rows=parsed.items.map(({pn,localizacao,quantidade,sn,nsn_pi,nomenclatura})=>({pn,localizacao,quantidade,sn,nsn_pi,nomenclatura}));
+ const calls=[];
+ const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r6_context'?c:{status:'APPLIED',book_sync:{state:'PENDING'}}};}};
+ const args={supabase:db,parsed,rows,rawRows:raw,sheetCount:1,buffer:Buffer.from('native-fixture'),fileName:'fixture.xls',logId:'fixture',user:{email:'fixture@example.invalid'},options:{...opts,preview:true}};
+ const preview=await importPpuR6(args);
+ assert.equal(preview.serialEvidenceRows,1);assert.equal(preview.plans.length,1);
+ assert.ok(preview.plans.every(p=>p.pn==='P1'));
+ await importPpuR6({...args,options:{...opts,previewToken:preview.previewToken}});
+ const write=calls.find(c=>c.n==='sisha_ppu_r6_apply');
+ assert.equal(write.args.p_rows[0].sn,'S1');assert.equal(write.args.p_rows[0].source_row,4);
+});
+test('R7B2 Livro sync uses existing source identity and acknowledges only a complete batch',async()=>{
+ const sourceHash='a'.repeat(64),items=[{pn:'P-SERIAL',sn:'S1',source_row:4}];
+ const claim={state:'RUNNING',attempt_id:'attempt',items,sourceHash,fileName:'fixture.xls',capturedAt:'2025-04-01T00:00:00Z',observedOn:'2025-03-31'};
+ const calls=[];
+ const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r7_book_claim'?claim:{state:args.p_ok?'COMPLETE':'PENDING',cursor:args.p_ok?1:0}};}};
+ const ok=await continueBookSync(db,'fixture@example.invalid','snapshot',async(parsed,options)=>{
+    assert.deepEqual(parsed.items,items);assert.equal(options.sourceHash,sourceHash);assert.equal(options.capturedAt,claim.capturedAt);
+    return {source_sha256:sourceHash,events:1};
+ });
+ assert.equal(ok.state,'COMPLETE');assert.equal(calls[1].args.p_ok,true);
+ const failed=await continueBookSync(db,'fixture@example.invalid','snapshot',async()=>{throw new Error('fixture failure');});
+ assert.equal(failed.retryRequired,true);assert.equal(calls[3].args.p_ok,false);
+ const missing=await continueBookSync(db,'fixture@example.invalid','snapshot',async()=>({source_sha256:sourceHash,events:0}));
+ assert.equal(missing.retryRequired,true);assert.equal(calls[5].args.p_ok,false);
 });
