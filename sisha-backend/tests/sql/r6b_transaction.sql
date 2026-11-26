@@ -125,3 +125,55 @@ do $$ begin
  then raise exception 'R7B1 privilege leak'; end if;
  raise notice 'R7B1 PASS historical ACL';
 end $$;
+
+-- R7B2: native report keeps SN and a durable Livro pending state.
+begin;
+set local role service_role;
+do $r7test$
+declare
+ token text:=public.sisha_ppu_r6_context()->>'token';
+ result jsonb;
+ snapshot uuid;
+ claim jsonb;
+ done jsonb;
+ native_rows jsonb:='[{"pn":"FIXTURE-PN","localizacao":"A-1","quantidade":2,"source_section":"SOBRESSALENTES","source_row":5},{"pn":"FIXTURE-SERIAL","localizacao":"Z","quantidade":1,"sn":"SN-FIXTURE-1","source_section":"EQUIPAMENTOS","source_row":8}]';
+begin
+ result:=public.sisha_ppu_r6_apply(token,repeat('c',64),'fixture-4.ods','00000000-0000-4000-8000-000000000004','2025-03-01',null,null,true,native_rows,'[]','fixture@example.invalid');
+ snapshot:=(result->>'snapshot_id')::uuid;
+ if result->'book_sync'->>'state'<>'PENDING' or (result->'book_sync'->>'total')::integer<>1
+   or (select count(*) from public.estoque_ppu where sn='SN-FIXTURE-1' and quantidade=1)<>1
+   or (select count(*) from public.equipamentos_serializados)<>0
+   or (select quantidade_inventariada from public.recebimento_itens where id=1)<>1
+   or (select count(*) from public.ppu_inventario_snapshots)<>3
+ then raise exception 'native stock and durable evidence failed'; end if;
+ begin
+  perform public.sisha_ppu_r6_apply(public.sisha_ppu_r6_context()->>'token',repeat('d',64),'fixture-5.ods','00000000-0000-4000-8000-000000000005','2025-04-01',null,null,true,native_rows,'[]','fixture@example.invalid');
+  raise exception 'expected pending Livro gate';
+ exception when raise_exception then if sqlerrm not like '%concluir sincronizacao%' then raise; end if; end;
+ claim:=public.sisha_ppu_r7_book_claim(snapshot,'fixture@example.invalid');
+ if claim->>'state'<>'RUNNING' or claim->'items'->0->>'sn'<>'SN-FIXTURE-1' or claim->>'sourceHash'<>repeat('c',64)
+ then raise exception 'native evidence claim failed'; end if;
+ begin
+  perform public.sisha_ppu_r7_book_claim(snapshot,'other@example.invalid');
+  raise exception 'expected exclusive claim';
+ exception when raise_exception then if sqlerrm not like '%sincronizacao em andamento%' then raise; end if; end;
+ begin
+  perform public.sisha_ppu_r7_book_finish(snapshot,gen_random_uuid(),true,'{}','fixture@example.invalid');
+  raise exception 'expected wrong attempt rejection';
+ exception when raise_exception then if sqlerrm not like '%tentativa ativa%' then raise; end if; end;
+ done:=public.sisha_ppu_r7_book_finish(snapshot,(claim->>'attempt_id')::uuid,false,'{"retry_required":true}','fixture@example.invalid');
+ if done->>'state'<>'PENDING' or (done->>'cursor')::integer<>0 then raise exception 'failed batch advanced cursor'; end if;
+ claim:=public.sisha_ppu_r7_book_claim(snapshot,'fixture@example.invalid');
+ done:=public.sisha_ppu_r7_book_finish(snapshot,(claim->>'attempt_id')::uuid,true,'{"events":1}','fixture@example.invalid');
+ if done->>'state'<>'COMPLETE' or (done->>'cursor')::integer<>1 then raise exception 'completed batch cursor failed'; end if;
+ result:=public.sisha_ppu_r6_apply(public.sisha_ppu_r6_context()->>'token',repeat('d',64),'fixture-5.ods','00000000-0000-4000-8000-000000000005','2025-04-01',null,null,true,'[{"pn":"FIXTURE-PN","localizacao":"A-1","quantidade":2},{"pn":"FIXTURE-SERIAL","localizacao":"Z","quantidade":1}]','[]','fixture@example.invalid');
+ if result->>'status'<>'APPLIED' or not ((public.sisha_ppu_r6_context()->'serial_pns') ? 'FIXTURE-SERIAL') then raise exception 'historical equipment identity guard lost'; end if;
+ raise notice 'R7B2 PASS native preservation, exclusive claim, failed batch resume, pending import gate and historical identity';
+end
+$r7test$;
+rollback;
+do $r7acl$ begin
+ if has_function_privilege('anon','public.sisha_ppu_r7_book_claim(uuid,text)','EXECUTE')
+ or has_function_privilege('authenticated','public.sisha_ppu_r7_book_finish(uuid,uuid,boolean,jsonb,text)','EXECUTE')
+ then raise exception 'R7B2 ACL failure'; end if;
+end $r7acl$;
