@@ -267,6 +267,9 @@ async function continueBookSync(db, actor, snapshotId, syncFn) {
   try {
     summary=await syncFn({items:claim.items},{sourceHash:claim.sourceHash,fileName:claim.fileName,
       capturedAt:claim.capturedAt,observedOn:claim.observedOn,user:{email:actor}});
+    const accounted=['events','conflicts','same','historical','ignored'].reduce((n,k)=>n+Number(summary?.[k]||0),0);
+    if(summary?.source_sha256!==claim.sourceHash||accounted!==claim.items.length||Number(summary.ignored||0)>0)
+      throw new Error('Livro não confirmou todas as evidências do lote.');
     ok=true;
   }catch(e){summary={retry_required:true};}
   const {data:done,error:finishError}=await db.rpc('sisha_ppu_r7_book_finish',{
