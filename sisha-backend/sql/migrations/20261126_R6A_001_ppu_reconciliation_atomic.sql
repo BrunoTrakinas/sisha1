@@ -239,7 +239,7 @@ create function public.sisha_ppu_r7_retro_apply(
  p_evidence text,p_actor text
 ) returns jsonb
 language plpgsql security invoker set search_path=pg_catalog set timezone='UTC'
-as $
+as $r7retro$
 declare
  c jsonb;
  s public.ppu_inventario_snapshots%rowtype;
@@ -255,7 +255,7 @@ declare
  v_before numeric;
  v_after numeric;
 begin
- if p_context_token is null or p_context_token !~ '^[0-9a-f]{64}
+ if p_context_token is null or p_context_token !~ '^[0-9a-f]{64}$'
    or p_item_id is null or p_locrec_id is null or p_quantity is null
    or p_quantity::text in ('NaN','Infinity','-Infinity') or p_quantity<=0
    or p_quantity<>round(p_quantity,6)
@@ -333,7 +333,7 @@ begin
    'origem_fisica_comprovada',false,'natureza','REVISAO_HUMANA_DOCUMENTAL'),p_actor);
  return jsonb_build_object('status','APPLIED','itemId',i.id,'quantity',p_quantity,'pending',i.quantidade-v_after);
 end;
-$;
+$r7retro$;
 revoke all on function public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text) from public,anon,authenticated,service_role;
 grant execute on function public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text) to service_role;
 
