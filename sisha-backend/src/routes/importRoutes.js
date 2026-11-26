@@ -76,8 +76,23 @@ router.delete('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rf
 router.get('/logs', requireRole(['admin']), importController.listImportLogs);
 router.get('/locrec/reconciliacao', requireRole(['admin']), importController.getLocrecReconciliation);
 // Historical correction uses the existing LOCREC screen; it never changes official stock.
-const {getRetroactiveReview,applyRetroactiveReview}=require('../services/ppuReceiptReconciliationService');
+const {getRetroactiveReview,applyRetroactiveReview,getBookSyncStatus,continueBookSync}=require('../services/ppuReceiptReconciliationService');
+const {importPpuInventoryEquipmentSnapshot}=require('../services/rawOperationalDocumentImportService');
 const ppuDb=require('../config/supabaseClient');
+router.get('/ppu/reconciliacao/status',requireRole(['admin']),async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.json({status:'success',data:{enabled:false}});
+  try {
+    const result=await getBookSyncStatus(ppuDb);
+    return res.json({status:'success',data:{enabled:true,...result}});
+  }catch(e){return res.status(503).json({status:'error',message:'Conferência de inventário indisponível; não utilize o fluxo antigo.'});}
+});
+router.post('/ppu/reconciliacao/livro',requireRole(['admin']),async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
+  try{
+    const result=await continueBookSync(ppuDb,req.user.email,req.body?.snapshotId,importPpuInventoryEquipmentSnapshot);
+    return res.json({status:'success',data:result});
+  }catch(e){return res.status(409).json({status:'error',message:e.message||'Sincronização não confirmada.'});}
+});
 router.get('/locrec/reconciliacao/historico', requireRole(['admin']), async (req,res)=>{
   if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
   try {
