@@ -1031,7 +1031,7 @@ export default function Cadastro() {
                         >
                             <option value="order_book">Order Book</option>
                             <option value="price_list">Price List</option>
-                            <option value="inventario_ppu">Inventário PPU — Geral ou Resumido</option>
+                            <option value="inventario_ppu">InventarioPPUGeralLoc — Inventário Geral PPU por Localização / Resumido</option>
                             <option value="locrec">LOCREC — Processamento e Localização de Recebidos</option>
                             <option value="custodia_externa_ppu">Backend_Auditoria_Paiol — Caixas CEIMSPA sob custódia PPU</option>
                             <option value="controle_equipamentos_criticos">Controle de Equipamentos Criticos da Aeronave</option>
