@@ -62,7 +62,7 @@ function buildR6Plan(context, rows, options) {
     const day=date(String(d.data_auditoria||'').slice(0,10));
     const lk=key(pn(d.pn),l);
     if(!usable(i)||!eligible(l)||d.destino_indicado!=='PPU'||q<=0||qty(d.qtd_documental)!==qty(i.quantidade)
-       ||q>qty(i.quantidade)||!day||!date(r.data_recebimento)||day<r.data_recebimento||day>observedOn
+       ||q>qty(i.quantidade)||!day||!date(r.data_recebimento)||day<r.data_recebimento||day<=previousOn||day>observedOn
        ||(available.get(lk)||0)<(locationClaims.get(lk)||0))continue;
     matches.push({verified:true,itemId:i.id,pn:pn(i.pn),location:l,quantity:q,observedAt:day});
   }
@@ -74,15 +74,48 @@ function buildR6Plan(context, rows, options) {
   if(plan.status!=='PLAN_READY')throw new Error('R6: plano não liberado');
   return {...plan,previousOn,observedOn,blockedSerialPns:serial.size};
 }
-async function importPpuR6({supabase,parsed,rows,buffer,fileName,logId,user,options}) {
+// Verify the parser covered every physical material row. This is deliberately strict
+// for summarized reports: blank rows and the known footer are not material.
+function validateAggregateCoverage(parsed, rawRows, sheetCount) {
+  if (!Array.isArray(rawRows) || sheetCount !== 1) throw new Error('R6: relatório resumido deve ter uma única aba verificável.');
+  const norm=v=>String(v??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]+/g,' ').trim();
+  const names={pn:['PN','P N','PART NUMBER','PART NO'],q:['QNTD','QTD','QTY','QTDE','QTE','QUANTIDADE','QUANTITY'],loc:['LOCALIZACAO','LOCAL','LOC','LOCATION']};
+  const cols=(row,aliases)=>row.findIndex(v=>aliases.includes(norm(v)));
+  const header=rawRows.slice(0,100).findIndex(row=>cols(row,names.pn)>=0&&cols(row,names.q)>=0&&cols(row,names.loc)>=0);
+  if(header<0)throw new Error('R6: cabeçalho PN/QTD/LOC não identificado.');
+  const indices={pn:cols(rawRows[header],names.pn),q:cols(rawRows[header],names.q),loc:cols(rawRows[header],names.loc)};
+  // Preserve exact source-row identity, including zero quantities; never treat malformed
+  // quantities as zero merely because the permissive legacy parser does.
+  const byRow=new Map();
+  for(const item of parsed.items||[]){
+    if(!Number.isInteger(item.source_row)||byRow.has(item.source_row))throw new Error('R6: cobertura de linhas inconsistente.');
+    byRow.set(item.source_row,item);
+  }
+  let recognized=0,markers=0,footers=0;
+  for(let n=header+1;n<rawRows.length;n++){
+    const row=rawRows[n]||[],cells=row.filter(v=>String(v??'').trim()!=='');
+    if(!cells.length)continue;
+    const part=pn(row[indices.pn]);
+    if(part==='DUPLICADO'||part.startsWith('EXCLUIR')){if(byRow.has(n+1))throw new Error('R6: marcador virou material.');markers++;continue;}
+    if(!part&&cells.length===1&&norm(cells[0])==='ASSINATURA'){footers++;continue;}
+    const raw=row[indices.q];
+    const qtext=String(raw??'').trim();
+    let q=typeof raw==='number'?raw:NaN;
+    if(typeof raw!=='number'&&/^\d+(?:[.,]\d+)?$/.test(qtext))q=Number(qtext.replace(',','.'));
+    const item=byRow.get(n+1);
+    if(!part||!loc(row[indices.loc])||!Number.isFinite(q)||q<0||Math.abs(q*1e6-Math.round(q*1e6))>1e-5||!item||pn(item.pn)!==part||loc(item.localizacao)!==loc(row[indices.loc])||Number(item.quantidade)!==q){
+      throw new Error('R6: linha de material inválida ou não reconhecida ('+(n+1)+').');
+    }
+    recognized++;
+  }
+  if(recognized!==byRow.size||recognized===0)throw new Error('R6: cobertura do relatório diverge do parser.');
+  return {recognized,markers,footers};
+}
+async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileName,logId,user,options}) {
   if(parsed?.format!=='PPU_LEGADO_TABULAR'||(parsed.items||[]).some(r=>r.source_section!=='LEGADO_AGREGADO'))
     throw new Error('R6A: relatório serializado não homologado; não substitua o inventário por esta rotina.');
   if(!Buffer.isBuffer(buffer)||!buffer.length||!logId||!user?.email)throw new Error('R6: trilha de importação obrigatória.');
-  // Only tolerate explicit placeholder lines and the known report footer.
-  // Unknown parser omissions must be reviewed rather than silently accepted.
-  const issues=parsed.issues||[];
-  if(issues.some(i=>i.field!=='pn'||(!/^(DUPLICADO|EXCLUIR.*)$/i.test(String(i.value||'').trim())&&String(i.value||'').trim()!=='')))
-    throw new Error('R6: pendências de leitura exigem conferência.');
+  validateAggregateCoverage(parsed,rawRows,sheetCount);
   const {data:context,error:readError}=await supabase.rpc('sisha_ppu_r6_context');
   if(readError)throw readError;
   const hash=crypto.createHash('sha256').update(buffer).digest('hex');
@@ -108,4 +141,4 @@ async function importPpuR6({supabase,parsed,rows,buffer,fileName,logId,user,opti
   if(!['APPLIED','REUSED'].includes(data?.status))throw new Error('R6: resultado transacional inesperado.');
   return data;
 }
-module.exports={buildR6Plan,importPpuR6};
+module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage};
