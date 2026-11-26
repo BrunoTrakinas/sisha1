@@ -223,6 +223,9 @@ export default function Cadastro() {
     const [ppuReviewFields, setPpuReviewFields] = useState({observedOn:'',previousOn:'',evidence:'',complete:false});
     const [ppuReview, setPpuReview] = useState(null);
     const [ppuApplied, setPpuApplied] = useState(null);
+    const [ppuStatus, setPpuStatus] = useState(null);
+    const [ppuStatusMsg, setPpuStatusMsg] = useState('');
+    const [ppuSyncBusy, setPpuSyncBusy] = useState(false);
     const changePpuField = (key, value) => {
         setPpuReviewFields(prev => ({...prev, [key]:value}));
         setPpuReview(null);
@@ -307,10 +310,46 @@ export default function Cadastro() {
     const [manualPreviewFile, setManualPreviewFile] = useState(null);
 
     const orientacaoUpload = orientacoesUploadPorTipo[tipoArquivo];
+    const carregarStatusPpu = async () => {
+        setPpuStatus(null); setPpuStatusMsg('');
+        try{
+            const response=await apiFetch('/import/ppu/reconciliacao/status',{},token);
+            const result=await response.json();
+            if(!response.ok||result.status!=='success')throw new Error(result.message||'Estado da reconciliação indisponível.');
+            setPpuStatus(result.data);
+        }catch(e){setPpuStatusMsg(e.message);}
+    };
+    useEffect(()=>{
+        if(tipoArquivo==='inventario_ppu'&&token)carregarStatusPpu();
+    },[tipoArquivo,token]);
+    const sincronizarLivroPpu = async () => {
+        if(!ppuStatus?.snapshotId||ppuSyncBusy||ppuStatus.bookSync?.state!=='PENDING')return;
+        const snapshotId=ppuStatus.snapshotId;
+        setPpuSyncBusy(true);setPpuStatusMsg('');
+        try{
+            // Each batch has a durable cursor and exclusive claim in the database.
+            // Closing this screen does not erase the remaining work.
+            for(;;){
+                const response=await apiFetch('/import/ppu/reconciliacao/livro',{
+                    method:'POST',headers:{...buildAuthHeaders(token),'Content-Type':'application/json'},
+                    body:JSON.stringify({snapshotId})
+                },token);
+                const result=await response.json();
+                if(!response.ok||result.status!=='success')throw new Error(result.message||'Lote do Livro não confirmado.');
+                setPpuStatus(prev=>({...prev,bookSync:result.data}));
+                if(result.data.retryRequired)throw new Error('Lote interrompido. Confira o estado e retome a sincronização.');
+                if(result.data.state==='COMPLETE')break;
+                if(result.data.state!=='PENDING')throw new Error('Estado do Livro requer conferência.');
+            }
+            setPpuStatusMsg('Sincronização do Livro concluída. Conflitos de localização permanecem para revisão.');
+        }catch(e){setPpuStatusMsg(e.message);}
+        finally{setPpuSyncBusy(false);}
+    };
 
     const handleFileChange = (e) => {
         setPpuReview(null);
         setPpuApplied(null);
+        setPpuReviewFields(prev=>({...prev,complete:false}));
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
             const nomeArquivo = e.target.files[0].name.toLowerCase();
@@ -388,7 +427,7 @@ export default function Cadastro() {
                 throw new Error(data.message || 'Não foi possível confirmar o resultado da reconciliação.');
             }
             if (preview) setPpuReview(result);
-            else { setPpuReview(null); setPpuApplied(result); setFile(null); carregarAtualizacoes(true); }
+            else { setPpuReview(null); setPpuApplied(result); setFile(null); carregarAtualizacoes(true); carregarStatusPpu(); }
             setUploadMsg({tipo:'success',texto:data.message});
         } catch (error) {
             setPpuReview(null);
@@ -399,7 +438,12 @@ export default function Cadastro() {
     const handleUpload = async (e) => {
         e.preventDefault();
         if (!file) return;
-        if (tipoArquivo === 'inventario_ppu' && ppuMode === 'resumido') return handlePpuReconciliation(true);
+        if (tipoArquivo === 'inventario_ppu') {
+            if(ppuStatus?.enabled===true)return handlePpuReconciliation(true);
+            if(ppuStatus?.enabled!==false||ppuMode!=='geral'){
+                setUploadMsg({tipo:'error',texto:'Reconciliação indisponível. Não envie o relatório pelo fluxo antigo.'});return;
+            }
+        }
         setUploadCarregando(true);
         setUploadMsg(null);
 
@@ -1112,12 +1156,19 @@ export default function Cadastro() {
                     {tipoArquivo === 'inventario_ppu' && (
                         <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
                             <label className="text-sm font-bold block">Formato do inventário
-                                <select value={ppuMode} disabled={uploadCarregando} onChange={e=>{setPpuMode(e.target.value);setPpuReview(null);setPpuApplied(null);}} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900">
+                                <select value={ppuMode} disabled={uploadCarregando} onChange={e=>{setPpuMode(e.target.value);setPpuReview(null);setPpuApplied(null);setPpuReviewFields(prev=>({...prev,complete:false}));}} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900">
                                     <option value="resumido">Resumido por PN e localização — conferência de Recibos</option>
                                     <option value="geral">Geral por localização — fluxo existente de equipamentos</option>
                                 </select>
                             </label>
-                            {ppuMode === 'resumido' ? <>
+                            {ppuStatusMsg&&<p className="text-sm font-bold">{ppuStatusMsg}</p>}
+                            <button type="button" disabled={ppuSyncBusy||uploadCarregando} onClick={carregarStatusPpu} className="text-xs underline">Consultar situação da reconciliação</button>
+                            {ppuStatus?.enabled&&ppuStatus.bookSync?.state!=='COMPLETE'&&<div className="rounded-xl border border-amber-300 p-3 space-y-2">
+                                <p className="font-black text-sm">Estoque atualizado; Livro de Equipamentos com sincronização pendente.</p>
+                                <p className="text-xs">{ppuStatus.bookSync?.cursor||0} de {ppuStatus.bookSync?.total||0} evidências processadas.</p>
+                                {ppuStatus.bookSync?.state==='PENDING'?<button type="button" disabled={ppuSyncBusy||uploadCarregando} onClick={sincronizarLivroPpu} className="rounded-lg bg-blue-700 text-white px-3 py-2 text-xs font-bold disabled:opacity-50">{ppuSyncBusy?'SINCRONIZANDO...':'SINCRONIZAR / RETOMAR LIVRO'}</button>:<p className="text-xs">Lote em andamento. Se persistir após uma interrupção, solicite conferência técnica; não há retomada concorrente automática.</p>}
+                            </div>}
+                            {ppuStatus?.enabled || ppuMode === 'resumido' ? <>
                                 <p className="text-xs text-slate-600 dark:text-slate-300">Primeiro simule, depois confira as quantidades. A data operacional deve vir do levantamento, não da data de criação do arquivo.</p>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                     <label className="text-xs font-bold">Data operacional do inventário novo
@@ -1137,6 +1188,7 @@ export default function Cadastro() {
                                     <div className="max-h-64 overflow-auto"><table className="w-full text-xs"><thead><tr><th className="text-left p-1">Recibo</th><th className="text-left p-1">PN</th><th>Incorporar</th><th>Restante</th><th className="text-left">Evidência</th></tr></thead><tbody>
                                         {(ppuReview.plans||[]).map((p,i)=><tr key={i} className="border-t border-slate-200 dark:border-slate-700"><td className="p-1">{p.receiptNo}</td><td className="p-1">{p.pn}</td><td className="text-center">{p.quantity}</td><td className="text-center">{p.pending}</td><td>{p.method==='LOCREC'?'LOCREC':p.method==='QTD_EXATA'?'Quantidade exata (inferência)':'Recibo mais antigo (inferência)'}</td></tr>)}
                                     </tbody></table></div>
+                                    {ppuReview.serialEvidenceRows>0&&<p className="text-sm font-bold">Após a atualização, {ppuReview.serialEvidenceRows} evidências PN + SN serão processadas no Livro. Não haverá baixa automática de Recibos serializados.</p>}
                                     <details><summary className="font-bold cursor-pointer text-sm">Pendências históricas — somente conferência ({ppuReview.retroactive?.candidates?.length||0})</summary>
                                         <p className="text-xs mt-2">Não serão baixadas nesta importação. Quantidade candidata não comprova entrada física; equipamentos exigem identidade PN + SN.</p>
                                         <div className="max-h-48 overflow-auto"><table className="w-full text-xs"><thead><tr><th>Recibo</th><th>PN</th><th>Saldo após prévia</th><th>Candidato</th><th>Motivo</th></tr></thead><tbody>
@@ -1147,17 +1199,17 @@ export default function Cadastro() {
                                     <button type="button" disabled={uploadCarregando} onClick={()=>setPpuReview(null)} className="ml-2 text-sm underline">Cancelar conferência</button>
                                 </div>}
                                 {ppuApplied && <div className="rounded-xl border border-emerald-300 p-3 text-sm font-bold">{ppuApplied.status==='REUSED'?'Arquivo já aplicado, sem repetição de baixas.':`Inventário atualizado: ${ppuApplied.rows} linhas, ${ppuApplied.allocations||0} alocações registradas.`}</div>}
-                            </> : <p className="text-sm">Relatório geral com SN utiliza o fluxo existente enquanto a reconciliação transacional desse formato não estiver homologada. Não use este modo para o inventário resumido.</p>}
+                            </> : <p className="text-sm">O fluxo legado do relatório geral só permanece disponível enquanto o servidor informar que a reconciliação está desativada. Não use este modo para o inventário resumido.</p>}
                         </div>
                     )}
 
                     <div className="flex justify-end">
                             <button
                                 type="submit"
-                                disabled={!file || uploadCarregando || (tipoArquivo==='inventario_ppu' && ppuMode==='resumido' && (!ppuReviewFields.complete || !ppuReviewFields.observedOn))}
+                                disabled={!file || uploadCarregando || ppuSyncBusy || (tipoArquivo==='inventario_ppu' && (!ppuStatus || (ppuStatus.enabled ? (!ppuReviewFields.complete || !ppuReviewFields.observedOn || ppuStatus.bookSync?.state!=='COMPLETE') : ppuMode!=='geral')))}
                                 className="bg-blue-600 text-white px-8 py-3 rounded-xl font-black hover:bg-blue-700 disabled:opacity-50"
                             >
-                                {uploadCarregando ? 'ENVIANDO...' : tipoArquivo==='inventario_ppu' && ppuMode==='resumido' ? 'SIMULAR RECONCILIAÇÃO' : 'ENVIAR ARQUIVO'}
+                                {uploadCarregando ? 'ENVIANDO...' : tipoArquivo==='inventario_ppu' && ppuStatus?.enabled ? 'SIMULAR RECONCILIAÇÃO' : 'ENVIAR ARQUIVO'}
                             </button>
                         </div>
 
@@ -1995,6 +2047,7 @@ export default function Cadastro() {
                                 <p className="text-xs">O LOCREC indica processamento, mas não prova sozinho que o item entrou no estoque. Confirme individualmente a entrada documental. O estoque oficial não será alterado.</p>
                                 <button type="button" disabled={retroBusy} onClick={carregarHistoricoRecibos} className="rounded-lg bg-blue-700 text-white px-3 py-2 text-xs font-bold disabled:opacity-50">CONFERIR SALDOS HISTÓRICOS</button>
                                 {retroMsg && <p className={retroMsg.error?'text-red-600 text-sm':'text-emerald-700 text-sm'}>{retroMsg.text}</p>}
+                                {retroReview?.status==='WAITING_BOOK_SYNC'&&<p className="text-sm font-bold">Conclua primeiro a sincronização do Livro de Equipamentos.</p>}
                                 {retroReview?.status==='WAITING_NEW_INVENTORY'&&<p className="text-sm font-bold">Conclua primeiro a importação de um inventário com data operacional confirmada.</p>}
                                 {retroReview?.status==='REVIEW_READY'&&<>
                                     <p className="text-xs">{retroReview.candidates.length} grupos para revisão. Apenas candidatos com quantidade validável permitem selecionar uma incorporação.</p>
