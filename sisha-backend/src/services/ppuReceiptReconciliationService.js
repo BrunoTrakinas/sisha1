@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const { planReceiptInventoryReconciliation } = require('./receiptInventoryReconciliationPlanner');
+const { validateNativeCoverage } = require('./ppuInventoryParserService');
 const pn = v => String(v ?? '').trim().toUpperCase().replace(/\s+/g,'');
 const loc = v => String(v ?? '').trim().toUpperCase().replace(/\s+/g,' ');
 const receiptNo = v => pn(v).replace(/\\/g,'/');
@@ -18,12 +19,12 @@ function buildR6Plan(context, rows, options) {
       || (!context.previous_observed_on && String(options.previousDateEvidence||'').trim().length<10)) {
     throw new Error('Confirme inventário completo e datas operacionais anterior e atual, com referência documental.');
   }
-  if (!Array.isArray(rows)||!rows.length || rows.some(r=>!pn(r.pn)||!loc(r.localizacao)||!Number.isFinite(Number(r.quantidade))||Number(r.quantidade)<0||String(r.sn||'').trim())) {
+  if (!Array.isArray(rows)||!rows.length || rows.some(r=>!pn(r.pn)||!loc(r.localizacao)||!Number.isFinite(Number(r.quantidade))||Number(r.quantidade)<0||(!options.native&&String(r.sn||'').trim()))) {
     throw new Error('R6A aceita somente inventário resumido válido sem SN; formatos serializados exigem homologação.');
   }
   const old=context.previous_rows || [];
   const serial=new Set((context.serial_pns||[]).map(pn));
-  for(const r of [...old,...rows]) if(String(r.sn||'').trim()) serial.add(pn(r.pn));
+  for(const r of [...old,...rows]) if(String(r.sn||'').trim()||r.source_section==='EQUIPAMENTOS') serial.add(pn(r.pn));
   for(const r of context.receipts||[]) for(const i of r.recebimento_itens||[])
     if(i.tipo_item==='EQUIPAMENTO'||String(i.sn||'').trim()||i.equipamento_id)serial.add(pn(i.pn));
   const allowed = p => p?.ativo===true&&p?.contabiliza_ppu===true;
@@ -119,7 +120,7 @@ function buildRetroactiveReview(context, rows, options, plans=[]) {
   const observedOn=date(options.observedOn);
   const policies=new Map((context.policies||[]).map(x=>[loc(x.localizacao_normalizada),x]));
   const serial=new Set((context.serial_pns||[]).map(pn));
-  for(const r of [...(context.previous_rows||[]),...rows])if(String(r.sn||'').trim())serial.add(pn(r.pn));
+  for(const r of [...(context.previous_rows||[]),...rows])if(String(r.sn||'').trim()||r.source_section==='EQUIPAMENTOS')serial.add(pn(r.pn));
   for(const r of context.receipts||[])for(const i of r.recebimento_itens||[]){
     if(i.ativo===false||r.ativo===false)continue;
     if(i.tipo_item==='EQUIPAMENTO'||String(i.sn||'').trim()||i.equipamento_id)serial.add(pn(i.pn));
@@ -184,16 +185,22 @@ function requirePreview(options,token){
   if(options.preview!==true && options.previewToken!==token)throw new Error('Simulação ausente ou desatualizada. Confira novamente antes de confirmar.');
 }
 async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileName,logId,user,options}) {
-  if(parsed?.format!=='PPU_LEGADO_TABULAR'||(parsed.items||[]).some(r=>r.source_section!=='LEGADO_AGREGADO'))
-    throw new Error('R6A: relatório serializado não homologado; não substitua o inventário por esta rotina.');
+  const native=parsed?.format==='MARINHA_PPU_GERAL_POR_LOCALIZACAO';
+  if(!native&&(parsed?.format!=='PPU_LEGADO_TABULAR'||(parsed.items||[]).some(r=>r.source_section!=='LEGADO_AGREGADO')))
+    throw new Error('Formato não homologado para substituição do estoque PPU.');
   if(!Buffer.isBuffer(buffer)||!buffer.length||!logId||!user?.email)throw new Error('R6: trilha de importação obrigatória.');
-  validateAggregateCoverage(parsed,rawRows,sheetCount);
+  if(native){
+    validateNativeCoverage(parsed,rawRows,sheetCount);
+    if(rows.length!==parsed.items.length)throw new Error('Cobertura de linhas nativas divergente.');
+    rows=rows.map((r,i)=>({...r,source_section:parsed.items[i].source_section,source_row:parsed.items[i].source_row}));
+  }else validateAggregateCoverage(parsed,rawRows,sheetCount);
+  options={...options,native};
   const {data:context,error:readError}=await supabase.rpc('sisha_ppu_r6_context');
   if(readError)throw readError;
   const hash=crypto.createHash('sha256').update(buffer).digest('hex');
   if(context.source_file_sha256===hash && context.previous_observed_on===date(options.observedOn) && options.complete===true){
     const previewToken=previewFingerprint({context,hash,options,plan:[],user});
-    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0,previewToken,plans:[],retroactive:{counts:{review:0,conflict:0,serial:0},candidates:[],automatic:false}};
+    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0,previewToken,plans:[],book_sync:context.book_sync,retroactive:{counts:{review:0,conflict:0,serial:0},candidates:[],automatic:false}};
     requirePreview(options,previewToken);
     const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
       p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
@@ -204,10 +211,11 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
     if(data?.status!=='REUSED')throw new Error('R6: replay não confirmado.');
     return data;
   }
+  if(context.book_sync?.state&&context.book_sync.state!=='COMPLETE')throw new Error('Conclua a sincronização do Livro de Equipamentos antes de outro inventário.');
   const plan=buildR6Plan(context,rows,options);
   const previewToken=previewFingerprint({context,hash,options,plan:plan.plans,user});
   if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings,plans:plan.plans,previewToken,
-    retroactive:buildRetroactiveReview(context,rows,options,plan.plans),blockedSerialPns:plan.blockedSerialPns};
+    retroactive:buildRetroactiveReview(context,rows,options,plan.plans),blockedSerialPns:plan.blockedSerialPns,serialEvidenceRows:native?rows.filter(r=>r.source_section==='EQUIPAMENTOS'&&r.sn).length:0};
   requirePreview(options,previewToken);
   const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
     p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
@@ -221,6 +229,7 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
 async function getRetroactiveReview(db, actor) {
   const {data:context,error}=await db.rpc('sisha_ppu_r6_context');
   if(error)throw error;
+  if(context.book_sync?.state&&context.book_sync.state!=='COMPLETE')return {status:'WAITING_BOOK_SYNC',candidates:[],automatic:false};
   if(!context.previous_observed_on||!context.source_file_sha256)return {status:'WAITING_NEW_INVENTORY',candidates:[],automatic:false};
   const review=buildRetroactiveReview(context,context.previous_rows,{observedOn:context.previous_observed_on},[]);
   const token=crypto.createHash('sha256').update(JSON.stringify({version:'R7B1',context:context.token,actor})).digest('hex');
@@ -243,4 +252,27 @@ async function applyRetroactiveReview(db, actor, body={}) {
   if(data?.status!=='APPLIED')throw new Error('Resultado histórico não confirmado.');
   return data;
 }
-module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview};
+async function getBookSyncStatus(db) {
+  const {data,error}=await db.rpc('sisha_ppu_r6_context');
+  if(error)throw error;
+  return {snapshotId:data.snapshot_id,bookSync:data.book_sync||{state:'COMPLETE',total:0,cursor:0}};
+}
+async function continueBookSync(db, actor, snapshotId, syncFn) {
+  if(!actor||!snapshotId)throw new Error('Identificação da sincronização obrigatória.');
+  const {data:claim,error}=await db.rpc('sisha_ppu_r7_book_claim',{p_snapshot_id:snapshotId,p_actor:actor});
+  if(error)throw error;
+  if(claim?.state==='COMPLETE')return claim;
+  if(claim?.state!=='RUNNING'||!claim.attempt_id||!Array.isArray(claim.items)||!claim.items.length)throw new Error('Lote do Livro não confirmado.');
+  let ok=false,summary={};
+  try {
+    summary=await syncFn({items:claim.items},{sourceHash:claim.sourceHash,fileName:claim.fileName,
+      capturedAt:claim.capturedAt,observedOn:claim.observedOn,user:{email:actor}});
+    ok=true;
+  }catch(e){summary={retry_required:true};}
+  const {data:done,error:finishError}=await db.rpc('sisha_ppu_r7_book_finish',{
+    p_snapshot_id:snapshotId,p_attempt_id:claim.attempt_id,p_ok:ok,p_summary:summary,p_actor:actor
+  });
+  if(finishError)throw finishError;
+  return {...done,retryRequired:!ok};
+}
+module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview,getBookSyncStatus,continueBookSync};
