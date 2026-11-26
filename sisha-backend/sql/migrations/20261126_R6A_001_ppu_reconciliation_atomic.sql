@@ -13,6 +13,7 @@ declare
   v_serial jsonb;
   v_locrec jsonb;
   v_context jsonb;
+  v_book jsonb;
 begin
   select h.* into s from public.ppu_inventario_snapshots h
   where not exists (select 1 from public.ppu_inventario_snapshots n where n.previous_snapshot_id=h.id);
@@ -42,7 +43,8 @@ begin
     'qtd_auditada_aplicada',l.qtd_auditada_aplicada,'loc_escolhida',l.loc_escolhida,
     'destino_indicado',l.destino_indicado,'data_auditoria',l.data_auditoria) order by l.id),'[]'::jsonb)
     into v_locrec from public.v_sisha_locrec_atual l;
-  v_context:=jsonb_build_object('snapshot_id',s.id,'previous_observed_on',s.observed_on,'source_file_sha256',s.source_file_sha256,
+  select l.detalhes->'r7_book_sync' - 'items' into v_book from public.import_logs l where l.id=s.import_log_id;
+  v_context:=jsonb_build_object('book_sync',v_book,'snapshot_id',s.id,'previous_observed_on',s.observed_on,'source_file_sha256',s.source_file_sha256,
     'previous_rows',v_rows,'previous_policies',s.policies_payload,'policies',v_policies,
     'receipts',v_receipts,'serial_pns',v_serial,'locrec',v_locrec);
   return v_context||jsonb_build_object('token',encode(sha256(convert_to(v_context::text,'UTF8')),'hex'));
@@ -72,6 +74,9 @@ declare
   v_changed integer:=0;
   v_sum numeric:=0;
   v_log public.import_logs%rowtype;
+  v_native boolean;
+  v_book_items jsonb;
+  v_book jsonb;
 begin
   if p_complete is distinct from true or p_observed_on is null or p_observed_on>current_date
      or p_source_sha256 is null or p_source_sha256 !~ '^[0-9a-f]{64}$'
@@ -105,11 +110,13 @@ begin
       detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r6_transaction',
         jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'quantity',0))
       where id=p_import_log_id;
-    return jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'rows',v_existing.row_count,'items',0,'quantity',0);
+    select l.detalhes->'r7_book_sync' - 'items' into v_book from public.import_logs l where l.id=v_existing.import_log_id;
+    return jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'rows',v_existing.row_count,'items',0,'quantity',0,'book_sync',v_book);
   end if;
 
   c:=public.sisha_ppu_r6_context();
   if c->>'token' is distinct from p_context_token then raise exception 'R6: contexto mudou; recalcular antes de importar'; end if;
+  if coalesce(c->'book_sync'->>'state','COMPLETE')<>'COMPLETE' then raise exception 'R7B: concluir sincronizacao do Livro antes de novo inventario'; end if;
   select h.* into strict s from public.ppu_inventario_snapshots h where h.id=(c->>'snapshot_id')::uuid;
   if s.observed_on is null then
     if p_previous_observed_on is null or length(btrim(coalesce(p_previous_date_evidence,'')))<10
@@ -121,12 +128,27 @@ begin
   end if;
   if v_date>=p_observed_on then raise exception 'R6: inventario deve ser posterior ao anterior'; end if;
 
-  -- R6A deliberately accepts only the summarized/no-SN input.
-  if exists(select 1 from jsonb_to_recordset(p_rows) x(pn text,localizacao text,quantidade numeric,sn text)
+  -- Native reports preserve their source section and row. Only the existing
+  -- Livro engine may register individual equipment evidence after commit.
+  v_native:=exists(select 1 from jsonb_to_recordset(p_rows) x(source_section text) where x.source_section in ('EQUIPAMENTOS','SOBRESSALENTES'));
+  if v_native and exists(select 1 from jsonb_to_recordset(p_rows) x(source_section text,source_row integer)
+    where x.source_section is null or x.source_section not in ('EQUIPAMENTOS','SOBRESSALENTES') or x.source_row is null or x.source_row<=0)
+    then raise exception 'R7B: secao ou linha nativa invalida'; end if;
+  if v_native and exists(select 1 from jsonb_to_recordset(p_rows) x(source_row integer) group by x.source_row having count(*)>1)
+    then raise exception 'R7B: linha nativa repetida'; end if;
+  if v_native and exists(select 1 from jsonb_to_recordset(p_rows) x(pn text,sn text)
+    where nullif(btrim(x.sn),'') is not null
+    group by upper(regexp_replace(btrim(x.pn),'[[:space:]]+','','g')),upper(regexp_replace(btrim(x.sn),'[[:space:]]+','','g')) having count(*)>1)
+    then raise exception 'R7B: identidade PN SN repetida'; end if;
+  if exists(select 1 from jsonb_to_recordset(p_rows) x(pn text,localizacao text,quantidade numeric,sn text,source_section text)
       where x.pn is null or btrim(x.pn)='' or upper(btrim(x.pn)) in ('LIMPEZA','DUPLICADO','NULL','PN')
         or upper(btrim(x.pn)) like 'EXCLUIR%' or x.localizacao is null or btrim(x.localizacao)=''
         or x.quantidade is null or x.quantidade<0 or x.quantidade<>round(x.quantidade,6)
-        or nullif(btrim(x.sn),'') is not null)
+        or (nullif(btrim(x.sn),'') is not null and (not v_native or x.source_section is distinct from 'EQUIPAMENTOS' or x.quantidade<>1
+          or upper(regexp_replace(btrim(x.sn),'[[:space:]]+','','g')) in ('N/A','NA','S/N','SN','-','---','NULL','SEMSN','SEMS/N')
+          or upper(regexp_replace(btrim(x.sn),'[[:space:]]+','','g')) ~ '^X+$'
+          or upper(btrim(x.sn)) like 'EXCLUIR%'
+          or public.sisha_normalize_location(x.localizacao) in ('NÃO DEFINIDO','NAO DEFINIDO','CONFLITO DE LOCALIZAÇÃO','CONFLITO DE LOCALIZACAO'))))
     then raise exception 'R6: linha invalida ou formato serializado ainda nao homologado'; end if;
   if exists(select 1 from public.estoque_ppu where pn='LIMPEZA') then raise exception 'R6: sentinela legada requer revisao'; end if;
   if exists(select 1 from jsonb_to_recordset(p_rows) x(localizacao text)
@@ -172,6 +194,9 @@ begin
       and upper(regexp_replace(btrim(i.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn'
       and not exists(select 1 from public.equipamentos_serializados e where e.ativo is distinct from false
         and upper(regexp_replace(btrim(e.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn')
+      and not exists(select 1 from jsonb_to_recordset(p_rows) n(pn text,sn text,source_section text)
+        where (n.source_section='EQUIPAMENTOS' or nullif(btrim(n.sn),'') is not null)
+        and upper(regexp_replace(btrim(n.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn')
       and not exists(select 1 from public.estoque_ppu e where nullif(btrim(e.sn),'') is not null
         and upper(regexp_replace(btrim(e.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn')
       and not exists(select 1 from public.recebimento_itens j join public.recebimentos r2 on r2.id=j.recebimento_id
@@ -208,8 +233,8 @@ begin
 
   delete from public.estoque_ppu;
   insert into public.estoque_ppu(pn,nsn_pi,nomenclatura,quantidade,localizacao,sn)
-  select x.pn,x.nsn_pi,x.nomenclatura,x.quantidade,x.localizacao,null
-    from jsonb_to_recordset(p_rows) x(pn text,nsn_pi text,nomenclatura text,quantidade numeric,localizacao text);
+  select x.pn,x.nsn_pi,x.nomenclatura,x.quantidade,x.localizacao,nullif(btrim(x.sn),'')
+    from jsonb_to_recordset(p_rows) x(pn text,nsn_pi text,nomenclatura text,quantidade numeric,localizacao text,sn text);
   get diagnostics v_count=row_count;
   if v_count<>jsonb_array_length(p_rows) then raise exception 'R6: quantidade de linhas divergente'; end if;
   select jsonb_agg(to_jsonb(p) order by p.id) into v_rows from public.estoque_ppu p;
@@ -219,14 +244,19 @@ begin
   values(v_new_id,'IMPORTACAO',s.id,p_import_log_id,p_file_name,p_source_sha256,p_observed_on,
     v_count,jsonb_array_length(v_policies),v_rows,v_policies,
     encode(sha256(convert_to(v_rows::text,'UTF8')),'hex'),encode(sha256(convert_to(v_policies::text,'UTF8')),'hex'));
+  select coalesce(jsonb_agg(to_jsonb(x) order by x.source_row),'[]'::jsonb) into v_book_items
+    from jsonb_to_recordset(p_rows) x(pn text,sn text,nomenclatura text,localizacao text,source_section text,source_row integer)
+    where x.source_section='EQUIPAMENTOS' and nullif(btrim(x.sn),'') is not null;
+  v_book:=jsonb_build_object('state',case when jsonb_array_length(v_book_items)>0 then 'PENDING' else 'COMPLETE' end,
+    'total',jsonb_array_length(v_book_items),'cursor',0,'items',v_book_items);
   update public.import_logs set status='SUCESSO',tabela_alvo='estoque_ppu',
     linhas_importadas=v_count, mensagem='Inventario e recibos atualizados atomicamente.',finished_at=now(),
-    detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r6_transaction',
+    detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r7_book_sync',v_book,'r6_transaction',
       jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,
         'quantity',v_sum,'observed_on',p_observed_on,'previous_observed_on',v_date,
         'previous_date_evidence',case when s.observed_on is null then p_previous_date_evidence end))
     where id=p_import_log_id;
-  return jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,'quantity',v_sum,
+  return jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,'quantity',v_sum,'book_sync',v_book-'items',
     'previous_observed_on',v_date,'previous_date_evidence',case when s.observed_on is null then p_previous_date_evidence end);
 end;
 $$;
@@ -268,6 +298,7 @@ begin
    public.locrec_importacoes,public.locrec_itens in share row exclusive mode;
  c:=public.sisha_ppu_r6_context();
  if c->>'token' is distinct from p_context_token then raise exception 'R7B: contexto mudou; revisar novamente'; end if;
+ if coalesce(c->'book_sync'->>'state','COMPLETE')<>'COMPLETE' then raise exception 'R7B: concluir sincronizacao do Livro antes da revisao'; end if;
  select h.* into strict s from public.ppu_inventario_snapshots h where h.id=(c->>'snapshot_id')::uuid;
  if s.snapshot_type<>'IMPORTACAO' or s.observed_on is null then
    raise exception 'R7B: primeiro concluir inventario datado'; end if;
@@ -336,5 +367,77 @@ end;
 $r7retro$;
 revoke all on function public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text) from public,anon,authenticated,service_role;
 grant execute on function public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text) to service_role;
+
+
+-- R7B2: durable single-batch claim, using the original import log and source rows.
+-- No automatic takeover of RUNNING: if a process crashes, explicit verified
+-- operator recovery is required, rather than risking simultaneous Livro writers.
+create function public.sisha_ppu_r7_book_claim(p_snapshot_id uuid,p_actor text)
+returns jsonb language plpgsql security invoker set search_path=pg_catalog set timezone='UTC'
+as $r7claim$
+declare
+ c jsonb;
+ s public.ppu_inventario_snapshots%rowtype;
+ l public.import_logs%rowtype;
+ v_book jsonb;
+ v_attempt uuid:=gen_random_uuid();
+ v_cursor integer;
+ v_batch jsonb;
+begin
+ if p_snapshot_id is null or nullif(btrim(p_actor),'') is null then raise exception 'R7B: identificacao obrigatoria'; end if;
+ perform pg_advisory_xact_lock(hashtext('sisha_ppu_inventory_reconciliation')::bigint);
+ lock table public.estoque_ppu in share mode;
+ c:=public.sisha_ppu_r6_context();
+ if (c->>'snapshot_id')::uuid<>p_snapshot_id then raise exception 'R7B: snapshot nao vigente'; end if;
+ select h.* into strict s from public.ppu_inventario_snapshots h where h.id=p_snapshot_id;
+ select x.* into strict l from public.import_logs x where x.id=s.import_log_id for update;
+ v_book:=l.detalhes->'r7_book_sync';
+ if coalesce(v_book->>'state','COMPLETE')='COMPLETE' then return jsonb_build_object('state','COMPLETE'); end if;
+ if v_book->>'state' is distinct from 'PENDING' then raise exception 'R7B: sincronizacao em andamento ou exige recuperacao'; end if;
+ v_cursor:=(v_book->>'cursor')::integer;
+ select coalesce(jsonb_agg(x.value order by x.ordinality),'[]'::jsonb) into v_batch
+ from jsonb_array_elements(v_book->'items') with ordinality x(value,ordinality)
+ where x.ordinality>v_cursor and x.ordinality<=v_cursor+20;
+ if jsonb_array_length(v_batch)<=0 then raise exception 'R7B: lote do Livro inconsistente'; end if;
+ v_book:=v_book||jsonb_build_object('state','RUNNING','attempt_id',v_attempt,'batch_count',jsonb_array_length(v_batch),'started_at',now(),'actor',p_actor);
+ update public.import_logs set detalhes=jsonb_set(detalhes,'{r7_book_sync}',v_book) where id=l.id;
+ return jsonb_build_object('state','RUNNING','attempt_id',v_attempt,'snapshot_id',s.id,'items',v_batch,
+   'sourceHash',s.source_file_sha256,'fileName',s.source_file_name,'observedOn',s.observed_on,'capturedAt',s.captured_at);
+end;
+$r7claim$;
+revoke all on function public.sisha_ppu_r7_book_claim(uuid,text) from public,anon,authenticated,service_role;
+grant execute on function public.sisha_ppu_r7_book_claim(uuid,text) to service_role;
+
+create function public.sisha_ppu_r7_book_finish(p_snapshot_id uuid,p_attempt_id uuid,p_ok boolean,p_summary jsonb,p_actor text)
+returns jsonb language plpgsql security invoker set search_path=pg_catalog set timezone='UTC'
+as $r7finish$
+declare
+ s public.ppu_inventario_snapshots%rowtype;
+ l public.import_logs%rowtype;
+ v_book jsonb;
+ v_cursor integer;
+ v_total integer;
+begin
+ perform pg_advisory_xact_lock(hashtext('sisha_ppu_inventory_reconciliation')::bigint);
+ select h.* into strict s from public.ppu_inventario_snapshots h where h.id=p_snapshot_id
+   and not exists(select 1 from public.ppu_inventario_snapshots n where n.previous_snapshot_id=h.id);
+ select x.* into strict l from public.import_logs x where x.id=s.import_log_id for update;
+ v_book:=l.detalhes->'r7_book_sync';
+ if v_book->>'state' is distinct from 'RUNNING' or (v_book->>'attempt_id')::uuid is distinct from p_attempt_id
+    or v_book->>'actor' is distinct from p_actor or p_ok is null
+ then raise exception 'R7B: lote nao pertence a tentativa ativa'; end if;
+ v_cursor:=(v_book->>'cursor')::integer;
+ v_total:=(v_book->>'total')::integer;
+ if p_ok then v_cursor:=v_cursor+(v_book->>'batch_count')::integer; end if;
+ if v_cursor>v_total then raise exception 'R7B: cursor invalido'; end if;
+ v_book:=(v_book-'attempt_id'-'batch_count'-'actor')||jsonb_build_object('cursor',v_cursor,
+   'state',case when v_cursor=v_total then 'COMPLETE' else 'PENDING' end,'last_finished_at',now(),
+   'last_result',case when p_ok then 'SUCCESS' else 'RETRY_REQUIRED' end,'last_summary',coalesce(p_summary,'{}'::jsonb));
+ update public.import_logs set detalhes=jsonb_set(detalhes,'{r7_book_sync}',v_book) where id=l.id;
+ return v_book-'items';
+end;
+$r7finish$;
+revoke all on function public.sisha_ppu_r7_book_finish(uuid,uuid,boolean,jsonb,text) from public,anon,authenticated,service_role;
+grant execute on function public.sisha_ppu_r7_book_finish(uuid,uuid,boolean,jsonb,text) to service_role;
 
 commit;
