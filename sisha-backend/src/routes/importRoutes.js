@@ -53,6 +53,13 @@ router.post('/upload', requireRole(['admin']), upload.single('file'), createImpo
   }
   return importController.importData(req, res, next);
 });
+// A distinct endpoint ensures older deployed backends fail with 404 rather than
+// accidentally treating a simulation as a destructive legacy upload.
+router.post('/ppu/reconciliacao', requireRole(['admin']), upload.single('file'), (req, res, next) => {
+  req.ppuReconciliationRequest = true;
+  req.body.tipoArquivo = req.body.simularReconciliacao === 'true' ? 'inventario_ppu_simulacao' : 'inventario_ppu';
+  next();
+}, createImportAudit('ppu_reconciliacao'), importController.importData);
 router.post('/upload/ceimspa-sem-demanda', requireRole(['admin']), semDemandUpload.single('file'), createImportAudit('ceimspa_sem_demanda_low_memory'), importCeimspaSemDemandaLowMemory);
 router.post('/confirmar_triagem', requireRole(['admin']), createImportAudit('confirmar_triagem'), importController.confirmarTriagemRecibo);
 router.post('/leonardo', requireRole(['admin']), upload.single('file'), createImportAudit('leonardo_legacy'), importController.importData);
