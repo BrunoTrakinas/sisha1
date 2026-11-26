@@ -37,13 +37,19 @@ begin
   select coalesce(jsonb_agg(pn order by pn),'[]'::jsonb) into v_serial from (
     select distinct upper(regexp_replace(btrim(e.pn),'[[:space:]]+','','g')) pn
     from public.equipamentos_serializados e where e.ativo is distinct from false
+    union select upper(regexp_replace(btrim(x.pn),'[[:space:]]+','','g'))
+      from public.ppu_inventario_snapshots h cross join lateral jsonb_to_recordset(h.rows_payload) x(pn text,sn text)
+      where nullif(btrim(x.sn),'') is not null
+    union select x.value
+      from public.ppu_inventario_snapshots h join public.import_logs l on l.id=h.import_log_id
+      cross join lateral jsonb_array_elements_text(coalesce(l.detalhes->'r7_book_sync'->'equipment_pns','[]'::jsonb)) x(value)
   ) t;
   select coalesce(jsonb_agg(jsonb_build_object(
     'id',l.id,'numero_recibo',l.numero_recibo,'pn',l.pn,'qtd_documental',l.qtd_documental,
     'qtd_auditada_aplicada',l.qtd_auditada_aplicada,'loc_escolhida',l.loc_escolhida,
     'destino_indicado',l.destino_indicado,'data_auditoria',l.data_auditoria) order by l.id),'[]'::jsonb)
     into v_locrec from public.v_sisha_locrec_atual l;
-  select l.detalhes->'r7_book_sync' - 'items' into v_book from public.import_logs l where l.id=s.import_log_id;
+  select (l.detalhes->'r7_book_sync') - 'items' - 'equipment_pns' into v_book from public.import_logs l where l.id=s.import_log_id;
   v_context:=jsonb_build_object('book_sync',v_book,'snapshot_id',s.id,'previous_observed_on',s.observed_on,'source_file_sha256',s.source_file_sha256,
     'previous_rows',v_rows,'previous_policies',s.policies_payload,'policies',v_policies,
     'receipts',v_receipts,'serial_pns',v_serial,'locrec',v_locrec);
@@ -110,7 +116,7 @@ begin
       detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r6_transaction',
         jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'quantity',0))
       where id=p_import_log_id;
-    select l.detalhes->'r7_book_sync' - 'items' into v_book from public.import_logs l where l.id=v_existing.import_log_id;
+    select (l.detalhes->'r7_book_sync') - 'items' - 'equipment_pns' into v_book from public.import_logs l where l.id=v_existing.import_log_id;
     return jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'rows',v_existing.row_count,'items',0,'quantity',0,'book_sync',v_book);
   end if;
 
@@ -194,6 +200,7 @@ begin
       and upper(regexp_replace(btrim(i.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn'
       and not exists(select 1 from public.equipamentos_serializados e where e.ativo is distinct from false
         and upper(regexp_replace(btrim(e.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn')
+      and not exists(select 1 from jsonb_array_elements_text(c->'serial_pns') x(value) where x.value=v_entry.payload->>'pn')
       and not exists(select 1 from jsonb_to_recordset(p_rows) n(pn text,sn text,source_section text)
         where (n.source_section='EQUIPAMENTOS' or nullif(btrim(n.sn),'') is not null)
         and upper(regexp_replace(btrim(n.pn),'[[:space:]]+','','g'))=v_entry.payload->>'pn')
@@ -248,7 +255,10 @@ begin
     from jsonb_to_recordset(p_rows) x(pn text,sn text,nomenclatura text,localizacao text,source_section text,source_row integer)
     where x.source_section='EQUIPAMENTOS' and nullif(btrim(x.sn),'') is not null;
   v_book:=jsonb_build_object('state',case when jsonb_array_length(v_book_items)>0 then 'PENDING' else 'COMPLETE' end,
-    'total',jsonb_array_length(v_book_items),'cursor',0,'items',v_book_items);
+    'total',jsonb_array_length(v_book_items),'cursor',0,'items',v_book_items,
+    'equipment_pns',(select coalesce(jsonb_agg(pn order by pn),'[]'::jsonb) from
+       (select distinct upper(regexp_replace(btrim(x.pn),'[[:space:]]+','','g')) pn
+         from jsonb_to_recordset(p_rows) x(pn text,source_section text) where x.source_section='EQUIPAMENTOS') q));
   update public.import_logs set status='SUCESSO',tabela_alvo='estoque_ppu',
     linhas_importadas=v_count, mensagem='Inventario e recibos atualizados atomicamente.',finished_at=now(),
     detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r7_book_sync',v_book,'r6_transaction',
@@ -256,7 +266,7 @@ begin
         'quantity',v_sum,'observed_on',p_observed_on,'previous_observed_on',v_date,
         'previous_date_evidence',case when s.observed_on is null then p_previous_date_evidence end))
     where id=p_import_log_id;
-  return jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,'quantity',v_sum,'book_sync',v_book-'items',
+  return jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,'quantity',v_sum,'book_sync',v_book-'items'-'equipment_pns',
     'previous_observed_on',v_date,'previous_date_evidence',case when s.observed_on is null then p_previous_date_evidence end);
 end;
 $$;
@@ -316,6 +326,7 @@ begin
  if v_pn in ('LIMPEZA','DUPLICADO','NULL','PN') or v_pn like 'EXCLUIR%' or v_pn='' then raise exception 'R7B: PN invalido'; end if;
  if exists(select 1 from public.equipamentos_serializados e where e.ativo
     and upper(regexp_replace(btrim(e.pn),'[[:space:]]+','','g'))=v_pn)
+ or exists(select 1 from jsonb_array_elements_text(c->'serial_pns') x(value) where x.value=v_pn)
  or exists(select 1 from public.recebimento_itens j where j.ativo
     and upper(regexp_replace(btrim(j.pn),'[[:space:]]+','','g'))=v_pn
     and (j.tipo_item='EQUIPAMENTO' or j.equipamento_id is not null or nullif(btrim(j.sn),'') is not null))
@@ -434,7 +445,7 @@ begin
    'state',case when v_cursor=v_total then 'COMPLETE' else 'PENDING' end,'last_finished_at',now(),
    'last_result',case when p_ok then 'SUCCESS' else 'RETRY_REQUIRED' end,'last_summary',coalesce(p_summary,'{}'::jsonb));
  update public.import_logs set detalhes=jsonb_set(detalhes,'{r7_book_sync}',v_book) where id=l.id;
- return v_book-'items';
+ return v_book-'items'-'equipment_pns';
 end;
 $r7finish$;
 revoke all on function public.sisha_ppu_r7_book_finish(uuid,uuid,boolean,jsonb,text) from public,anon,authenticated,service_role;
