@@ -250,6 +250,40 @@ export default function Cadastro() {
     const [locrec, setLocrec] = useState({ active: null, rows: [], summary: {} });
     const [locrecCarregando, setLocrecCarregando] = useState(false);
     const [locrecMsg, setLocrecMsg] = useState(null);
+    const [retroReview, setRetroReview] = useState(null);
+    const [retroSelection, setRetroSelection] = useState(null);
+    const [retroEvidence, setRetroEvidence] = useState('');
+    const [retroQuantity, setRetroQuantity] = useState('');
+    const [retroConfirmed, setRetroConfirmed] = useState(false);
+    const [retroBusy, setRetroBusy] = useState(false);
+    const [retroMsg, setRetroMsg] = useState(null);
+    const carregarHistoricoRecibos = async () => {
+        setRetroBusy(true); setRetroMsg(null); setRetroSelection(null); setRetroReview(null);
+        setRetroEvidence(''); setRetroQuantity(''); setRetroConfirmed(false);
+        try {
+            const response=await apiFetch('/import/locrec/reconciliacao/historico',{},token);
+            const result=await response.json();
+            if(!response.ok||result.status!=='success')throw new Error(result.message||'Conferência indisponível.');
+            setRetroReview(result.data);
+        } catch(e){setRetroMsg({error:true,text:e.message});}
+        finally {setRetroBusy(false);}
+    };
+    const confirmarHistoricoRecibo = async () => {
+        const quantity=Number(retroQuantity);
+        if(!retroSelection||!retroReview?.token||!retroConfirmed||!Number.isFinite(quantity)||quantity<=0||quantity>retroSelection.candidateQuantity||retroEvidence.trim().length<15||retroBusy)return;
+        setRetroBusy(true);setRetroMsg(null);
+        try{
+            const response=await apiFetch('/import/locrec/reconciliacao/historico',{
+                method:'POST',headers:{...buildAuthHeaders(token),'Content-Type':'application/json'},
+                body:JSON.stringify({token:retroReview.token,itemId:retroSelection.itemId,locrecId:retroSelection.locrecId,quantity,evidence:retroEvidence,confirmed:true})
+            },token);
+            const result=await response.json();
+            if(!response.ok||result.status!=='success'||result.data?.status!=='APPLIED')throw new Error(result.message||'Incorporação não confirmada.');
+            setRetroMsg({error:false,text:'Incorporação histórica registrada. Recarregue a conferência para revisar outro item.'});
+            carregarLocrec(false);
+        }catch(e){setRetroMsg({error:true,text:e.message+' Recarregue a conferência antes de repetir.'});}
+        finally{setRetroBusy(false);setRetroReview(null);setRetroSelection(null);setRetroConfirmed(false);setRetroEvidence('');setRetroQuantity('');}
+    };
 
     const [email, setEmail] = useState('');
     const [roleCadastro, setRoleCadastro] = useState('operador');
@@ -1956,6 +1990,31 @@ export default function Cadastro() {
                                 <div className="rounded-xl bg-orange-50 dark:bg-orange-950/30 p-3 text-orange-800 dark:text-orange-200">Hangar / aguardando: {locrec.summary?.hangar_groups ?? locrec.summary?.pending_groups ?? 0}</div>
                                 <div className="rounded-xl bg-red-50 dark:bg-red-950/30 p-3 text-red-800 dark:text-red-200">Divergências: {(locrec.summary?.divergence_groups || 0) + (locrec.summary?.missing_receipt_groups || 0)}</div>
                             </div>
+                            <details className="rounded-xl border border-slate-200 dark:border-slate-700 p-3 space-y-3">
+                                <summary className="font-black cursor-pointer text-sm">Recibos antigos — conferência de incorporações</summary>
+                                <p className="text-xs">O LOCREC indica processamento, mas não prova sozinho que o item entrou no estoque. Confirme individualmente a entrada documental. O estoque oficial não será alterado.</p>
+                                <button type="button" disabled={retroBusy} onClick={carregarHistoricoRecibos} className="rounded-lg bg-blue-700 text-white px-3 py-2 text-xs font-bold disabled:opacity-50">CONFERIR SALDOS HISTÓRICOS</button>
+                                {retroMsg && <p className={retroMsg.error?'text-red-600 text-sm':'text-emerald-700 text-sm'}>{retroMsg.text}</p>}
+                                {retroReview?.status==='WAITING_NEW_INVENTORY'&&<p className="text-sm font-bold">Conclua primeiro a importação de um inventário com data operacional confirmada.</p>}
+                                {retroReview?.status==='REVIEW_READY'&&<>
+                                    <p className="text-xs">{retroReview.candidates.length} grupos para revisão. Apenas candidatos com quantidade validável permitem selecionar uma incorporação.</p>
+                                    <div className="max-h-56 overflow-auto"><table className="w-full text-xs"><thead><tr><th>Recibo</th><th>PN</th><th>Saldo</th><th>Qtd candidata</th><th>Revisão</th></tr></thead><tbody>
+                                        {retroReview.candidates.map((c,i)=><tr key={i} className="border-t border-slate-200 dark:border-slate-700"><td>{c.receiptNo}</td><td>{c.pn}</td><td>{c.remaining}</td><td>{c.candidateQuantity||'—'}</td><td>{c.itemId&&c.locrecId&&c.candidateQuantity>0?<button type="button" disabled={retroBusy} onClick={()=>{setRetroSelection(c);setRetroQuantity(String(c.candidateQuantity));setRetroEvidence('');setRetroConfirmed(false);}} className="text-blue-600 underline font-bold">Conferir</button>:'Pendente de evidência'}</td></tr>)}
+                                    </tbody></table></div>
+                                </>}
+                                {retroSelection&&<div className="border rounded-xl p-3 space-y-2">
+                                    <p className="font-bold text-sm">Recibo {retroSelection.receiptNo} • PN {retroSelection.pn}</p>
+                                    <label className="block text-xs">Quantidade comprovada (máximo {retroSelection.candidateQuantity})
+                                        <input type="number" min="0" max={retroSelection.candidateQuantity} step="0.000001" value={retroQuantity} disabled={retroBusy} onChange={e=>{setRetroQuantity(e.target.value);setRetroConfirmed(false);}} className="block rounded border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                    <label className="block text-xs">Referência documental da entrada efetiva no estoque (não apenas a coincidência do PN)
+                                        <textarea maxLength={2000} value={retroEvidence} disabled={retroBusy} onChange={e=>{setRetroEvidence(e.target.value);setRetroConfirmed(false);}} className="block w-full rounded border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                    <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={retroConfirmed} disabled={retroBusy} onChange={e=>setRetroConfirmed(e.target.checked)}/>Conferi a entrada efetiva desta quantidade e autorizo reduzir somente o saldo temporário deste Recibo.</label>
+                                    <button type="button" disabled={retroBusy||!retroConfirmed||retroEvidence.trim().length<15||!(Number(retroQuantity)>0&&Number(retroQuantity)<=retroSelection.candidateQuantity)} onClick={confirmarHistoricoRecibo} className="rounded-lg bg-emerald-700 px-3 py-2 text-white text-xs font-black disabled:opacity-50">REGISTRAR INCORPORAÇÃO</button>
+                                    <button type="button" disabled={retroBusy} onClick={()=>setRetroSelection(null)} className="ml-2 text-xs underline">Cancelar</button>
+                                </div>}
+                            </details>
                             {locrecMsg && <p className={`font-bold ${locrecMsg.tipo === 'success' ? 'text-green-600' : 'text-red-600'}`}>{locrecMsg.texto}</p>}
                             {locrecCarregando ? <p className="font-bold text-slate-500">CARREGANDO...</p> : null}
                             {!locrecCarregando && !(locrec.rows || []).length ? (
