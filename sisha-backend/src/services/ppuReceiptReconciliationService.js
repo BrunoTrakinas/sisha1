@@ -158,7 +158,7 @@ function buildRetroactiveReview(context, rows, options, plans=[]) {
     }else{
       const d=ds[0],{r,i}=rs[0],l=loc(d.loc_escolhida),day=date(String(d.data_auditoria||'').slice(0,10)),lk=key(p,l);
       const policy=policies.get(l);
-      if(!day||!date(r.data_recebimento)||day<r.data_recebimento||day>observedOn||d.destino_indicado!=='PPU'||!policy?.ativo||!policy?.contabiliza_ppu||['VENCIDO','REVISAR','SEM_ESTOQUE'].includes(i.validade_status)||(stock.get(lk)||0)<(claims.get(lk)||0)){
+      if(!day||!date(r.data_recebimento)||r.data_recebimento>=observedOn||day<r.data_recebimento||day>observedOn||d.destino_indicado!=='PPU'||!policy?.ativo||!policy?.contabiliza_ppu||(policy.destino_contabilizacao&&policy.destino_contabilizacao!=='PPU')||i.tipo_item!=='SOBRESSALENTE'||['NÃO DEFINIDO','NAO DEFINIDO','CONFLITO DE LOCALIZAÇÃO','CONFLITO DE LOCALIZACAO'].includes(l)||['VENCIDO','REVISAR','SEM_ESTOQUE'].includes(i.validade_status)||(stock.get(lk)||0)<(claims.get(lk)||0)){
         reason='DATA_LOCAL_OU_QUANTIDADE_DIVERGENTE';counts.conflict++;
       }else{
         cap=Math.max(0,Math.min(remaining,qty(d.qtd_auditada_aplicada)-qty(i.quantidade_inventariada)-(applied.get(String(i.id))||0)));
@@ -167,7 +167,8 @@ function buildRetroactiveReview(context, rows, options, plans=[]) {
         reason=day<=previousOn?'EVIDENCIA_ANTERIOR_AO_INVENTARIO':'EVIDENCIA_NAO_CONSUMIDA';
       }
     }
-    candidates.push({receiptNo:rs[0].r.numero_recibo,pn:p,remaining:Number(remaining.toFixed(6)),candidateQuantity:Number(cap.toFixed(6)),reason,locations:[...new Set(ds.map(d=>loc(d.loc_escolhida)).filter(Boolean))]});
+    candidates.push({receiptNo:rs[0].r.numero_recibo,pn:p,remaining:Number(remaining.toFixed(6)),candidateQuantity:Number(cap.toFixed(6)),reason,locations:[...new Set(ds.map(d=>loc(d.loc_escolhida)).filter(Boolean))],
+      itemId:cap>0&&rs.length===1?rs[0].i.id:null,locrecId:cap>0&&ds.length===1?ds[0].id:null});
   }
   return {counts,candidates,automatic:false};
 }
@@ -217,4 +218,29 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
   if(!['APPLIED','REUSED'].includes(data?.status))throw new Error('R6: resultado transacional inesperado.');
   return data;
 }
-module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview};
+async function getRetroactiveReview(db, actor) {
+  const {data:context,error}=await db.rpc('sisha_ppu_r6_context');
+  if(error)throw error;
+  if(!context.previous_observed_on||!context.source_file_sha256)return {status:'WAITING_NEW_INVENTORY',candidates:[],automatic:false};
+  const review=buildRetroactiveReview(context,context.previous_rows,{observedOn:context.previous_observed_on},[]);
+  const token=crypto.createHash('sha256').update(JSON.stringify({version:'R7B1',context:context.token,actor})).digest('hex');
+  return {...review,status:'REVIEW_READY',token,contextToken:context.token};
+}
+async function applyRetroactiveReview(db, actor, body={}) {
+  if(!actor||body.confirmed!==true||typeof body.evidence!=='string'||body.evidence.trim().length<15||body.evidence.length>2000
+    ||!Number.isSafeInteger(body.itemId)||!Number.isSafeInteger(body.locrecId)||typeof body.quantity!=='number'
+    ||!Number.isFinite(body.quantity)||body.quantity<=0||Math.abs(body.quantity*1e6-Math.round(body.quantity*1e6))>1e-5)
+    throw new Error('Confirme individualmente a entrada e informe a referência documental e a quantidade.');
+  const review=await getRetroactiveReview(db,actor);
+  if(review.status!=='REVIEW_READY'||body.token!==review.token)throw new Error('Conferência desatualizada. Recarregue os candidatos.');
+  const candidate=review.candidates.find(c=>c.itemId===body.itemId&&c.locrecId===body.locrecId&&c.candidateQuantity>=body.quantity);
+  if(!candidate)throw new Error('Item ou quantidade não elegível para incorporação histórica.');
+  const {data,error}=await db.rpc('sisha_ppu_r7_retro_apply',{
+    p_context_token:review.contextToken,p_item_id:body.itemId,p_locrec_id:body.locrecId,
+    p_quantity:body.quantity,p_evidence:body.evidence.trim(),p_actor:actor
+  });
+  if(error)throw error;
+  if(data?.status!=='APPLIED')throw new Error('Resultado histórico não confirmado.');
+  return data;
+}
+module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview};
