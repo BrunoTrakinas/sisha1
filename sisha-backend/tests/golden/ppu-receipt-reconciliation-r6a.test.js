@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildR6Plan,importPpuR6,validateAggregateCoverage}=require('../../src/services/ppuReceiptReconciliationService');
+const {buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview}=require('../../src/services/ppuReceiptReconciliationService');
 const row=(q,localizacao='A-1',sn=null)=>({pn:'P1',quantidade:q,localizacao,sn});
 const p=(localizacao_normalizada,contabiliza_ppu=true)=>({localizacao_normalizada,ativo:true,contabiliza_ppu});
 const rec=(id,q,extra={})=>({id,numero_recibo:String(id),ativo:true,data_recebimento:'2026-10-01',recebimento_itens:[{id:id*10,pn:'P1',ativo:true,quantidade:q,quantidade_inventariada:0,contabiliza_pelo_recibo:true,condicao_item:'RECEBIDO_DISPONIVEL',tipo_item:'SOBRESSALENTE',...extra}]});
@@ -35,9 +35,14 @@ test('R6 documentary evidence precedes quantity exact',()=>{
 test('R6 preview is read only and apply uses only transactional RPC',async()=>{
   const calls=[];const db={rpc:async(n,args)=>{calls.push(n);return {data:n==='sisha_ppu_r6_context'?context():{status:'APPLIED',rows:1}};}};
   const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:[['PN','QTD','LOCALIZACAO'],['P1',2,'A-1']],sheetCount:1,buffer:Buffer.from('fixture'),fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:{...opts,preview:true}};
-  assert.equal((await importPpuR6(args)).status,'PREVIEW');
+  const preview=await importPpuR6(args);
+  assert.equal(preview.status,'PREVIEW');
   assert.deepEqual(calls,['sisha_ppu_r6_context']);
-  calls.length=0;await importPpuR6({...args,options:opts});
+  calls.length=0;await assert.rejects(importPpuR6({...args,options:opts}),/Simulação ausente/);
+  assert.deepEqual(calls,['sisha_ppu_r6_context']);
+  calls.length=0;await assert.rejects(importPpuR6({...args,buffer:Buffer.from('different'),options:{...opts,previewToken:preview.previewToken}}),/Simulação ausente/);
+  assert.deepEqual(calls,['sisha_ppu_r6_context']);
+  calls.length=0;await importPpuR6({...args,options:{...opts,previewToken:preview.previewToken}});
   assert.deepEqual(calls,['sisha_ppu_r6_context','sisha_ppu_r6_apply']);
 });
 test('R6 SQL migration contains single transaction, server-only RPC, receipt event and immutable snapshot',()=>{
@@ -54,7 +59,10 @@ test('R6 replay of the same current source hash submits no plan and cannot debit
   const calls=[];
   const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r6_context'?context({source_file_sha256:hash,previous_observed_on:opts.observedOn}):{status:'REUSED'}};}};
   const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{...row(2),source_section:'LEGADO_AGREGADO',source_row:2}]},rows:[row(2)],rawRows:[['PN','QTD','LOCALIZACAO'],['P1',2,'A-1']],sheetCount:1,buffer,fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:opts};
-  assert.equal((await importPpuR6(args)).status,'REUSED');
+  const preview=await importPpuR6({...args,options:{...opts,preview:true}});
+  assert.equal(preview.status,'PREVIEW_REUSED');
+  calls.length=0;
+  assert.equal((await importPpuR6({...args,options:{...opts,previewToken:preview.previewToken}})).status,'REUSED');
   assert.deepEqual(calls[1].args.p_plan,[]);
 });
 test('R6 activation is gated and never falls back on failed transactional RPC',()=>{
@@ -79,4 +87,24 @@ test('R6B historical LOCREC does not take priority over the current inventory wi
  const c=context({receipts:[rec(1,1),rec(2,2)],locrec:[{numero_recibo:'2',pn:'P1',qtd_documental:2,qtd_auditada_aplicada:1,loc_escolhida:'A-1',destino_indicado:'PPU',data_auditoria:'2026-10-02'}]});
  const plan=run(c,[row(2)]);
  assert.equal(plan[0].receiptId,1);assert.equal(plan[0].method,'QTD_EXATA');
+});
+
+test('R7 historical review stays consultative and subtracts incremental allocations',()=>{
+ const c=context({receipts:[rec(1,4)],locrec:[{numero_recibo:'1',pn:'P1',qtd_documental:4,qtd_auditada_aplicada:3,loc_escolhida:'A-1',destino_indicado:'PPU',data_auditoria:'2026-10-02'}]});
+ const result=buildRetroactiveReview(c,[row(4)],opts,[{itemId:10,quantity:1}]);
+ assert.equal(result.automatic,false);assert.equal(result.candidates[0].candidateQuantity,2);
+ assert.equal(result.candidates[0].remaining,3);assert.equal(result.candidates[0].reason,'EVIDENCIA_ANTERIOR_AO_INVENTARIO');
+ assert.equal(buildRetroactiveReview({...c,serial_pns:['P1']},[row(4)],opts).candidates[0].candidateQuantity,0);
+ assert.equal(buildRetroactiveReview(c,[row(2)],opts).candidates[0].candidateQuantity,0);
+});
+test('R7 dedicated endpoint cannot fall back to old destructive importer',()=>{
+ const fs=require('node:fs'),path=require('node:path');
+ const routes=fs.readFileSync(path.resolve(__dirname,'../../src/routes/importRoutes.js'),'utf8');
+ const controller=fs.readFileSync(path.resolve(__dirname,'../../src/controllers/importController.js'),'utf8');
+ const ui=fs.readFileSync(path.resolve(__dirname,'../../../sisha-frontend/src/pages/Cadastro.jsx'),'utf8');
+ assert.match(routes,/router\.post\('\/ppu\/reconciliacao', requireRole\(\['admin'\]\)/);
+ assert.match(routes,/inventario_ppu_simulacao/);
+ assert.match(controller,/req\.ppuReconciliationRequest && process\.env\.PPU_RECEIPT_RECONCILIATION_ENABLED !== 'true'/);
+ assert.match(ui,/apiFetch\('\/import\/ppu\/reconciliacao'/);
+ assert.match(ui,/previewToken/);
 });
