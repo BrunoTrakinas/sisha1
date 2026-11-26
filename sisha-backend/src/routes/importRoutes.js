@@ -75,6 +75,23 @@ router.put('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rfq_m
 router.delete('/rfq/cotacoes/:id', requireRole(['admin']), createImportAudit('rfq_manual_desativar'), importController.deactivateRfqCotacao);
 router.get('/logs', requireRole(['admin']), importController.listImportLogs);
 router.get('/locrec/reconciliacao', requireRole(['admin']), importController.getLocrecReconciliation);
+// Historical correction uses the existing LOCREC screen; it never changes official stock.
+const {getRetroactiveReview,applyRetroactiveReview}=require('../services/ppuReceiptReconciliationService');
+const ppuDb=require('../config/supabaseClient');
+router.get('/locrec/reconciliacao/historico', requireRole(['admin']), async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
+  try {
+    const {contextToken,...review}=await getRetroactiveReview(ppuDb,req.user.email);
+    return res.json({status:'success',data:review});
+  }catch(e){return res.status(409).json({status:'error',message:e.message||'Conferência indisponível.'});}
+});
+router.post('/locrec/reconciliacao/historico', requireRole(['admin']), async (req,res)=>{
+  if(process.env.PPU_RECEIPT_RECONCILIATION_ENABLED!=='true')return res.status(503).json({status:'error',message:'Reconciliação ainda não habilitada.'});
+  try {
+    const result=await applyRetroactiveReview(ppuDb,req.user.email,req.body);
+    return res.json({status:'success',data:result});
+  }catch(e){return res.status(409).json({status:'error',message:e.message||'Incorporação não confirmada.'});}
+});
 router.get('/custodia-externa-ppu/reconciliacao', requireRole(['admin']), importController.getPpuExternalCustodyReconciliation);
 router.post('/custodia-externa-ppu/reconciliacao', requireRole(['admin']), createImportAudit('ppu_custodia_externa_decisao'), importController.decidePpuExternalCustodyReconciliation);
 
