@@ -111,6 +111,77 @@ function validateAggregateCoverage(parsed, rawRows, sheetCount) {
   if(recognized!==byRow.size||recognized===0)throw new Error('R6: cobertura do relatório diverge do parser.');
   return {recognized,markers,footers};
 }
+function buildRetroactiveReview(context, rows, options, plans=[]) {
+  // Consultative only. Match receipt number + PN and documentary quantity.
+  // Do not assert that a historical audit equals physical incorporation.
+  const groups=new Map(), docs=new Map(), stock=new Map(), claims=new Map(), applied=new Map();
+  const previousOn=date(context.previous_observed_on||options.previousObservedOn);
+  const observedOn=date(options.observedOn);
+  const policies=new Map((context.policies||[]).map(x=>[loc(x.localizacao_normalizada),x]));
+  const serial=new Set((context.serial_pns||[]).map(pn));
+  for(const r of [...(context.previous_rows||[]),...rows])if(String(r.sn||'').trim())serial.add(pn(r.pn));
+  for(const r of context.receipts||[])for(const i of r.recebimento_itens||[]){
+    if(i.ativo===false||r.ativo===false)continue;
+    if(i.tipo_item==='EQUIPAMENTO'||String(i.sn||'').trim()||i.equipamento_id)serial.add(pn(i.pn));
+    const k=key(receiptNo(r.numero_recibo),pn(i.pn));
+    if(!groups.has(k))groups.set(k,[]);
+    groups.get(k).push({r,i});
+  }
+  for(const d of context.locrec||[]){
+    const k=key(receiptNo(d.numero_recibo),pn(d.pn));
+    if(!docs.has(k))docs.set(k,[]);
+    docs.get(k).push(d);
+    if(d.destino_indicado==='PPU'&&qty(d.qtd_auditada_aplicada)>0){
+      const lk=key(pn(d.pn),loc(d.loc_escolhida));
+      claims.set(lk,(claims.get(lk)||0)+qty(d.qtd_auditada_aplicada));
+    }
+  }
+  for(const r of rows){const k=key(pn(r.pn),loc(r.localizacao));stock.set(k,(stock.get(k)||0)+qty(r.quantidade));}
+  for(const p of plans)applied.set(String(p.itemId),(applied.get(String(p.itemId))||0)+qty(p.quantity));
+  const candidates=[];
+  const counts={review:0,conflict:0,serial:0};
+  for(const [k,ds] of docs){
+    const rs=groups.get(k)||[];
+    if(!rs.length||!ds.some(d=>d.destino_indicado==='PPU'&&qty(d.qtd_auditada_aplicada)>0))continue;
+    const pending=rs.filter(({i})=>i.contabiliza_pelo_recibo===true&&i.condicao_item==='RECEBIDO_DISPONIVEL'&&i.destino_previsto!=='CEIMSPA'&&i.destino_estoque!=='CEIMSPA'&&qty(i.quantidade)>qty(i.quantidade_inventariada));
+    if(!pending.length)continue;
+    const total=rs.reduce((a,{i})=>a+qty(i.quantidade),0);
+    const document=ds.reduce((a,d)=>a+qty(d.qtd_documental),0);
+    const audited=ds.reduce((a,d)=>a+qty(d.qtd_auditada_aplicada),0);
+    const remaining=pending.reduce((a,{i})=>a+Math.max(0,qty(i.quantidade)-qty(i.quantidade_inventariada)-(applied.get(String(i.id))||0)),0);
+    if(remaining<=0)continue;
+    const p=pn(rs[0].i.pn);
+    let reason='REVISAR_EVIDENCIA_HISTORICA',cap=0;
+    if(serial.has(p)){reason='SERIAL_EXIGE_IDENTIDADE';counts.serial++;}
+    else if(!previousOn||!observedOn||rs.length!==1||ds.length!==1||Math.abs(total-document)>1e-6||audited>total){
+      reason='DOCUMENTO_OU_GRUPO_AMBIGUO';counts.conflict++;
+    }else{
+      const d=ds[0],{r,i}=rs[0],l=loc(d.loc_escolhida),day=date(String(d.data_auditoria||'').slice(0,10)),lk=key(p,l);
+      const policy=policies.get(l);
+      if(!day||!date(r.data_recebimento)||day<r.data_recebimento||day>observedOn||d.destino_indicado!=='PPU'||!policy?.ativo||!policy?.contabiliza_ppu||['VENCIDO','REVISAR','SEM_ESTOQUE'].includes(i.validade_status)||(stock.get(lk)||0)<(claims.get(lk)||0)){
+        reason='DATA_LOCAL_OU_QUANTIDADE_DIVERGENTE';counts.conflict++;
+      }else{
+        cap=Math.max(0,Math.min(remaining,qty(d.qtd_auditada_aplicada)-qty(i.quantidade_inventariada)-(applied.get(String(i.id))||0)));
+        if(cap<=0)continue;
+        counts.review++;
+        reason=day<=previousOn?'EVIDENCIA_ANTERIOR_AO_INVENTARIO':'EVIDENCIA_NAO_CONSUMIDA';
+      }
+    }
+    candidates.push({receiptNo:rs[0].r.numero_recibo,pn:p,remaining:Number(remaining.toFixed(6)),candidateQuantity:Number(cap.toFixed(6)),reason,locations:[...new Set(ds.map(d=>loc(d.loc_escolhida)).filter(Boolean))]});
+  }
+  return {counts,candidates,automatic:false};
+}
+function previewFingerprint({context,hash,options,plan,user}) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    version:'R7A',context:context.token,hash,actor:user.email,
+    observedOn:options.observedOn,previousObservedOn:options.previousObservedOn||null,
+    previousDateEvidence:options.previousDateEvidence||null,complete:options.complete===true,
+    plan
+  })).digest('hex');
+}
+function requirePreview(options,token){
+  if(options.preview!==true && options.previewToken!==token)throw new Error('Simulação ausente ou desatualizada. Confira novamente antes de confirmar.');
+}
 async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileName,logId,user,options}) {
   if(parsed?.format!=='PPU_LEGADO_TABULAR'||(parsed.items||[]).some(r=>r.source_section!=='LEGADO_AGREGADO'))
     throw new Error('R6A: relatório serializado não homologado; não substitua o inventário por esta rotina.');
@@ -120,7 +191,9 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
   if(readError)throw readError;
   const hash=crypto.createHash('sha256').update(buffer).digest('hex');
   if(context.source_file_sha256===hash && context.previous_observed_on===date(options.observedOn) && options.complete===true){
-    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0};
+    const previewToken=previewFingerprint({context,hash,options,plan:[],user});
+    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0,previewToken,plans:[],retroactive:{counts:{review:0,conflict:0,serial:0},candidates:[],automatic:false}};
+    requirePreview(options,previewToken);
     const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
       p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
       p_observed_on:options.observedOn,p_previous_observed_on:null,p_previous_date_evidence:null,
@@ -131,7 +204,10 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
     return data;
   }
   const plan=buildR6Plan(context,rows,options);
-  if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings};
+  const previewToken=previewFingerprint({context,hash,options,plan:plan.plans,user});
+  if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings,plans:plan.plans,previewToken,
+    retroactive:buildRetroactiveReview(context,rows,options,plan.plans),blockedSerialPns:plan.blockedSerialPns};
+  requirePreview(options,previewToken);
   const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
     p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
     p_observed_on:plan.observedOn,p_previous_observed_on:plan.previousOn,p_previous_date_evidence:options.previousDateEvidence||null,
@@ -141,4 +217,4 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
   if(!['APPLIED','REUSED'].includes(data?.status))throw new Error('R6: resultado transacional inesperado.');
   return data;
 }
-module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage};
+module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview};
