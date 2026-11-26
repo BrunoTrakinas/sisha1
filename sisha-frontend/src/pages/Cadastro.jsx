@@ -219,6 +219,15 @@ export default function Cadastro() {
         { key: 'atualizacoes', label: 'Atualizações', descricao: 'Veja quais documentos foram enviados ao SISHA e quando ocorreu a última atualização registrada.' },
     ];
     const [file, setFile] = useState(null);
+    const [ppuMode, setPpuMode] = useState('resumido');
+    const [ppuReviewFields, setPpuReviewFields] = useState({observedOn:'',previousOn:'',evidence:'',complete:false});
+    const [ppuReview, setPpuReview] = useState(null);
+    const [ppuApplied, setPpuApplied] = useState(null);
+    const changePpuField = (key, value) => {
+        setPpuReviewFields(prev => ({...prev, [key]:value}));
+        setPpuReview(null);
+        setPpuApplied(null);
+    };
     const [tipoArquivo, setTipoArquivo] = useState('order_book');
     const [uploadCarregando, setUploadCarregando] = useState(false);
     const [uploadMsg, setUploadMsg] = useState(null);
@@ -266,10 +275,20 @@ export default function Cadastro() {
     const orientacaoUpload = orientacoesUploadPorTipo[tipoArquivo];
 
     const handleFileChange = (e) => {
+        setPpuReview(null);
+        setPpuApplied(null);
         if (e.target.files[0]) {
             setFile(e.target.files[0]);
             const nomeArquivo = e.target.files[0].name.toLowerCase();
-            if (/(?:^|[ _-])pan(?:[ _-]|\d)|service[ _-]*bulletin|lx[ _-]*pan/.test(nomeArquivo)) {
+            if (nomeArquivo.includes('inventarioppuresumido')) {
+                setTipoArquivo('inventario_ppu');
+                setPpuMode('resumido');
+                setModalCeimspaConfirm(false);
+            } else if (nomeArquivo.includes('inventarioppugeralloc')) {
+                setTipoArquivo('inventario_ppu');
+                setPpuMode('geral');
+                setModalCeimspaConfirm(false);
+            } else if (/(?:^|[ _-])pan(?:[ _-]|\d)|service[ _-]*bulletin|lx[ _-]*pan/.test(nomeArquivo)) {
                 setTipoArquivo('sb');
                 setModalCeimspaConfirm(false);
             } else if (nomeArquivo.includes('locrec')) {
@@ -309,9 +328,44 @@ export default function Cadastro() {
         return map;
     }, new Map()).values());
 
+    const handlePpuReconciliation = async (preview) => {
+        if (!file || uploadCarregando || !ppuReviewFields.complete || !ppuReviewFields.observedOn) return;
+        if (!preview && (!ppuReview?.previewToken || ppuReview.status !== 'PREVIEW' && ppuReview.status !== 'PREVIEW_REUSED')) return;
+        setUploadCarregando(true);
+        setUploadMsg(null);
+        if (preview) { setPpuReview(null); setPpuApplied(null); }
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('tipoArquivo', 'inventario_ppu');
+        formData.append('dataInventario', ppuReviewFields.observedOn);
+        formData.append('dataInventarioAnterior', ppuReviewFields.previousOn);
+        formData.append('referenciaDataAnterior', ppuReviewFields.evidence);
+        formData.append('inventarioCompleto', 'true');
+        formData.append('simularReconciliacao', preview ? 'true' : 'false');
+        if (!preview) formData.append('previewToken', ppuReview.previewToken);
+        try {
+            const response = await apiFetch('/import/ppu/reconciliacao', {
+                method:'POST', headers:buildAuthHeaders(token), body:formData
+            }, token);
+            const data = await response.json();
+            const result = data.reconciliacao;
+            if (!response.ok || data.status !== 'success' || !result ||
+                (preview ? !['PREVIEW','PREVIEW_REUSED'].includes(result.status) : !['APPLIED','REUSED'].includes(result.status))) {
+                throw new Error(data.message || 'Não foi possível confirmar o resultado da reconciliação.');
+            }
+            if (preview) setPpuReview(result);
+            else { setPpuReview(null); setPpuApplied(result); setFile(null); carregarAtualizacoes(true); }
+            setUploadMsg({tipo:'success',texto:data.message});
+        } catch (error) {
+            setPpuReview(null);
+            setUploadMsg({tipo:'error',texto:error.message || 'Falha na reconciliação. Consulte a trilha antes de repetir.'});
+        } finally { setUploadCarregando(false); }
+    };
+
     const handleUpload = async (e) => {
         e.preventDefault();
         if (!file) return;
+        if (tipoArquivo === 'inventario_ppu' && ppuMode === 'resumido') return handlePpuReconciliation(true);
         setUploadCarregando(true);
         setUploadMsg(null);
 
@@ -971,12 +1025,13 @@ export default function Cadastro() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <select
                             value={tipoArquivo}
-                            onChange={(e) => setTipoArquivo(e.target.value)}
+                            disabled={uploadCarregando}
+                            onChange={(e) => {setTipoArquivo(e.target.value); setPpuReview(null); setPpuApplied(null);}}
                             className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100"
                         >
                             <option value="order_book">Order Book</option>
                             <option value="price_list">Price List</option>
-                            <option value="inventario_ppu">InventarioPPUGeralLoc — Inventário Geral PPU por Localização</option>
+                            <option value="inventario_ppu">Inventário PPU — Geral ou Resumido</option>
                             <option value="locrec">LOCREC — Processamento e Localização de Recebidos</option>
                             <option value="custodia_externa_ppu">Backend_Auditoria_Paiol — Caixas CEIMSPA sob custódia PPU</option>
                             <option value="controle_equipamentos_criticos">Controle de Equipamentos Criticos da Aeronave</option>
@@ -1002,6 +1057,7 @@ export default function Cadastro() {
                         <input
                             type="file"
                             onChange={handleFileChange}
+                            disabled={uploadCarregando}
                             className="w-full p-3 bg-white dark:bg-slate-950 border-2 border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-slate-100 file:text-slate-900"
                         />
                     </div>
@@ -1019,13 +1075,55 @@ export default function Cadastro() {
                         )}
                     </div>
 
+                    {tipoArquivo === 'inventario_ppu' && (
+                        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
+                            <label className="text-sm font-bold block">Formato do inventário
+                                <select value={ppuMode} disabled={uploadCarregando} onChange={e=>{setPpuMode(e.target.value);setPpuReview(null);setPpuApplied(null);}} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900">
+                                    <option value="resumido">Resumido por PN e localização — conferência de Recibos</option>
+                                    <option value="geral">Geral por localização — fluxo existente de equipamentos</option>
+                                </select>
+                            </label>
+                            {ppuMode === 'resumido' ? <>
+                                <p className="text-xs text-slate-600 dark:text-slate-300">Primeiro simule, depois confira as quantidades. A data operacional deve vir do levantamento, não da data de criação do arquivo.</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <label className="text-xs font-bold">Data operacional do inventário novo
+                                        <input type="date" value={ppuReviewFields.observedOn} disabled={uploadCarregando} onChange={e=>changePpuField('observedOn',e.target.value)} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                    <label className="text-xs font-bold">Data operacional anterior (necessária na primeira reconciliação)
+                                        <input type="date" value={ppuReviewFields.previousOn} disabled={uploadCarregando} onChange={e=>changePpuField('previousOn',e.target.value)} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900"/>
+                                    </label>
+                                </div>
+                                <label className="text-xs font-bold block">Referência documental da data anterior (na primeira reconciliação)
+                                    <input value={ppuReviewFields.evidence} disabled={uploadCarregando} onChange={e=>changePpuField('evidence',e.target.value)} className="block w-full mt-1 rounded-lg border p-2 bg-white dark:bg-slate-900" placeholder="Documento ou registro que confirma a data"/>
+                                </label>
+                                <label className="flex items-start gap-2 text-sm font-bold"><input type="checkbox" checked={ppuReviewFields.complete} disabled={uploadCarregando} onChange={e=>changePpuField('complete',e.target.checked)}/>Confirmo que o relatório corresponde ao inventário completo, sem filtros ou exclusões manuais.</label>
+                                {ppuReview && <div className="rounded-xl border border-blue-200 dark:border-blue-800 p-3 space-y-3">
+                                    <p className="font-black">Prévia — nenhuma baixa realizada</p>
+                                    <p className="text-sm">{ppuReview.rows} linhas do inventário • {ppuReview.allocations} alocações propostas. Quantidades de materiais com unidades diferentes não são somadas para conferência física.</p>
+                                    <div className="max-h-64 overflow-auto"><table className="w-full text-xs"><thead><tr><th className="text-left p-1">Recibo</th><th className="text-left p-1">PN</th><th>Incorporar</th><th>Restante</th><th className="text-left">Evidência</th></tr></thead><tbody>
+                                        {(ppuReview.plans||[]).map((p,i)=><tr key={i} className="border-t border-slate-200 dark:border-slate-700"><td className="p-1">{p.receiptNo}</td><td className="p-1">{p.pn}</td><td className="text-center">{p.quantity}</td><td className="text-center">{p.pending}</td><td>{p.method==='LOCREC'?'LOCREC':p.method==='QTD_EXATA'?'Quantidade exata (inferência)':'Recibo mais antigo (inferência)'}</td></tr>)}
+                                    </tbody></table></div>
+                                    <details><summary className="font-bold cursor-pointer text-sm">Pendências históricas — somente conferência ({ppuReview.retroactive?.candidates?.length||0})</summary>
+                                        <p className="text-xs mt-2">Não serão baixadas nesta importação. Quantidade candidata não comprova entrada física; equipamentos exigem identidade PN + SN.</p>
+                                        <div className="max-h-48 overflow-auto"><table className="w-full text-xs"><thead><tr><th>Recibo</th><th>PN</th><th>Saldo após prévia</th><th>Candidato</th><th>Motivo</th></tr></thead><tbody>
+                                            {(ppuReview.retroactive?.candidates||[]).map((p,i)=><tr key={i} className="border-t"><td>{p.receiptNo}</td><td>{p.pn}</td><td>{p.remaining}</td><td>{p.candidateQuantity||'—'}</td><td>{({SERIAL_EXIGE_IDENTIDADE:'Identidade serial a conferir',DOCUMENTO_OU_GRUPO_AMBIGUO:'Documento/grupo ambíguo',DATA_LOCAL_OU_QUANTIDADE_DIVERGENTE:'Data, local ou quantidade divergente',EVIDENCIA_ANTERIOR_AO_INVENTARIO:'Evidência anterior',EVIDENCIA_NAO_CONSUMIDA:'Evidência não consumida'})[p.reason]||'Revisão necessária'}</td></tr>)}
+                                        </tbody></table></div>
+                                    </details>
+                                    <button type="button" disabled={uploadCarregando} onClick={()=>handlePpuReconciliation(false)} className="rounded-xl bg-emerald-700 text-white px-4 py-2 font-black disabled:opacity-50">CONFIRMAR IMPORTAÇÃO E INCORPORAÇÕES</button>
+                                    <button type="button" disabled={uploadCarregando} onClick={()=>setPpuReview(null)} className="ml-2 text-sm underline">Cancelar conferência</button>
+                                </div>}
+                                {ppuApplied && <div className="rounded-xl border border-emerald-300 p-3 text-sm font-bold">{ppuApplied.status==='REUSED'?'Arquivo já aplicado, sem repetição de baixas.':`Inventário atualizado: ${ppuApplied.rows} linhas, ${ppuApplied.allocations||0} alocações registradas.`}</div>}
+                            </> : <p className="text-sm">Relatório geral com SN utiliza o fluxo existente enquanto a reconciliação transacional desse formato não estiver homologada. Não use este modo para o inventário resumido.</p>}
+                        </div>
+                    )}
+
                     <div className="flex justify-end">
                             <button
                                 type="submit"
-                                disabled={!file || uploadCarregando}
+                                disabled={!file || uploadCarregando || (tipoArquivo==='inventario_ppu' && ppuMode==='resumido' && (!ppuReviewFields.complete || !ppuReviewFields.observedOn))}
                                 className="bg-blue-600 text-white px-8 py-3 rounded-xl font-black hover:bg-blue-700 disabled:opacity-50"
                             >
-                                {uploadCarregando ? 'ENVIANDO...' : 'ENVIAR ARQUIVO'}
+                                {uploadCarregando ? 'ENVIANDO...' : tipoArquivo==='inventario_ppu' && ppuMode==='resumido' ? 'SIMULAR RECONCILIAÇÃO' : 'ENVIAR ARQUIVO'}
                             </button>
                         </div>
 
