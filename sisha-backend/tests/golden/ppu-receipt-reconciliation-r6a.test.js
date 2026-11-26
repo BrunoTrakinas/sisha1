@@ -47,3 +47,22 @@ test('R6 SQL migration contains single transaction, server-only RPC, receipt eve
   assert.match(s,/insert into public\.ppu_inventario_snapshots/);assert.match(s,/security invoker/);
   assert.doesNotMatch(s,/security definer/i);
 });
+
+test('R6 replay of the same current source hash submits no plan and cannot debit twice',async()=>{
+  const buffer=Buffer.from('fixture');
+  const hash=require('node:crypto').createHash('sha256').update(buffer).digest('hex');
+  const calls=[];
+  const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r6_context'?context({source_file_sha256:hash,previous_observed_on:opts.observedOn}):{status:'REUSED'}};}};
+  const args={supabase:db,parsed:{format:'PPU_LEGADO_TABULAR',items:[{source_section:'LEGADO_AGREGADO'}]},rows:[row(2)],buffer,fileName:'fixture.ods',logId:'fixture',user:{email:'test@example.invalid'},options:opts};
+  assert.equal((await importPpuR6(args)).status,'REUSED');
+  assert.deepEqual(calls[1].args.p_plan,[]);
+});
+test('R6 activation is gated and never falls back on failed transactional RPC',()=>{
+  const s=require('node:fs').readFileSync(require('node:path').resolve(__dirname,'../../src/controllers/importController.js'),'utf8');
+  assert.match(s,/process\.env\.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true'/);
+  const start=s.indexOf("if (process.env.PPU_RECEIPT_RECONCILIATION_ENABLED === 'true')");
+  const end=s.indexOf('if (estoqueAtualizado.length > 0)',start);
+  const block=s.slice(start,end);
+  assert.match(block,/await importPpuR6/);assert.match(block,/return respondSuccess/);
+  assert.doesNotMatch(block,/\.delete\(|\.insert\(|catch\s*\(/);
+});
