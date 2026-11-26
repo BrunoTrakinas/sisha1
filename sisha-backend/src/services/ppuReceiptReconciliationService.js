@@ -173,6 +173,18 @@ function buildRetroactiveReview(context, rows, options, plans=[]) {
   }
   return {counts,candidates,automatic:false};
 }
+function reviewUnclassifiedLocations(context, rows) {
+  const existing=new Set((context.policies||[]).map(p=>loc(p.localizacao_normalizada)));
+  const groups=new Map();
+  for(const r of rows){
+    const l=loc(r.localizacao);
+    if(!l||existing.has(l))continue;
+    const group=groups.get(l)||{location:l,rows:0};
+    group.rows++;
+    groups.set(l,group);
+  }
+  return [...groups.values()].sort((a,b)=>a.location.localeCompare(b.location));
+}
 function previewFingerprint({context,hash,options,plan,user}) {
   return crypto.createHash('sha256').update(JSON.stringify({
     version:'R7A',context:context.token,hash,actor:user.email,
@@ -215,7 +227,7 @@ async function importPpuR6({supabase,parsed,rows,rawRows,sheetCount,buffer,fileN
   const plan=buildR6Plan(context,rows,options);
   const previewToken=previewFingerprint({context,hash,options,plan:plan.plans,user});
   if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings,plans:plan.plans,previewToken,
-    retroactive:buildRetroactiveReview(context,rows,options,plan.plans),blockedSerialPns:plan.blockedSerialPns,serialEvidenceRows:native?rows.filter(r=>r.source_section==='EQUIPAMENTOS'&&r.sn).length:0};
+    retroactive:buildRetroactiveReview(context,rows,options,plan.plans),unclassifiedLocations:reviewUnclassifiedLocations(context,rows),blockedSerialPns:plan.blockedSerialPns,serialEvidenceRows:native?rows.filter(r=>r.source_section==='EQUIPAMENTOS'&&r.sn).length:0};
   requirePreview(options,previewToken);
   const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
     p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
@@ -278,4 +290,4 @@ async function continueBookSync(db, actor, snapshotId, syncFn) {
   if(finishError)throw finishError;
   return {...done,retryRequired:!ok};
 }
-module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview,getBookSyncStatus,continueBookSync};
+module.exports={buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview,getBookSyncStatus,continueBookSync,reviewUnclassifiedLocations};
