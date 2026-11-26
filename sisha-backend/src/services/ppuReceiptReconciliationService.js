@@ -85,8 +85,19 @@ async function importPpuR6({supabase,parsed,rows,buffer,fileName,logId,user,opti
     throw new Error('R6: pendências de leitura exigem conferência.');
   const {data:context,error:readError}=await supabase.rpc('sisha_ppu_r6_context');
   if(readError)throw readError;
-  const plan=buildR6Plan(context,rows,options);
   const hash=crypto.createHash('sha256').update(buffer).digest('hex');
+  if(context.source_file_sha256===hash && context.previous_observed_on===date(options.observedOn) && options.complete===true){
+    if(options.preview===true)return {status:'PREVIEW_REUSED',rows:rows.length,allocations:0,quantity:0};
+    const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
+      p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
+      p_observed_on:options.observedOn,p_previous_observed_on:null,p_previous_date_evidence:null,
+      p_complete:true,p_rows:rows,p_plan:[],p_actor:user.email
+    });
+    if(error)throw error;
+    if(data?.status!=='REUSED')throw new Error('R6: replay não confirmado.');
+    return data;
+  }
+  const plan=buildR6Plan(context,rows,options);
   if(options.preview===true)return {status:'PREVIEW',rows:rows.length,allocations:plan.plans.length,quantity:plan.plans.reduce((s,p)=>s+p.quantity,0),warnings:plan.warnings};
   const {data,error}=await supabase.rpc('sisha_ppu_r6_apply',{
     p_context_token:context.token,p_source_sha256:hash,p_file_name:fileName,p_import_log_id:logId,
