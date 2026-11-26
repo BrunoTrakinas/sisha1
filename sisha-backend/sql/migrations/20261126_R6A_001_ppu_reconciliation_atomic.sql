@@ -71,6 +71,7 @@ declare
   v_date date;
   v_changed integer:=0;
   v_sum numeric:=0;
+  v_log public.import_logs%rowtype;
 begin
   if p_complete is distinct from true or p_observed_on is null or p_observed_on>current_date
      or p_source_sha256 is null or p_source_sha256 !~ '^[0-9a-f]{64}$'
@@ -84,10 +85,13 @@ begin
   lock table public.estoque_ppu,public.ppu_localizacoes_config in share row exclusive mode;
   lock table public.recebimentos,public.recebimento_itens,public.equipamentos_serializados,
     public.locrec_importacoes,public.locrec_itens in share row exclusive mode;
-  if not exists(select 1 from public.import_logs l where l.id=p_import_log_id
-    and l.tipo_arquivo='inventario_ppu' and l.status='PROCESSANDO'
-    and l.detalhes->'arquivo'->>'sha256'=p_source_sha256
-    and l.nome_arquivo=p_file_name) then raise exception 'R6: trilha de upload invalida'; end if;
+  select l.* into v_log from public.import_logs l where l.id=p_import_log_id for update;
+  if not found or v_log.tipo_arquivo is distinct from 'inventario_ppu'
+    or v_log.status is distinct from 'PROCESSANDO'
+    or v_log.detalhes->'arquivo'->>'sha256' is distinct from p_source_sha256
+    or v_log.nome_arquivo is distinct from p_file_name
+    or v_log.uploaded_by_email is distinct from p_actor
+    then raise exception 'R6: trilha de upload invalida'; end if;
 
   select h.* into v_existing from public.ppu_inventario_snapshots h where h.source_file_sha256=p_source_sha256;
   if found then
@@ -96,6 +100,11 @@ begin
     if v_existing.observed_on is distinct from p_observed_on then raise exception 'R6: data divergente para arquivo ja importado'; end if;
     if v_existing.rows_sha256<>(select encode(sha256(convert_to(coalesce(jsonb_agg(to_jsonb(p) order by p.id),'[]'::jsonb)::text,'UTF8')),'hex') from public.estoque_ppu p)
       then raise exception 'R6: estoque alterado apos importacao'; end if;
+    update public.import_logs set status='SUCESSO',tabela_alvo='estoque_ppu',linhas_importadas=0,
+      mensagem='Inventario ja aplicado; nenhuma incorporacao repetida.',finished_at=now(),
+      detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r6_transaction',
+        jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'quantity',0))
+      where id=p_import_log_id;
     return jsonb_build_object('status','REUSED','snapshot_id',v_existing.id,'rows',v_existing.row_count,'items',0,'quantity',0);
   end if;
 
@@ -210,6 +219,13 @@ begin
   values(v_new_id,'IMPORTACAO',s.id,p_import_log_id,p_file_name,p_source_sha256,p_observed_on,
     v_count,jsonb_array_length(v_policies),v_rows,v_policies,
     encode(sha256(convert_to(v_rows::text,'UTF8')),'hex'),encode(sha256(convert_to(v_policies::text,'UTF8')),'hex'));
+  update public.import_logs set status='SUCESSO',tabela_alvo='estoque_ppu',
+    linhas_importadas=v_count, mensagem='Inventario e recibos atualizados atomicamente.',finished_at=now(),
+    detalhes=coalesce(detalhes,'{}'::jsonb)||jsonb_build_object('r6_transaction',
+      jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,
+        'quantity',v_sum,'observed_on',p_observed_on,'previous_observed_on',v_date,
+        'previous_date_evidence',case when s.observed_on is null then p_previous_date_evidence end))
+    where id=p_import_log_id;
   return jsonb_build_object('status','APPLIED','snapshot_id',v_new_id,'rows',v_count,'allocations',v_changed,'quantity',v_sum,
     'previous_observed_on',v_date,'previous_date_evidence',case when s.observed_on is null then p_previous_date_evidence end);
 end;
