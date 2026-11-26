@@ -238,6 +238,20 @@ begin
     v_sum:=v_sum+(v_entry.payload->>'quantity')::numeric;
   end loop;
 
+  -- R8: new locations must not be treated as available by the existing view's
+  -- COALESCE defaults. Register them in the existing location policy table as
+  -- unclassified/excluded, atomically with the imported inventory.
+  insert into public.ppu_localizacoes_config(localizacao_normalizada,localizacao_exibicao,
+    ativo,contabiliza_ppu,destino_contabilizacao,situacao_operacional,observacao,updated_by_email)
+  select public.sisha_normalize_location(x.localizacao),min(x.localizacao),
+    true,false,'FORA_LINHA','A_CONFIRMAR',
+    'Localizacao nova identificada no inventario; disponibilidade depende de classificacao Admin/Dono.',p_actor
+  from jsonb_to_recordset(p_rows) x(localizacao text)
+  where public.sisha_normalize_location(x.localizacao) is not null
+    and not exists(select 1 from public.ppu_localizacoes_config k
+      where k.localizacao_normalizada=public.sisha_normalize_location(x.localizacao))
+  group by public.sisha_normalize_location(x.localizacao);
+
   delete from public.estoque_ppu;
   insert into public.estoque_ppu(pn,nsn_pi,nomenclatura,quantidade,localizacao,sn)
   select x.pn,x.nsn_pi,x.nomenclatura,x.quantidade,x.localizacao,nullif(btrim(x.sn),'')
@@ -245,7 +259,12 @@ begin
   get diagnostics v_count=row_count;
   if v_count<>jsonb_array_length(p_rows) then raise exception 'R6: quantidade de linhas divergente'; end if;
   select jsonb_agg(to_jsonb(p) order by p.id) into v_rows from public.estoque_ppu p;
-  v_policies:=c->'policies';
+  -- Capture the policies actually committed, including the new excluded locations.
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'localizacao_normalizada',p.localizacao_normalizada,'ativo',p.ativo,
+    'contabiliza_ppu',p.contabiliza_ppu,'destino_contabilizacao',p.destino_contabilizacao,
+    'situacao_operacional',p.situacao_operacional) order by p.id),'[]'::jsonb)
+    into v_policies from public.ppu_localizacoes_config p;
   insert into public.ppu_inventario_snapshots(id,snapshot_type,previous_snapshot_id,import_log_id,
     source_file_name,source_file_sha256,observed_on,row_count,policy_count,rows_payload,policies_payload,rows_sha256,policies_sha256)
   values(v_new_id,'IMPORTACAO',s.id,p_import_log_id,p_file_name,p_source_sha256,p_observed_on,
