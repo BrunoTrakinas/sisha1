@@ -1,7 +1,7 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview}=require('../../src/services/ppuReceiptReconciliationService');
+const {buildR6Plan,importPpuR6,validateAggregateCoverage,buildRetroactiveReview,getRetroactiveReview,applyRetroactiveReview}=require('../../src/services/ppuReceiptReconciliationService');
 const row=(q,localizacao='A-1',sn=null)=>({pn:'P1',quantidade:q,localizacao,sn});
 const p=(localizacao_normalizada,contabiliza_ppu=true)=>({localizacao_normalizada,ativo:true,contabiliza_ppu});
 const rec=(id,q,extra={})=>({id,numero_recibo:String(id),ativo:true,data_recebimento:'2026-10-01',recebimento_itens:[{id:id*10,pn:'P1',ativo:true,quantidade:q,quantidade_inventariada:0,contabiliza_pelo_recibo:true,condicao_item:'RECEBIDO_DISPONIVEL',tipo_item:'SOBRESSALENTE',...extra}]});
@@ -107,4 +107,25 @@ test('R7 dedicated endpoint cannot fall back to old destructive importer',()=>{
  assert.match(controller,/req\.ppuReconciliationRequest && process\.env\.PPU_RECEIPT_RECONCILIATION_ENABLED !== 'true'/);
  assert.match(ui,/apiFetch\('\/import\/ppu\/reconciliacao'/);
  assert.match(ui,/previewToken/);
+});
+
+test('R7B1 historical review requires dated inventory, individual evidence and a fresh token',async()=>{
+ const c=context({source_file_sha256:'a'.repeat(64),previous_observed_on:'2026-11-26',previous_rows:[row(4)],receipts:[rec(1,4)],locrec:[{id:99,numero_recibo:'1',pn:'P1',qtd_documental:4,qtd_auditada_aplicada:3,loc_escolhida:'A-1',destino_indicado:'PPU',data_auditoria:'2026-10-02'}]});
+ let current=c;const calls=[];
+ const db={rpc:async(n,args)=>{calls.push({n,args});return {data:n==='sisha_ppu_r6_context'?current:{status:'APPLIED',pending:3}};}};
+ const actor='fixture@example.invalid';
+ const review=await getRetroactiveReview(db,actor);
+ assert.equal(review.status,'REVIEW_READY');assert.equal(review.candidates[0].candidateQuantity,3);
+ const body={token:review.token,itemId:10,locrecId:99,quantity:1,evidence:'Synthetic actual entry reference',confirmed:true};
+ await assert.rejects(applyRetroactiveReview(db,actor,{...body,confirmed:false}),/Confirme/);
+ await assert.rejects(applyRetroactiveReview(db,actor,{...body,quantity:4}),/não elegível/);
+ await assert.rejects(applyRetroactiveReview(db,'other@example.invalid',body),/desatualizada/);
+ current={...c,token:'changed'};
+ await assert.rejects(applyRetroactiveReview(db,actor,body),/desatualizada/);
+ assert.equal(calls.filter(c=>c.n==='sisha_ppu_r7_retro_apply').length,0);
+ current=c;
+ assert.equal((await applyRetroactiveReview(db,actor,body)).status,'APPLIED');
+ assert.equal(calls.filter(c=>c.n==='sisha_ppu_r7_retro_apply').length,1);
+ current={...c,source_file_sha256:null,previous_observed_on:null};
+ assert.equal((await getRetroactiveReview(db,actor)).status,'WAITING_NEW_INVENTORY');
 });
