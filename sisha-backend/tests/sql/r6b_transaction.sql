@@ -69,3 +69,59 @@ do $$ begin
  or has_function_privilege('authenticated','public.sisha_ppu_r6_context()','EXECUTE') then raise exception 'RPC privilege leak'; end if;
  raise notice 'R6B PASS RPC ACL';
 end $$;
+
+-- R7B1: historical review uses the same dated snapshot and never replaces stock.
+-- Roll back all fixture changes so the separate R6 concurrency test sees its baseline.
+begin;
+set local role service_role;
+insert into public.locrec_importacoes(id,status) values('00000000-0000-4000-8000-000000000099','ACTIVE');
+insert into public.locrec_itens(id,import_id,numero_recibo,pn,qtd_documental,qtd_auditada_aplicada,loc_escolhida,destino_indicado,data_auditoria)
+values(99,'00000000-0000-4000-8000-000000000099','FIXTURE-1','FIXTURE-PN',4,2,'A-1','PPU','2025-01-15');
+do $$
+declare
+ token text:=public.sisha_ppu_r6_context()->>'token';
+ result jsonb;
+ before_stock jsonb:=(select jsonb_agg(to_jsonb(x) order by id) from public.estoque_ppu x);
+begin
+ begin
+  perform public.sisha_ppu_r7_retro_apply(token,1,99,2,'Synthetic actual stock entry document','fixture@example.invalid');
+  raise exception 'expected excessive historical debit rejection';
+ exception when raise_exception then
+  if sqlerrm not like '%quantidade insuficiente%' then raise; end if;
+ end;
+ if (select quantidade_inventariada from public.recebimento_itens where id=1)<>1 then raise exception 'overdebit altered balance'; end if;
+ begin
+  perform public.sisha_ppu_r7_retro_apply(token,1,99,1,'short','fixture@example.invalid');
+  raise exception 'expected documentary evidence rejection';
+ exception when raise_exception then
+  if sqlerrm not like '%evidencia de entrada%' then raise; end if;
+ end;
+ result:=public.sisha_ppu_r7_retro_apply(token,1,99,1,'Synthetic actual stock entry document','fixture@example.invalid');
+ if result->>'status'<>'APPLIED' or (result->>'pending')::numeric<>2
+    or (select quantidade_inventariada from public.recebimento_itens where id=1)<>2
+    or (select quantidade from public.recebimento_itens where id=1)<>4
+    or (select count(*) from public.recebimento_eventos where detalhe->>'origem'='R7_RETRO_PPU')<>1
+    or (select jsonb_agg(to_jsonb(x) order by id) from public.estoque_ppu x) is distinct from before_stock
+    or (select count(*) from public.ppu_inventario_snapshots)<>2
+ then raise exception 'retroactive controlled application failed'; end if;
+ begin
+  perform public.sisha_ppu_r7_retro_apply(token,1,99,1,'Synthetic actual stock entry document','fixture@example.invalid');
+  raise exception 'expected historical replay rejection';
+ exception when raise_exception then
+  if sqlerrm not like '%contexto mudou%' then raise; end if;
+ end;
+ begin
+  perform public.sisha_ppu_r7_retro_apply(public.sisha_ppu_r6_context()->>'token',1,99,1,'Synthetic actual stock entry document','fixture@example.invalid');
+  raise exception 'expected consumed LOCREC rejection';
+ exception when raise_exception then
+  if sqlerrm not like '%quantidade insuficiente%' then raise; end if;
+ end;
+ raise notice 'R7B1 PASS historical bounds, audit, stock unchanged and replay';
+end $$;
+rollback;
+do $$ begin
+ if has_function_privilege('anon','public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text)','EXECUTE')
+ or has_function_privilege('authenticated','public.sisha_ppu_r7_retro_apply(text,bigint,bigint,numeric,text,text)','EXECUTE')
+ then raise exception 'R7B1 privilege leak'; end if;
+ raise notice 'R7B1 PASS historical ACL';
+end $$;
